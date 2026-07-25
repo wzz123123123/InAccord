@@ -26,6 +26,11 @@ $required = @(
   'apps/control-plane/worker/build.gradle',
   'apps/control-plane/modules/platform-kernel/build.gradle',
   'apps/control-plane/modules/reliability/build.gradle',
+  'database/control-plane/build.gradle',
+  'database/control-plane/buildscript-gradle.lockfile',
+  'config/testcontainers/testcontainers.properties',
+  'database/control-plane/src/test/java/com/inforvans/accord/database/TestcontainersConfigurationTest.java',
+  'tests/integration/src/test/java/com/inforvans/accord/integration/TestcontainersConfigurationTest.java',
   'apps/webhook-edge/build.gradle',
   'security-services/signing-service/build.gradle',
   'security-services/merge-controller/build.gradle',
@@ -45,13 +50,16 @@ $required = @(
   'apps/agent-runtime/src/accord_agent_runtime/__init__.py',
   'apps/agent-runtime/src/accord_agent_runtime/boundary.py',
   'apps/agent-runtime/tests/test_bootstrap.py',
-  'scripts/run-gradle.ps1'
+  'scripts/run-gradle.ps1',
+  'scripts/generate-control-plane-jooq.ps1',
+  'tests/bootstrap/verify-control-plane-jooq-generator.ps1'
 )
 $gradleProjectDirectories = @(
   'apps/control-plane/api',
   'apps/control-plane/worker',
   'apps/control-plane/modules/platform-kernel',
   'apps/control-plane/modules/reliability',
+  'database/control-plane',
   'apps/webhook-edge',
   'security-services/signing-service',
   'security-services/merge-controller',
@@ -69,7 +77,7 @@ $missing = $required | Where-Object { -not (Test-Path -LiteralPath $_ -PathType 
 if ($missing.Count -gt 0) {
   throw "Missing workspace files: $($missing -join ', ')"
 }
-$sourceRoots = @('apps', 'security-services', 'cmd', 'libs', 'tests')
+$sourceRoots = @('apps', 'database', 'security-services', 'cmd', 'libs', 'tests')
 $generatedDirectoryPattern = '[\\/](?:\.gradle|\.venv|node_modules|build|dist|\.pytest_cache|__pycache__|\.mypy_cache|\.ruff_cache)[\\/]'
 $forbiddenDirectories = Get-ChildItem $sourceRoots -Directory -Recurse -ErrorAction SilentlyContinue |
   Where-Object {
@@ -86,9 +94,11 @@ $approvedExtensions = @(
   '.jar', '.sha256'
 )
 $approvedExtensionlessNames = @('Dockerfile', 'gradlew')
+$generatedFileNames = @('.jqwik-database')
 $unexpectedRuntimeFiles = Get-ChildItem $sourceRoots -Recurse -File -ErrorAction SilentlyContinue |
   Where-Object {
     $_.FullName -notmatch $generatedDirectoryPattern -and
+    $_.Name -notin $generatedFileNames -and
     $_.Extension -notin $approvedExtensions -and
     $_.Name -notin $approvedExtensionlessNames
   }
@@ -102,6 +112,7 @@ $settings = Get-Content -Raw -Encoding utf8 settings.gradle
   ':apps:control-plane:worker',
   ':apps:control-plane:modules:platform-kernel',
   ':apps:control-plane:modules:reliability',
+  ':database:control-plane',
   ':apps:webhook-edge',
   ':security-services:signing-service',
   ':security-services:merge-controller',
@@ -136,5 +147,50 @@ $expectedWrapperJarHash = (Get-Content -Raw -Encoding ascii gradle/wrapper/gradl
 $actualWrapperJarHash = (Get-FileHash -Algorithm SHA256 gradle/wrapper/gradle-wrapper.jar).Hash.ToLowerInvariant()
 if ($actualWrapperJarHash -cne $expectedWrapperJarHash) {
   throw "Gradle wrapper JAR checksum mismatch: $actualWrapperJarHash"
+}
+$canonicalTestcontainersProperties = 'config/testcontainers/testcontainers.properties'
+$testcontainersPins = @(
+  Get-Content -Encoding ascii -LiteralPath $canonicalTestcontainersProperties
+)
+$expectedTestcontainersPins = @(
+  'ryuk.container.image=testcontainers/ryuk:0.12.0@sha256:dd3f023a6ed7015b3f95a49ccd65a2daf0c56e681422c12952b19a810dfa6298',
+  'tinyimage.container.image=alpine:3.17@sha256:8fc3dacfb6d69da8d44e42390de777e48577085db99aa4e4af35f483eb08b989'
+)
+if (($testcontainersPins -join "`n") -cne ($expectedTestcontainersPins -join "`n")) {
+  throw 'Testcontainers helper image pins are absent, reordered, or incorrect'
+}
+$rootBuild = (Get-Content -Raw -Encoding utf8 -LiteralPath 'build.gradle') -replace "`r`n", "`n"
+$expectedTestcontainersDeclaration =
+  "def testcontainersConfigDirectory = layout.projectDirectory.dir('config/testcontainers')"
+$expectedTestcontainersSourceSet = @(
+  "    plugins.withId('java') {",
+  '        sourceSets {',
+  '            test {',
+  '                resources.srcDir(testcontainersConfigDirectory)',
+  '            }',
+  '        }',
+  '        java {'
+) -join "`n"
+$expectedDuplicateFailure = @(
+  "        tasks.named('processTestResources').configure {",
+  '            duplicatesStrategy = DuplicatesStrategy.FAIL',
+  '        }'
+) -join "`n"
+@(
+  $expectedTestcontainersDeclaration,
+  $expectedTestcontainersSourceSet,
+  $expectedDuplicateFailure
+) | ForEach-Object {
+  if ([regex]::Matches($rootBuild, [regex]::Escape($_)).Count -ne 1) {
+    throw 'Global Testcontainers test-resource wiring is absent, duplicated, or incorrect'
+  }
+}
+$unexpectedTestcontainersProperties = @(
+  Get-ChildItem $sourceRoots -Recurse -File -Filter 'testcontainers.properties' `
+      -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -notmatch $generatedDirectoryPattern }
+)
+if ($unexpectedTestcontainersProperties.Count -gt 0) {
+  throw "Module-local Testcontainers properties found: $($unexpectedTestcontainersProperties.FullName -join ', ')"
 }
 Write-Output 'workspace-layout: PASS'

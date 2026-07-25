@@ -24,10 +24,18 @@ dependencies {
     platformBaselines enforcedPlatform(libs.slf4j.bom)
 }
 
+def dockerApiVersion = providers.environmentVariable('DOCKER_API_VERSION').orElse('1.40')
+def testcontainersConfigDirectory = layout.projectDirectory.dir('config/testcontainers')
+
 dependencyLocking { lockAllConfigurations() }
 
 subprojects {
     plugins.withId('java') {
+        sourceSets {
+            test {
+                resources.srcDir(testcontainersConfigDirectory)
+            }
+        }
         java {
             toolchain {
                 languageVersion = JavaLanguageVersion.of(21)
@@ -43,6 +51,12 @@ subprojects {
             options.compilerArgs += ['-parameters', '-Xlint:all', '-Werror']
         }
         tasks.withType(Test).configureEach { useJUnitPlatform() }
+        tasks.withType(Test).configureEach {
+            systemProperty 'api.version', dockerApiVersion.get()
+        }
+        tasks.named('processTestResources').configure {
+            duplicatesStrategy = DuplicatesStrategy.FAIL
+        }
         tasks.withType(AbstractArchiveTask).configureEach {
             preserveFileTimestamps = false
             reproducibleFileOrder = true

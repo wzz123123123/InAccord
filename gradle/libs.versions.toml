@@ -34,6 +34,7 @@ flyway-core = { module = "org.flywaydb:flyway-core", version.ref = "flyway" }
 flyway-postgresql = { module = "org.flywaydb:flyway-database-postgresql", version.ref = "flyway" }
 postgresql = { module = "org.postgresql:postgresql", version = "42.7.7" }
 jooq-codegen = { module = "org.jooq:jooq-codegen", version.ref = "jooq" }
+jooq-runtime = { module = "org.jooq:jooq", version.ref = "jooq" }
 testcontainers-postgresql = { module = "org.testcontainers:postgresql", version.ref = "testcontainers" }
 testcontainers-junit = { module = "org.testcontainers:junit-jupiter", version.ref = "testcontainers" }
 archunit-junit = { module = "com.tngtech.archunit:archunit-junit5", version.ref = "archunit" }
@@ -52,9 +53,12 @@ jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", ver
 jackson-core = { module = "com.fasterxml.jackson.core:jackson-core", version.ref = "jackson" }
 jackson-bom = { module = "com.fasterxml.jackson:jackson-bom", version.ref = "jackson" }
 slf4j-bom = { module = "org.slf4j:slf4j-bom", version.ref = "slf4j" }
+slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j" }
 
 [plugins]
 spring-boot = { id = "org.springframework.boot", version.ref = "spring-boot" }
+flyway = { id = "org.flywaydb.flyway", version.ref = "flyway" }
+jooq-codegen = { id = "org.jooq.jooq-codegen-gradle", version.ref = "jooq" }
 cyclonedx = { id = "org.cyclonedx.bom", version.ref = "cyclonedx" }
 pitest = { id = "info.solidsoft.pitest", version.ref = "pitest-gradle" }
 jlink = { id = "org.beryx.jlink", version.ref = "jlink" }

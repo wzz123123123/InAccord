@@ -28,6 +28,7 @@ include(
     ':apps:control-plane:worker',
     ':apps:control-plane:modules:platform-kernel',
     ':apps:control-plane:modules:reliability',
+    ':database:control-plane',
     ':apps:webhook-edge',
     ':security-services:signing-service',
     ':security-services:merge-controller',

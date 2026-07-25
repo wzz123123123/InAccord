@@ -571,6 +571,7 @@ dependencies {
     testImplementation libs.json.schema.validator
     testImplementation libs.testcontainers.junit
     testImplementation libs.testcontainers.postgresql
+    testRuntimeOnly libs.slf4j.simple
 }
 
 ```
@@ -1900,7 +1901,9 @@ dependencies {
     api libs.spring.modulith.api
     implementation libs.jackson.core
     implementation libs.jcs
-    testImplementation platform(libs.junit.bom)
+    testImplementation enforcedPlatform(libs.junit.bom)
+    testImplementation enforcedPlatform(libs.jackson.bom)
+    testImplementation enforcedPlatform(libs.slf4j.bom)
     testImplementation libs.junit.jupiter
     testImplementation libs.assertj.core
 }
@@ -1917,7 +1920,9 @@ dependencies {
     implementation project(':apps:control-plane:modules:platform-kernel')
     api platform(libs.spring.modulith.bom)
     api libs.spring.modulith.api
-    testImplementation platform(libs.junit.bom)
+    testImplementation enforcedPlatform(libs.junit.bom)
+    testImplementation enforcedPlatform(libs.jackson.bom)
+    testImplementation enforcedPlatform(libs.slf4j.bom)
     testImplementation libs.junit.jupiter
     testImplementation libs.assertj.core
 }
@@ -2294,13 +2299,33 @@ git commit -m "feat: enforce control-plane module boundaries"
 - Create: `database/control-plane/migrations/V001__platform_command_state.sql`
 - Create: `database/control-plane/src/testFixtures/java/com/inforvans/accord/database/ControlPlaneTestRoles.java`
 - Create: `database/control-plane/src/test/java/com/inforvans/accord/database/PlatformMigrationTest.java`
+- Create: `database/control-plane/src/test/java/com/inforvans/accord/database/TestcontainersConfigurationTest.java`
+- Create: `tests/integration/src/test/java/com/inforvans/accord/integration/TestcontainersConfigurationTest.java`
+- Create: `config/testcontainers/testcontainers.properties`
+- Create: `scripts/generate-control-plane-jooq.ps1`
+- Create: `tests/bootstrap/verify-control-plane-jooq-generator.ps1`
+- Modify: `.gitignore`
+- Modify: `build.gradle`
 - Modify: `settings.gradle`
 - Modify: `gradle/libs.versions.toml`
+- Modify: `tests/bootstrap/verify-workspace.ps1`
+- Modify: `docs/superpowers/plans/2026-07-24-accord-platform-foundation-plan.md`
+- Generate: `database/control-plane/gradle.lockfile`
+- Generate: `database/control-plane/buildscript-gradle.lockfile`
+- Modify: `gradle/verification-metadata.xml`
 - Generate: `database/control-plane/build/generated-src/jooq/**`
 
 - [ ] **Step 1: Register a test-capable database project and write the failing migration contract test**
 
-Add `include(":database:control-plane")` to `settings.gradle`, then create this test-capable `database/control-plane/build.gradle` before invoking its Gradle target:
+Add `include(":database:control-plane")` to `settings.gradle`, add the same project and its lock to
+`tests/bootstrap/verify-workspace.ps1`, and add this catalog alias before creating the test-capable
+database build:
+
+```toml
+jooq-runtime = { module = "org.jooq:jooq", version.ref = "jooq" }
+```
+
+Create `database/control-plane/build.gradle` before invoking its Gradle target:
 
 ```groovy
 plugins {
@@ -2309,15 +2334,19 @@ plugins {
 }
 
 dependencies {
-    implementation libs.postgresql
-    testFixturesImplementation libs.postgresql
-    testImplementation platform(libs.junit.bom)
+    api libs.jooq.runtime
+    runtimeOnly libs.postgresql
+    testFixturesRuntimeOnly libs.postgresql
+    testImplementation enforcedPlatform(libs.junit.bom)
+    testImplementation enforcedPlatform(libs.jackson.bom)
+    testImplementation enforcedPlatform(libs.slf4j.bom)
     testImplementation libs.junit.jupiter
     testImplementation libs.assertj.core
     testImplementation libs.flyway.core
     testImplementation libs.flyway.postgresql
     testImplementation libs.testcontainers.junit
     testImplementation libs.testcontainers.postgresql
+    testRuntimeOnly libs.slf4j.simple
 }
 
 sourceSets {
@@ -2332,69 +2361,204 @@ sourceSets {
 tasks.withType(Test).configureEach { useJUnitPlatform() }
 ```
 
+Before the intended RED test, run lock and verification-metadata generation with configuration
+cache disabled. This is supply-chain bootstrap, not a behavioral GREEN: the subsequent test must
+reach PostgreSQL and fail on the missing role/schema behavior rather than fail dependency
+verification. Commit neither an unlocked configuration nor an artifact without SHA-256 or scoped
+trusted-signature evidence.
+
+The root Java test convention must map process environment `DOCKER_API_VERSION` to the docker-java
+JVM system property `api.version`, defaulting to `1.40`. Testcontainers 1.21.3 otherwise falls back
+to API 1.32, which modern Docker Engine 29 rejects before any container starts. Keep the override
+centrally applied to every `Test` task so all current and future Testcontainers suites use the same
+declared compatibility floor.
+
+Pin Testcontainers 1.21.3's helper images once through
+`config/testcontainers/testcontainers.properties` using the reviewed repository digests, without
+disabling Ryuk:
+
+```properties
+ryuk.container.image=testcontainers/ryuk:0.12.0@sha256:dd3f023a6ed7015b3f95a49ccd65a2daf0c56e681422c12952b19a810dfa6298
+tinyimage.container.image=alpine:3.17@sha256:8fc3dacfb6d69da8d44e42390de777e48577085db99aa4e4af35f483eb08b989
+```
+
+The root Java convention adds that canonical directory to every Java project's test resources and
+sets every `processTestResources` task to `DuplicatesStrategy.FAIL`; a module-local file therefore
+fails instead of shadowing or duplicating the canonical resource. Effective-configuration tests in
+both the database project and the independent `tests:integration` project assert both pins and
+reject `TESTCONTAINERS_RYUK_DISABLED=true`. `verify-workspace.ps1` compares the canonical file to
+these two exact ordered lines, verifies the global Gradle wiring, and rejects any other source-level
+`testcontainers.properties`. Test execution may create `.jqwik-database`; it is generated cache
+state and remains ignored rather than becoming a repository artifact.
+
 Create `database/control-plane/bootstrap/00-pre-flyway-roles.sql` as the administrator-owned prerequisite. It is the only place that creates database roles; Flyway remains `NOCREATEROLE`, and no default table privilege is installed:
 
 ```sql
 \set ON_ERROR_STOP on
 
+BEGIN;
+
 DO $roles$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='accord_migrator') THEN
-    CREATE ROLE accord_migrator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    CREATE ROLE accord_migrator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='accord_api') THEN
-    CREATE ROLE accord_api NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    CREATE ROLE accord_api NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='accord_worker') THEN
-    CREATE ROLE accord_worker NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    CREATE ROLE accord_worker NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='accord_migrator_login') THEN
-    CREATE ROLE accord_migrator_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD NULL;
+    CREATE ROLE accord_migrator_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='accord_api_login') THEN
-    CREATE ROLE accord_api_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD NULL;
+    CREATE ROLE accord_api_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='accord_worker_login') THEN
-    CREATE ROLE accord_worker_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD NULL;
+    CREATE ROLE accord_worker_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
   END IF;
 END $roles$;
 
-ALTER ROLE accord_migrator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
-ALTER ROLE accord_api NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
-ALTER ROLE accord_worker NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
-ALTER ROLE accord_migrator_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
-ALTER ROLE accord_api_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
-ALTER ROLE accord_worker_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+ALTER ROLE accord_migrator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+ALTER ROLE accord_api NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+ALTER ROLE accord_worker NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+ALTER ROLE accord_migrator_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+ALTER ROLE accord_api_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+ALTER ROLE accord_worker_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
 
-REVOKE accord_migrator, accord_api, accord_worker FROM accord_migrator_login, accord_api_login, accord_worker_login;
-GRANT accord_migrator TO accord_migrator_login WITH INHERIT FALSE;
-GRANT accord_migrator TO accord_migrator_login WITH SET TRUE;
-GRANT accord_migrator TO accord_migrator_login WITH ADMIN FALSE;
-GRANT accord_api TO accord_api_login WITH INHERIT FALSE;
-GRANT accord_api TO accord_api_login WITH SET TRUE;
-GRANT accord_api TO accord_api_login WITH ADMIN FALSE;
-GRANT accord_worker TO accord_worker_login WITH INHERIT FALSE;
-GRANT accord_worker TO accord_worker_login WITH SET TRUE;
-GRANT accord_worker TO accord_worker_login WITH ADMIN FALSE;
+DO $memberships$
+DECLARE edge record;
+BEGIN
+  FOR edge IN
+    SELECT granted.rolname AS granted_name, member.rolname AS member_name,
+      grantor.rolname AS grantor_name
+    FROM pg_catalog.pg_auth_members membership
+    JOIN pg_catalog.pg_roles granted ON granted.oid = membership.roleid
+    JOIN pg_catalog.pg_roles member ON member.oid = membership.member
+    JOIN pg_catalog.pg_roles grantor ON grantor.oid = membership.grantor
+    WHERE member.rolname IN (
+      'accord_migrator', 'accord_api', 'accord_worker',
+      'accord_migrator_login', 'accord_api_login', 'accord_worker_login')
+      OR granted.rolname IN (
+        'accord_migrator', 'accord_api', 'accord_worker',
+        'accord_migrator_login', 'accord_api_login', 'accord_worker_login')
+  LOOP
+    EXECUTE pg_catalog.format(
+      'REVOKE %I FROM %I GRANTED BY %I CASCADE',
+      edge.granted_name, edge.member_name, edge.grantor_name);
+  END LOOP;
+END $memberships$;
+
+GRANT accord_migrator TO accord_migrator_login WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
+GRANT accord_api TO accord_api_login WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
+GRANT accord_worker TO accord_worker_login WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
+
+DO $owners$
+BEGIN
+  EXECUTE pg_catalog.format(
+    'ALTER DATABASE %I OWNER TO accord_migrator', pg_catalog.current_database());
+  ALTER SCHEMA public OWNER TO accord_migrator;
+END $owners$;
 
 DO $database$
+DECLARE grantee_name text;
 BEGIN
-  EXECUTE format(
+  EXECUTE pg_catalog.format(
+    'REVOKE ALL ON DATABASE %I FROM PUBLIC', pg_catalog.current_database());
+  FOR grantee_name IN
+    SELECT DISTINCT grantee.rolname
+    FROM pg_catalog.pg_database database
+    CROSS JOIN LATERAL pg_catalog.aclexplode(
+      COALESCE(database.datacl, pg_catalog.acldefault('d', database.datdba))) acl
+    JOIN pg_catalog.pg_roles grantee ON grantee.oid = acl.grantee
+    WHERE database.datname = pg_catalog.current_database()
+      AND acl.grantee <> database.datdba
+  LOOP
+    EXECUTE pg_catalog.format(
+      'REVOKE ALL PRIVILEGES ON DATABASE %I FROM %I CASCADE',
+      pg_catalog.current_database(), grantee_name);
+  END LOOP;
+  EXECUTE pg_catalog.format(
     'GRANT CONNECT ON DATABASE %I TO accord_migrator_login, accord_api_login, accord_worker_login',
-    current_database()
-  );
-  EXECUTE format('GRANT CREATE ON DATABASE %I TO accord_migrator', current_database());
+    pg_catalog.current_database());
 END $database$;
-REVOKE ALL ON SCHEMA public FROM accord_migrator_login, accord_api_login, accord_worker_login, accord_api, accord_worker;
-GRANT USAGE, CREATE ON SCHEMA public TO accord_migrator;
+DO $schema_acl$
+DECLARE grantee record;
+BEGIN
+  FOR grantee IN
+    SELECT acl.grantee AS grantee_oid, roles.rolname AS grantee_name
+    FROM pg_catalog.pg_namespace namespace
+    CROSS JOIN LATERAL pg_catalog.aclexplode(
+      COALESCE(namespace.nspacl, pg_catalog.acldefault('n', namespace.nspowner))) acl
+    LEFT JOIN pg_catalog.pg_roles roles ON roles.oid = acl.grantee
+    WHERE namespace.nspname = 'public' AND acl.grantee <> namespace.nspowner
+    GROUP BY acl.grantee, roles.rolname
+  LOOP
+    IF grantee.grantee_oid = 0 THEN
+      REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC CASCADE;
+    ELSE
+      EXECUTE pg_catalog.format(
+        'REVOKE ALL PRIVILEGES ON SCHEMA public FROM %I CASCADE', grantee.grantee_name);
+    END IF;
+  END LOOP;
+END $schema_acl$;
+
 GRANT USAGE ON SCHEMA public TO accord_api, accord_worker;
-ALTER DEFAULT PRIVILEGES FOR ROLE accord_migrator IN SCHEMA public REVOKE ALL ON TABLES FROM accord_api, accord_worker;
+
+DO $default_table_acl$
+DECLARE grantee record;
+BEGIN
+  FOR grantee IN
+    SELECT defaults.defaclnamespace AS namespace_oid,
+      acl.grantee AS grantee_oid, roles.rolname AS grantee_name
+    FROM pg_catalog.pg_default_acl defaults
+    CROSS JOIN LATERAL pg_catalog.aclexplode(defaults.defaclacl) acl
+    JOIN pg_catalog.pg_roles owner ON owner.oid = defaults.defaclrole
+    LEFT JOIN pg_catalog.pg_namespace namespace ON namespace.oid = defaults.defaclnamespace
+    LEFT JOIN pg_catalog.pg_roles roles ON roles.oid = acl.grantee
+    WHERE owner.rolname = 'accord_migrator'
+      AND (defaults.defaclnamespace = 0 OR namespace.nspname = 'public')
+      AND defaults.defaclobjtype = 'r' AND acl.grantee <> defaults.defaclrole
+    GROUP BY defaults.defaclnamespace, acl.grantee, roles.rolname
+  LOOP
+    IF grantee.namespace_oid = 0 THEN
+      IF grantee.grantee_oid = 0 THEN
+        ALTER DEFAULT PRIVILEGES FOR ROLE accord_migrator
+          REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC CASCADE;
+      ELSE
+        EXECUTE pg_catalog.format(
+          'ALTER DEFAULT PRIVILEGES FOR ROLE accord_migrator REVOKE ALL PRIVILEGES ON TABLES FROM %I CASCADE',
+          grantee.grantee_name);
+      END IF;
+    ELSIF grantee.grantee_oid = 0 THEN
+      ALTER DEFAULT PRIVILEGES FOR ROLE accord_migrator IN SCHEMA public
+        REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC CASCADE;
+    ELSE
+      EXECUTE pg_catalog.format(
+        'ALTER DEFAULT PRIVILEGES FOR ROLE accord_migrator IN SCHEMA public REVOKE ALL PRIVILEGES ON TABLES FROM %I CASCADE',
+        grantee.grantee_name);
+    END IF;
+  END LOOP;
+END $default_table_acl$;
+
+COMMIT;
 ```
 
 The three uncredentialed roles are the only control-plane object/privilege principals. Secret
 provisioning assigns passwords only to the three `_login` roles. Those LOGIN roles have no direct
 schema or table grants, cannot inherit privileges, cannot set a sibling role, and receive exactly one
 membership with `SET TRUE`, `INHERIT FALSE`, and `ADMIN FALSE`.
+Before installing those three edges, the bootstrap dynamically revokes every membership where
+either the member or granted role is one of the six principals. It makes `accord_migrator` the exact
+owner of both the current database and `public` schema before ACL reconciliation, so migration
+authority is implicit owner authority rather than a redundant explicit ACL row. It then revokes
+every non-owner database ACL before granting only `CONNECT` to the LOGIN roles; every non-owner
+`public` schema ACL before granting only `USAGE` to `accord_api`/`accord_worker`; and every non-owner
+global or explicit-`public` default table ACL for `accord_migrator`. The entire bootstrap is enclosed
+in one explicit transaction, so a late failure rolls back role attributes, memberships, ownership,
+and ACL changes together. Re-running it therefore converges direct, reverse, transitive,
+grant-option, owner, and previously unknown hostile state rather than merely adding approved grants.
 
 Create `ControlPlaneTestRoles.java` in the test-fixture source set. It executes the same role attributes and memberships immediately after a Testcontainer starts, including the `accord_audit_test` role needed by later audit tests, but it never grants table default privileges:
 
@@ -2448,7 +2612,8 @@ public final class ControlPlaneTestRoles {
                 BEGIN
                   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='accord_audit_test') THEN
                     CREATE ROLE accord_audit_test LOGIN PASSWORD 'audit-test'
-                      NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+                      NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
+                      NOREPLICATION NOBYPASSRLS;
                   END IF;
                 END $roles$;
                 """);
@@ -2457,9 +2622,8 @@ public final class ControlPlaneTestRoles {
             statement.execute("ALTER ROLE " + WORKER_LOGIN + " PASSWORD '" + WORKER_PASSWORD + "'");
 
             String database = "\"" + connection.getCatalog().replace("\"", "\"\"") + "\"";
-            statement.execute("GRANT CONNECT ON DATABASE " + database + " TO "
-                + MIGRATOR_LOGIN + ", " + API_LOGIN + ", " + WORKER_LOGIN);
-            statement.execute("GRANT USAGE ON SCHEMA public TO accord_audit_test");
+            statement.execute("GRANT CONNECT ON DATABASE " + database
+                + " TO accord_audit_test");
         } catch (IOException | SQLException error) {
             throw new IllegalStateException("cannot bootstrap control-plane test roles", error);
         }
@@ -2487,11 +2651,15 @@ import java.util.List;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.utility.DockerImageName;
 
 class PlatformMigrationTest {
     @Test
     void migrationCreatesTenantScopedAggregateAndIdempotencyState() throws Exception {
-        try (PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:17.5")) {
+        DockerImageName postgresImage = DockerImageName.parse(
+            "postgres:17.5@sha256:aadf2c0696f5ef357aa7a68da995137f0cf17bad0bf6e1f17de06ae5c769b302")
+            .asCompatibleSubstituteFor("postgres");
+        try (PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>(postgresImage)) {
             postgres.start();
             ControlPlaneTestRoles.bootstrap(
                 postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
@@ -2502,7 +2670,7 @@ class PlatformMigrationTest {
                     ControlPlaneTestRoles.MIGRATOR_LOGIN,
                     ControlPlaneTestRoles.MIGRATOR_PASSWORD)
                 .initSql("SET ROLE accord_migrator")
-                .locations("filesystem:migrations")
+                .locations("classpath:db/migration")
                 .load()
                 .migrate();
 
@@ -2676,6 +2844,19 @@ class PlatformMigrationTest {
 }
 ```
 
+Split the class into independently named tests over one PostgreSQL 17.5 container: role/default
+privileges, table/constraint/owner contract, function ACL/search-path contract, exact RLS/grant
+catalog contract, and behavioral tenant isolation. The behavioral test must use runtime and owner
+sessions to prove all of the following against real rows: missing tenant context returns no rows
+and rejects writes; tenant A cannot select/update/delete tenant B; a wrong-tenant insert and a
+tenant-id move both fail with RLS SQLSTATE `42501`; `accord_migrator`, although table owner, remains
+constrained by `FORCE ROW LEVEL SECURITY`; malformed tenant context fails rather than broadening
+access; and `set_config('app.tenant_id', ..., true)` disappears after commit and rollback. Assert
+that PUBLIC has neither database CONNECT/TEMPORARY nor schema privileges, both security functions
+are `SECURITY INVOKER`, owned by `accord_migrator`, executable only by their declared roles, and
+have exactly `search_path=pg_catalog, pg_temp`. Also prove inserting stored aggregate version zero
+fails while version one succeeds.
+
 - [ ] **Step 2: Run the test and verify the migration is absent**
 
 Run: `./gradlew :database:control-plane:test --tests '*PlatformMigrationTest'`
@@ -2687,18 +2868,34 @@ Expected: FAIL from PostgreSQL with `relation "aggregate_head" does not exist`; 
 Add these entries to `gradle/libs.versions.toml`:
 
 ```toml
-[versions]
-flyway-plugin = "11.8.2"
-jooq-plugin = "3.19.24"
-
 [plugins]
-flyway = { id = "org.flywaydb.flyway", version.ref = "flyway-plugin" }
-jooq-codegen = { id = "org.jooq.jooq-codegen-gradle", version.ref = "jooq-plugin" }
+flyway = { id = "org.flywaydb.flyway", version.ref = "flyway" }
+jooq-codegen = { id = "org.jooq.jooq-codegen-gradle", version.ref = "jooq" }
 ```
+
+The existing `flyway = "11.8.2"` and `jooq = "3.19.24"` version keys remain the single version
+source; do not add plugin-only duplicates.
 
 Replace the test-capable `database/control-plane/build.gradle` with:
 
 ```groovy
+buildscript {
+    def dependencyMirror = System.getenv('ACCORD_MAVEN_MIRROR_URL')
+    if (System.getenv('CI') == 'true' && !dependencyMirror) {
+        throw new GradleException('ACCORD_MAVEN_MIRROR_URL is required in CI')
+    }
+    repositories {
+        if (dependencyMirror) { maven { url = uri(dependencyMirror) } }
+        else { mavenCentral() }
+    }
+    dependencies {
+        classpath "org.flywaydb:flyway-database-postgresql:${libs.versions.flyway.get()}"
+    }
+    configurations.classpath {
+        resolutionStrategy.activateDependencyLocking()
+    }
+}
+
 plugins {
     alias(libs.plugins.flyway)
     alias(libs.plugins.jooq.codegen)
@@ -2712,16 +2909,20 @@ def separator = databaseUrl.contains('?') ? '&' : '?'
 def migratorSessionUrl = "${databaseUrl}${separator}options=-c%20role%3Daccord_migrator"
 
 dependencies {
-    implementation libs.postgresql
+    api libs.jooq.runtime
+    runtimeOnly libs.postgresql
     jooqCodegen libs.postgresql
-    testFixturesImplementation libs.postgresql
-    testImplementation platform(libs.junit.bom)
+    testFixturesRuntimeOnly libs.postgresql
+    testImplementation enforcedPlatform(libs.junit.bom)
+    testImplementation enforcedPlatform(libs.jackson.bom)
+    testImplementation enforcedPlatform(libs.slf4j.bom)
     testImplementation libs.junit.jupiter
     testImplementation libs.assertj.core
     testImplementation libs.flyway.core
     testImplementation libs.flyway.postgresql
     testImplementation libs.testcontainers.junit
     testImplementation libs.testcontainers.postgresql
+    testRuntimeOnly libs.slf4j.simple
 }
 
 flyway {
@@ -2756,8 +2957,46 @@ jooq {
 }
 
 sourceSets.main.java.srcDir 'build/generated-src/jooq/main'
+tasks.named('processTestFixturesResources') {
+    from('bootstrap') { include '00-pre-flyway-roles.sql' }
+    from('migrations') {
+        include 'V*.sql'
+        into 'db/migration'
+    }
+}
 tasks.withType(Test).configureEach { useJUnitPlatform() }
+tasks.named('flywayMigrate') {
+    notCompatibleWithConfigurationCache('Flyway uses live database credentials.')
+}
+tasks.named('jooqCodegen') {
+    dependsOn tasks.named('flywayMigrate')
+    notCompatibleWithConfigurationCache('jOOQ introspects a live migrated database.')
+}
+tasks.register('verifyGeneratedJooq') {
+    dependsOn tasks.named('jooqCodegen')
+    notCompatibleWithConfigurationCache('Verifies live-database code generation output.')
+    doLast {
+        [
+            'tables/AggregateHead.java',
+            'tables/IdempotencyResult.java',
+            'tables/records/AggregateHeadRecord.java',
+            'tables/records/IdempotencyResultRecord.java'
+        ].each { relativePath ->
+            def generated = layout.buildDirectory.file(
+                "generated-src/jooq/main/com/inforvans/accord/database/jooq/${relativePath}"
+            ).get().asFile
+            if (!generated.isFile()) {
+                throw new GradleException("Missing generated jOOQ source: ${relativePath}")
+            }
+        }
+    }
+}
 ```
+
+The Flyway PostgreSQL database module is an explicit, mirror-aware buildscript classpath dependency
+because Flyway resolves database support while applying the plugin. Its exact graph is locked in
+`database/control-plane/buildscript-gradle.lockfile`; the project runtime graph remains separately
+locked in `database/control-plane/gradle.lockfile`.
 
 Create `V001__platform_command_state.sql`:
 
@@ -2769,7 +3008,7 @@ CREATE TABLE aggregate_head (
     tenant_id uuid NOT NULL,
     aggregate_type varchar(64) NOT NULL,
     aggregate_id uuid NOT NULL,
-    version bigint NOT NULL CHECK (version >= 0),
+    version bigint NOT NULL CHECK (version >= 1),
     updated_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
     PRIMARY KEY (tenant_id, aggregate_type, aggregate_id)
 );
@@ -2790,7 +3029,7 @@ CREATE TABLE idempotency_result (
     response_body text,
     aggregate_type varchar(64),
     aggregate_id uuid,
-    aggregate_version bigint CHECK (aggregate_version >= 0),
+    aggregate_version bigint CHECK (aggregate_version >= 1),
     started_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
     completed_at timestamptz,
     expires_at timestamptz NOT NULL,
@@ -2813,15 +3052,16 @@ CREATE SCHEMA accord_security;
 REVOKE ALL ON SCHEMA accord_security FROM PUBLIC;
 
 CREATE FUNCTION accord_security.current_tenant_id() RETURNS uuid
-LANGUAGE sql STABLE PARALLEL SAFE
-RETURN NULLIF(current_setting('app.tenant_id', true), '')::uuid;
+LANGUAGE sql STABLE PARALLEL SAFE SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
+RETURN NULLIF(pg_catalog.current_setting('app.tenant_id', true), '')::pg_catalog.uuid;
 REVOKE ALL ON FUNCTION accord_security.current_tenant_id() FROM PUBLIC;
 GRANT USAGE ON SCHEMA accord_security TO accord_api, accord_worker;
 GRANT EXECUTE ON FUNCTION accord_security.current_tenant_id() TO accord_api, accord_worker;
 
 CREATE FUNCTION accord_security.enforce_tenant_table(target regclass) RETURNS void
-LANGUAGE plpgsql
-SET search_path = pg_catalog, public
+LANGUAGE plpgsql SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
 AS $policy$
 DECLARE target_schema text; target_name text;
 BEGIN
@@ -2844,13 +3084,16 @@ BEGIN
       'CREATE POLICY tenant_isolation ON %s FOR ALL TO PUBLIC USING (tenant_id = accord_security.current_tenant_id()) WITH CHECK (tenant_id = accord_security.current_tenant_id())',
       target
     );
-  ELSIF NOT EXISTS (
+  END IF;
+  IF (SELECT pg_catalog.count(*) FROM pg_catalog.pg_policy p WHERE p.polrelid=target) <> 1
+     OR NOT EXISTS (
     SELECT 1 FROM pg_policy p
-    WHERE p.polrelid=target AND p.polname='tenant_isolation' AND p.polcmd='*' AND p.polroles=ARRAY[0::oid]
+    WHERE p.polrelid=target AND p.polname='tenant_isolation' AND p.polpermissive
+      AND p.polcmd='*' AND p.polroles=ARRAY[0::oid]
       AND pg_get_expr(p.polqual,p.polrelid)='(tenant_id = accord_security.current_tenant_id())'
       AND pg_get_expr(p.polwithcheck,p.polrelid)='(tenant_id = accord_security.current_tenant_id())'
   ) THEN
-    RAISE EXCEPTION 'tenant_isolation policy is non-standard on %', target;
+    RAISE EXCEPTION 'tenant RLS policy set is non-standard on %', target;
   END IF;
 END $policy$;
 REVOKE ALL ON FUNCTION accord_security.enforce_tenant_table(regclass) FROM PUBLIC, accord_api, accord_worker;
@@ -2864,34 +3107,128 @@ GRANT SELECT, INSERT, UPDATE ON aggregate_head, idempotency_result TO accord_api
 GRANT DELETE ON idempotency_result TO accord_worker;
 ```
 
-The two individual enforcement calls are in V001 itself and precede every runtime table grant. `PlatformMigrationTest` also queries `pg_policy` for `FOR ALL TO PUBLIC` plus exact `USING`/`WITH CHECK`, `information_schema.role_table_grants` for this exact matrix (API and worker have `SELECT/INSERT/UPDATE` on both tables, only worker has `DELETE` on `idempotency_result`, and neither runtime role has any other table privilege), and `pg_auth_members` for exactly the three one-to-one workload memberships. It proves all three privilege roles are NOLOGIN, all three workload roles are LOGIN but otherwise unprivileged, a workload session has no table access before `SET ROLE`, `session_user` remains the workload login afterward, `current_user` becomes only its paired privilege role, and a sibling `SET ROLE` fails with SQLSTATE `42501`. It also asserts the fingerprint and generation/token fence columns and that both tables are owned by `accord_migrator`.
+The two individual enforcement calls are in V001 itself and precede every runtime table grant.
+Each target must have exactly one total policy: permissive `tenant_isolation`, `FOR ALL TO PUBLIC`,
+with the exact `USING` and `WITH CHECK` expressions; an additional permissive or restrictive policy
+causes enforcement to fail closed. `PlatformMigrationTest` compares complete catalog sets in both
+directions for columns and defaults, normalized constraint definitions, indexes including validity,
+all non-owner table ACLs, database/default ACLs, policies, and role memberships. It also proves the
+fingerprint, generation, lifecycle/state/status, aggregate-version, header-size, and body-size checks
+with focused invalid inserts, plus direct and transitive hostile `SET ROLE` denial. The exact role
+topology comparison uses `EXCEPT ALL` in both directions so duplicate grantor-specific membership
+rows cannot collapse under set semantics. Hostile reruns assign the database and `public` schema to
+workload identities, then prove exact migrator ownership and denied runtime DDL after convergence.
+A packaged-bootstrap psql test injects an undefined-relation failure immediately before `COMMIT`
+and proves all earlier role, membership, owner, and ACL state rolls back. Hostile test cleanup keeps
+the primary test/bootstrap exception and attaches every cleanup error as suppressed evidence.
 
 - [ ] **Step 4: Run the migration test**
 
-Run: `./gradlew :database:control-plane:test --tests '*PlatformMigrationTest'`
+Run:
 
-Expected: Testcontainers starts PostgreSQL 17.5, Flyway applies version `001`, and the test passes with both tenant-scoped tables present.
+```powershell
+./gradlew :tests:integration:test --tests '*TestcontainersConfigurationTest'
+./gradlew :database:control-plane:test --tests '*PlatformMigrationTest' --tests '*TestcontainersConfigurationTest'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/bootstrap/verify-control-plane-jooq-generator.ps1
+```
+
+Expected: the independent integration project resolves both canonical helper-image pins,
+Testcontainers starts PostgreSQL 17.5 using the same digest-pinned Ryuk helper, Flyway applies
+version `001`, both tenant-scoped tables are present, atomic hostile-state tests pass, and the
+generator failure injection removes its simulated created container without masking the primary
+failure.
 
 - [ ] **Step 5: Generate jOOQ sources from the migrated local database**
 
 Run:
 
-```bash
-docker run --detach --rm --name accord-jooq-postgres -e POSTGRES_DB=accord -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=disposable-admin-only -p 55432:5432 postgres:17.5
-until docker exec accord-jooq-postgres pg_isready -U postgres -d accord; do sleep 1; done
-docker exec -i accord-jooq-postgres psql -U postgres -d accord < database/control-plane/bootstrap/00-pre-flyway-roles.sql
-docker exec accord-jooq-postgres psql -U postgres -d accord -c "ALTER ROLE accord_migrator_login PASSWORD 'local-migrator-only'; GRANT CONNECT ON DATABASE accord TO accord_migrator_login; GRANT USAGE, CREATE ON SCHEMA public TO accord_migrator;"
-ACCORD_DB_URL=jdbc:postgresql://localhost:55432/accord ./gradlew :database:control-plane:flywayMigrate :database:control-plane:jooqCodegen
-./gradlew :database:control-plane:compileJava
-docker stop accord-jooq-postgres
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/generate-control-plane-jooq.ps1 -Port 55532
 ```
 
-Expected: the dedicated PostgreSQL 17.5 container becomes healthy; Flyway connects as `accord_migrator_login`, activates `accord_migrator`, and reports schema version `001`; jOOQ uses the same session-role startup option and generates `AggregateHead` and `IdempotencyResult` records under `database/control-plane/build/generated-src/jooq/main`; compilation passes and the disposable container stops. Port `55432` is reserved for this code-generation step so it does not depend on the Task 13 Compose stack.
+Create `scripts/generate-control-plane-jooq.ps1` with a parameterized host port defaulting to
+`55532` and the exact image reference
+`postgres:17.5@sha256:aadf2c0696f5ef357aa7a68da995137f0cf17bad0bf6e1f17de06ae5c769b302`.
+It must reject an occupied port, assign a unique
+`accord-control-plane-jooq-<pid>-<guid>` name before creation, capture the exact returned container
+ID, bound
+`pg_isready` to 45 one-second attempts, assert `SHOW server_version_num` equals `170005`, copy the
+bootstrap into the container and invoke `psql -v ON_ERROR_STOP=1 -f`, set only process-local
+`ACCORD_DB_*` variables, invoke the wrapper separately for `flywayMigrate`, `jooqCodegen`,
+`verifyGeneratedJooq`, and `compileJava` with strict verification and no configuration cache, and
+force each requested task to rerun so both passes regenerate, then check every exit code. It
+preserves the primary `ErrorRecord`; process-environment restoration and exact-name container
+lookup/removal run independently in guarded cleanup, even when `docker run` exits nonzero or emits
+no valid ID, and cleanup failures are reported as secondary details without replacing the primary
+failure. `tests/bootstrap/verify-control-plane-jooq-generator.ps1` injects that create-then-start
+failure with a Docker shim and proves the orphan is removed by its preassigned name.
+
+Expected: the dedicated pinned PostgreSQL 17.5 container becomes healthy; Flyway connects as `accord_migrator_login`, activates `accord_migrator`, and reports schema version `001`; jOOQ uses the same session-role startup option and generates `AggregateHead` and `IdempotencyResult` tables and records under `database/control-plane/build/generated-src/jooq/main`; compilation passes and the disposable container is absent afterward. Port `55532` is reserved for this code-generation step so it does not depend on the Task 13 Compose stack.
+
+Refresh locks and verification metadata in separate no-cache invocations, then run
+`resolveAndLockAll` without write flags under `--dependency-verification=strict`, execute
+`tests/bootstrap/verify-workspace.ps1`, and repeat generation while comparing SHA-256 for every
+tracked lock plus `gradle/verification-metadata.xml`. Expected: the new database lock exists, every
+artifact has checksum or scoped signature evidence, ignored PGP keys retain explicit key-server
+reasons, and the second generation changes no dependency-evidence file.
+
+Run the generator twice; each invocation creates and removes a fresh container. After each run,
+build sorted manifests in memory and compare exact `relative-path|lowercase-sha256` lines:
+
+```powershell
+$generatedRoot = (Resolve-Path 'database/control-plane/build/generated-src/jooq/main').Path
+function Get-GeneratedManifest {
+  Get-ChildItem -LiteralPath $generatedRoot -Recurse -File -Filter '*.java' |
+    Sort-Object FullName | ForEach-Object {
+      $relative = $_.FullName.Substring($generatedRoot.Length + 1).Replace('\', '/')
+      "$relative|$((Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant())"
+    }
+}
+function Get-DependencyEvidenceManifest {
+  $files = @(
+    Get-ChildItem -LiteralPath . -Recurse -File -Filter 'gradle.lockfile' |
+      Where-Object { $_.FullName -notmatch '[\\/](?:\.gradle|build)[\\/]' }
+    Get-Item -LiteralPath 'settings-gradle.lockfile'
+    Get-Item -LiteralPath 'database/control-plane/buildscript-gradle.lockfile'
+    Get-Item -LiteralPath 'gradle/verification-metadata.xml'
+  )
+  $files | Sort-Object FullName -Unique | ForEach-Object {
+    $root = (Resolve-Path '.').Path
+    $relative = $_.FullName.Substring($root.Length + 1).Replace('\', '/')
+    "$relative|$((Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant())"
+  }
+}
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/generate-control-plane-jooq.ps1 -Port 55532
+if ($LASTEXITCODE -ne 0) { throw 'First jOOQ generation failed' }
+$generatedFirst = @(Get-GeneratedManifest)
+$evidenceFirst = @(Get-DependencyEvidenceManifest)
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/generate-control-plane-jooq.ps1 -Port 55532
+if ($LASTEXITCODE -ne 0) { throw 'Second jOOQ generation failed' }
+$generatedSecond = @(Get-GeneratedManifest)
+$evidenceSecond = @(Get-DependencyEvidenceManifest)
+if (@(Compare-Object $generatedFirst $generatedSecond -CaseSensitive).Count -ne 0) {
+  throw 'Generated jOOQ Java manifest is not reproducible'
+}
+if (@(Compare-Object $evidenceFirst $evidenceSecond -CaseSensitive).Count -ne 0) {
+  throw 'Dependency evidence changed across generation runs'
+}
+```
+
+Both generated manifests must cover the complete sorted Java file set and match exactly; both
+dependency-evidence manifests must also match, and `docker ps --all` must show no container ID from
+either invocation.
 
 - [ ] **Step 6: Commit the persistence baseline**
 
 ```bash
-git add settings.gradle gradle/libs.versions.toml database/control-plane/build.gradle database/control-plane/bootstrap/00-pre-flyway-roles.sql database/control-plane/migrations/V001__platform_command_state.sql database/control-plane/src/testFixtures/java/com/inforvans/accord/database/ControlPlaneTestRoles.java database/control-plane/src/test/java/com/inforvans/accord/database/PlatformMigrationTest.java
+git add .gitignore build.gradle settings.gradle gradle/libs.versions.toml gradle/verification-metadata.xml \
+  config/testcontainers/testcontainers.properties \
+  docs/superpowers/plans/2026-07-24-accord-platform-foundation-plan.md \
+  tests/integration/src/test/java/com/inforvans/accord/integration/TestcontainersConfigurationTest.java \
+  tests/bootstrap/verify-workspace.ps1 \
+  tests/bootstrap/verify-control-plane-jooq-generator.ps1 \
+  scripts/generate-control-plane-jooq.ps1 \
+  database/control-plane
 git commit -m "feat: add tenant-scoped persistence baseline"
 ```
 
