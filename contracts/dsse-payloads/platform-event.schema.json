@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.accord.inforvans.com/dsse/platform-event/1-0-0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["payload_type", "schema_version", "domain", "tenant_id", "scope_type", "scope_id", "object_id", "content_digest"],
+  "properties": {
+    "payload_type": { "const": "application/vnd.accord.platform-event+json" },
+    "schema_version": { "const": "1.0.0" },
+    "domain": { "const": "accord.platform-event.v1" },
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "scope_type": { "enum": ["tenant", "project", "repository"] },
+    "scope_id": { "type": "string", "minLength": 1 },
+    "object_id": { "type": "string", "minLength": 1 },
+    "content_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

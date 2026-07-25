@@ -11,6 +11,7 @@ com.github.docker-java:docker-java-api:3.4.2=testCompileClasspath,testRuntimeCla
 com.github.docker-java:docker-java-transport-zerodep:3.4.2=testCompileClasspath,testRuntimeClasspath
 com.github.docker-java:docker-java-transport:3.4.2=testCompileClasspath,testRuntimeClasspath
 com.networknt:json-schema-validator:1.5.6=testCompileClasspath,testRuntimeClasspath
+io.github.erdtman:java-json-canonicalization:1.1=testRuntimeClasspath
 junit:junit:4.13.2=testCompileClasspath,testRuntimeClasspath
 net.bytebuddy:byte-buddy:1.15.11=testCompileClasspath,testRuntimeClasspath
 net.java.dev.jna:jna:5.13.0=testCompileClasspath,testRuntimeClasspath
