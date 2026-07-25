@@ -2736,12 +2736,12 @@ git commit -m "feat(web): add impact assessment and ordered confirmation"
 - Create: `apps/web/src/modules/delivery/batch-workspace.tsx`
 - Create: `apps/web/src/modules/delivery/batch-progress.tsx`
 - Create: `apps/web/src/modules/delivery/batch-manifest-review.tsx`
-- Create: `apps/web/src/modules/delivery/batch-publication-panel.tsx`
+- Create: `apps/web/src/modules/delivery/batch-branch-release-panel.tsx`
 - Create: `apps/web/src/modules/delivery/delivery-api.ts`
 - Create: `apps/web/src/modules/delivery/ready-pool.test.tsx`
 - Create: `apps/web/src/modules/delivery/batch-workspace.test.tsx`
 - Test: `apps/web/src/modules/delivery/batch-manifest-review.test.tsx`
-- Test: `apps/web/src/modules/delivery/batch-publication-panel.test.tsx`
+- Test: `apps/web/src/modules/delivery/batch-branch-release-panel.test.tsx`
 - Test: `apps/web/src/modules/delivery/batch-progress.test.tsx`
 - Create: `apps/web/src/routes/ready-pool-route.tsx`
 - Create: `apps/web/src/routes/batch-route.tsx`
@@ -2767,24 +2767,26 @@ it('shows degraded assurance above normal lifecycle progress', () => {
 ```
 
 ```tsx
-// apps/web/src/modules/delivery/batch-publication-panel.test.tsx
-it('does not tell development to start until remote publication proof is complete', () => {
-  const view = render(<BatchPublicationPanel batch={publishingBatch} intent={outcomeUnknownIntent} evidence={null} />);
-  expect(screen.getByRole('status')).toHaveTextContent('正在核对远端发布结果');
+// apps/web/src/modules/delivery/batch-branch-release-panel.test.tsx
+it('does not tell development to start until every repository package and branch release is complete', () => {
+  const view = render(<BatchBranchReleasePanel batch={partiallyReleasedBatch} packages={packagesByWorkSet} intents={unknownIntents} />);
+  expect(screen.getByRole('status')).toHaveTextContent('部分分支已创建，正在核对其余仓库');
   expect(screen.queryByText('可拉取开发')).not.toBeInTheDocument();
 
-  view.rerender(<BatchPublicationPanel batch={readyBatchWithPublicationProof} intent={succeededIntent} evidence={publicationGitEvidence} />);
+  view.rerender(<BatchBranchReleasePanel batch={readyBatchWithRepositoryReleases} packages={packagesByWorkSet} intents={settledIntents} />);
   expect(screen.getByText('可拉取开发')).toBeInTheDocument();
-  expect(screen.getByText(readyBatchWithPublicationProof.publication.delivery_ref)).toBeInTheDocument();
-  expect(screen.getByText(readyBatchWithPublicationProof.publication.published_commit_sha)).toBeInTheDocument();
-  expect(screen.getByText(readyBatchWithPublicationProof.publication.published_tree_sha)).toBeInTheDocument();
-  expect(readyBatchWithPublicationProof.publication.provider_state).toBe('VERIFIED');
+  for (const release of readyBatchWithRepositoryReleases.repository_releases) {
+    expect(screen.getByText(release.delivery_ref)).toBeInTheDocument();
+    expect(screen.getByText(release.baseline_commit_sha)).toBeInTheDocument();
+    expect(screen.getByText(release.baseline_tree_sha)).toBeInTheDocument();
+    expect(release.provider_state).toBe('VERIFIED');
+  }
 });
 ```
 
 - [ ] **Step 2: Run delivery tests and verify they fail**
 
-Run: `pnpm --filter @accord/web test -- ready-pool.test.tsx batch-workspace.test.tsx`
+Run: `pnpm --filter @accord/web test -- ready-pool.test.tsx batch-workspace.test.tsx batch-branch-release-panel.test.tsx`
 
 Expected: FAIL because delivery components are absent.
 
@@ -2808,6 +2810,8 @@ import {
   createDeliveryBatch,
   createEmergencyChange,
   createWorkItemAssignment,
+  getCompletionSet,
+  getDevelopmentPackage,
   getDeliveryBatch,
   getRepositoryGitEvidence,
   getRepositoryReconciliation,
@@ -2815,7 +2819,7 @@ import {
   issueStrictMergeAuthorization,
   listDeliveryBatchWorkItems,
   listReadyPool,
-  publishDeliveryBatch,
+  releaseDeliveryBatchBranches,
   requestStrictWorkItemMerge,
   requestWorkItemCompletionReview,
   startRepositoryReconciliation,
@@ -2833,6 +2837,8 @@ export const deliveryApi = Object.freeze({
   createDeliveryBatch,
   createEmergencyChange,
   createWorkItemAssignment,
+  getCompletionSet,
+  getDevelopmentPackage,
   getDeliveryBatch,
   getRepositoryGitEvidence,
   getRepositoryReconciliation,
@@ -2840,24 +2846,26 @@ export const deliveryApi = Object.freeze({
   issueStrictMergeAuthorization,
   listDeliveryBatchWorkItems,
   listReadyPool,
-  publishDeliveryBatch,
+  releaseDeliveryBatchBranches,
   requestStrictWorkItemMerge,
   requestWorkItemCompletionReview,
   startRepositoryReconciliation,
 });
 ```
 
-The registry keys must equal all 22 operation IDs in Git Delivery `DeliveryOpenApiContractTest.contracts`; additions or omissions fail architecture tests. Task 13 directly consumes `listReadyPool`, `createDeliveryBatch`, `getDeliveryBatch`, `confirmDeliveryBatchManifest`, `publishDeliveryBatch`, `amendDeliveryBatch`, and `createBatchAbortDecision`. Tests mock these generated functions and assert mutations send the resource ETag as quoted `If-Match`, a stable idempotency key for retries, conditional runtime CSRF, FreshAuth only where the generated contract/action requires it, and the generated request body without a tenant field.
+The registry keys must equal all 24 operation IDs in Git Delivery `DeliveryOpenApiContractTest.contracts`; additions or omissions fail architecture tests. Task 13 directly consumes `listReadyPool`, `createDeliveryBatch`, `getDeliveryBatch`, `confirmDeliveryBatchManifest`, `getDevelopmentPackage`, `releaseDeliveryBatchBranches`, `amendDeliveryBatch`, and `createBatchAbortDecision`. Tests mock these generated functions and assert mutations send the resource ETag as quoted `If-Match`, a stable idempotency key for retries, conditional runtime CSRF, FreshAuth only where the generated contract/action requires it, and the generated request body without a tenant field.
 
 - [ ] **Step 4: Implement manifest review and bilateral batch confirmation**
 
 `BatchManifestReview` shows requirement/revision hashes, WorkItems, assignments, Business Acceptance Owner, branch/base SHA, delivery mode, environment, policy/context versions, and changes from the previous manifest. Each side gets one `batch_confirmation` ActionRequest. If any exact fact changes, refetch replaces the manifest and the old confirm command is disabled; no optimistic frozen state is shown.
 
-- [ ] **Step 5: Implement evidence-gated Git publication before developer start**
+- [ ] **Step 5: Implement evidence-gated package retrieval and per-repository branch release before developer start**
 
-`BatchPublicationPanel` is the explicit bridge between bilateral manifest confirmation and developer start. It renders `publishDeliveryBatch` only from the exact enabled action after both manifest confirmation receipts are present. Dispatch uses the batch response's quoted ETag, numeric version, exact `effective_manifest_digest`, one stable idempotency key, conditional CSRF, and exactly the generated action's FreshAuth mode (the current publication contract does not invent an extra proof); it never sends a branch, contract path, commit, tree, tenant, actor, or desired phase supplied by the browser. The returned generated `ExternalIntentView` is retained only as a non-authoritative progress projection. `QUEUED`/`IN_FLIGHT` shows publishing, `OUTCOME_UNKNOWN` shows `正在核对远端发布结果` and disables a second logical publish, and a 409 refetches the batch. Recovery follows generated `getDeliveryBatch`, Task 6 invalidation, and the existing reconciliation actions; there is no client-side `mark published` command.
+`BatchBranchReleasePanel` is the explicit bridge between bilateral manifest confirmation and developer start. For every RepositoryWorkSet it loads the generated `DevelopmentPackageView` and displays its manifest, immutable object version, signing attestation, publication time, and short-lived download authorization without exposing an OSS key or pre-signed URL. It renders `releaseDeliveryBatchBranches` only from the exact enabled batch action after both manifest confirmation receipts and every selected WorkSet package are current. Dispatch uses the batch response's quoted ETag, numeric version, exact `effective_manifest_digest`, the ordered selected `repository_work_set_ids`, one stable idempotency key, conditional CSRF, and exactly the generated action's FreshAuth mode; it never sends a Provider repository ID, branch name, commit/tree, object-storage locator, tenant, actor, or desired phase supplied by the browser.
 
-The panel shows `可拉取开发` only when the authoritative batch is `READY` and its generated `PublicationProofView` is present with `delivery_ref`, `published_commit_sha`, `published_tree_sha`, `contract_set_digest`, `publication_attestation_digest`, `path_set_digest`, `provider_fact_digest`, `provider_state=VERIFIED`, receipt-bound `provider_observed_at`, and `receipt_digest`. It cross-renders the matching ref fact from generated `getRepositoryGitEvidence` and fails closed on a null field, non-VERIFIED state, or ref/commit/tree/fact mismatch. The browser displays `provider_observed_at` but never applies a wall-clock TTL or calls an old observation stale; a later identical Provider observation remains valid, while a contradictory fact causes the server to return `publication=null` and suspended/reconciliation state. Before a complete current proof, WorkItem assignment/start controls remain absent even if a browser timer or old intent says success. Once proven, developers can copy the verified ref and commit, pull the platform-published Requirement Contract with their normal Git workflow, and invoke the pinned local Agent Pack; the platform still never edits or reads customer source.
+Each returned `ExternalIntentView` is retained only as a non-authoritative progress projection. `QUEUED`/`IN_FLIGHT` shows the affected repository as releasing; `OUTCOME_UNKNOWN` shows `正在核对远端分支结果` and disables a second logical release for that WorkSet. A partial success renders `repository_release_coverage=PARTIAL`, preserves each verified release, and offers only the exact server-returned action for unreleased WorkSets. A 409 refetches the batch; recovery follows generated `getDeliveryBatch`, event invalidation, and the existing reconciliation operations. There is no client-side `mark released`, destructive compensation, or whole-batch success inferred from one repository.
+
+The panel shows `可拉取开发` only when the authoritative batch is `READY`, `repository_release_coverage=COMPLETE`, and every current RepositoryWorkSet has one current `DevelopmentPackageView` plus one generated `RepositoryReleaseProofView`. Each proof must contain the exact WorkSet, Provider installation and opaque RepositoryBinding IDs, effective manifest, capability/package/Provider-fact digests, delivery ref, unchanged baseline commit/tree, `provider_state=VERIFIED`, receipt-bound `provider_observed_at`, and receipt digest. It cross-renders the matching ref fact from generated `getRepositoryGitEvidence` and fails closed on a missing WorkSet, duplicate proof, null field, non-VERIFIED state, or any installation/repository/ref/commit/tree/manifest/capability/package/fact mismatch. The browser displays `provider_observed_at` but never invents a wall-clock TTL; a later contradictory fact makes the server suspend that WorkSet and removes batch readiness. Developers copy the verified zero-diff ref, use native Git to pull it, and obtain the signed Development Package through `getDevelopmentPackage` or `accordctl`; no Requirement, Context, or package document is read from or written to customer Git.
 
 - [ ] **Step 6: Render batch progress and orthogonal assurance correctly**
 
@@ -2878,11 +2886,11 @@ export function BatchProgress(props: BatchProgressProps) {
 
 The workspace tabs are overview, requirements, WorkItems, Candidate, acceptance, reconciliation, and activity. The progress rail uses server labels; it does not encode transition eligibility.
 
-- [ ] **Step 7: Verify batch selection, confirmation, publication proof, suspension, and abort presentation**
+- [ ] **Step 7: Verify batch selection, confirmation, package/branch-release proof, suspension, and abort presentation**
 
-Run: `pnpm --filter @accord/web test -- ready-pool.test.tsx batch-workspace.test.tsx batch-manifest-review.test.tsx batch-publication-panel.test.tsx batch-progress.test.tsx`
+Run: `pnpm --filter @accord/web test -- ready-pool.test.tsx batch-workspace.test.tsx batch-manifest-review.test.tsx batch-branch-release-panel.test.tsx batch-progress.test.tsx`
 
-Expected: PASS; held revisions cannot be selected, stale manifests cannot confirm, publish is unavailable before both receipts, one logical publication reuses one idempotency key, unknown Provider outcome cannot be retriggered or presented as success, development start remains absent until exact remote ref/commit/tree/contract/attestation evidence is current, suspended preserves the original phase, and aborted is read-only with its decision evidence.
+Expected: PASS; held revisions cannot be selected, stale manifests cannot confirm, package retrieval and branch release are unavailable before both receipts, one logical WorkSet release reuses one idempotency key, an unknown Provider outcome cannot be retriggered or presented as success, partial cross-Provider release remains `PARTIAL`, and development start remains absent until every WorkSet has an exact current package plus remote ref/baseline commit/tree/manifest/capability/Provider proof. Suspended preserves the original phase, and aborted is read-only with its decision evidence.
 
 - [ ] **Step 8: Commit the delivery-control checkpoint**
 
@@ -3075,13 +3083,13 @@ These views call only Task 13's `deliveryApi`: `listDeliveryBatchWorkItems`, `cr
 
 `ReconciliationPanel` compares intended ref/head/tree/patch watermark/artifact with provider-observed values and displays `converged`, `reconciling`, or `diverged` from the server. Its primary action comes from `reconciliation` or `emergency_authorization`; no generic `mark resolved` button exists.
 
-Its query/mutations are exactly `getRepositoryReconciliation`, `startRepositoryReconciliation`, and `applyReconciliationRecoveryCommand`. Emergency and break-glass ActionRequest details dispatch `createEmergencyChange`, `authorizeEmergencyChange`, `issueEmergencyMergeAuthorization`, `createBreakGlassGrant`, or `consumeBreakGlassGrant` from the same generated adapter only when returned by `allowed_actions`. Strict emergency merge uses the dedicated emergency operation and cannot reuse `issueStrictMergeAuthorization` or the WorkItem operation. Unit tests reject `SET_ACTIVE`, arbitrary state payloads, an operation ID outside the exact 22-operation registry, or a handwritten API string anywhere under `src/modules/delivery`.
+Its query/mutations are exactly `getRepositoryReconciliation`, `startRepositoryReconciliation`, and `applyReconciliationRecoveryCommand`. Emergency and break-glass ActionRequest details dispatch `createEmergencyChange`, `authorizeEmergencyChange`, `issueEmergencyMergeAuthorization`, `createBreakGlassGrant`, or `consumeBreakGlassGrant` from the same generated adapter only when returned by `allowed_actions`. Strict emergency merge uses the dedicated emergency operation and cannot reuse `issueStrictMergeAuthorization` or the WorkItem operation. Unit tests reject `SET_ACTIVE`, arbitrary state payloads, an operation ID outside the exact 24-operation registry, or a handwritten API string anywhere under `src/modules/delivery`.
 
 - [ ] **Step 7: Verify context stale behavior, annotation routing, Patch lineage, and assurance labels**
 
 Run: `pnpm --filter @accord/web test -- context-overview.test.tsx context-claim-table.test.tsx context-rebuild.test.tsx context-patch-timeline.test.tsx context-correction-workbench.test.tsx development-annotation-workbench.test.tsx work-item-table.test.tsx git-checks-panel.test.tsx reconciliation-panel.test.tsx`
 
-Expected: PASS with an exact 12-query/five-mutation Project Context/Patch/correction registry, exact two-query/two-mutation DevelopmentAnnotation registry, and exact 22-operation Git Delivery registry; refresh hydrates overview/version/claim/rebuild/Patch/correction state only through generated operations; stale Context still permits business B but blocks A/D finalization, impact confirmation, development confirmation, and publish according to server actions; blocking annotations expose holds; correction acceptance creates only a Patch obligation; nonempty `context_links` render exact typed Revision/WorkItem facts, while an empty array renders `未关联已知需求或工作项` without becoming an error; no browser code derives or validates link ownership; no PR/personal-branch/validated Patch advances active Context; linked and unrelated Patches advance only after an applied Patch has a complete actual merge receipt, exact-once consumption, and contiguous watermark; source-bearing fields are rejected; only returned activation is executable; WorkItem, accepted-Candidate, and emergency strict merge use distinct generated operations; strict mode identifies Controller as merger; and standard bypass is labeled detection/recovery. Source scans find no handwritten API URL, `apiFetch`, server DTO/interface, executed `command_href`, generic state mutation, client-derived Patch link/phase/watermark, or source-body field.
+Expected: PASS with an exact 12-query/five-mutation Project Context/Patch/correction registry, exact two-query/two-mutation DevelopmentAnnotation registry, and exact 24-operation Git Delivery registry; refresh hydrates overview/version/claim/rebuild/Patch/correction state only through generated operations; stale Context still permits business B but blocks A/D finalization, impact confirmation, development confirmation, and branch release according to server actions; blocking annotations expose holds; correction acceptance creates only a Patch obligation; nonempty `context_links` render exact typed Revision/WorkItem facts, while an empty array renders `未关联已知需求或工作项` without becoming an error; no browser code derives or validates link ownership; no PR/personal-branch/validated Patch advances active Context; linked and unrelated Patches advance only after an applied Patch has a complete actual merge receipt, exact-once consumption, and contiguous watermark; source-bearing fields are rejected; only returned activation is executable; WorkItem, accepted-Candidate, and emergency strict merge use distinct generated operations; strict mode identifies Controller as merger; and standard bypass is labeled detection/recovery. Source scans find no handwritten API URL, `apiFetch`, server DTO/interface, executed `command_href`, generic state mutation, client-derived Patch link/phase/watermark, or source-body field.
 
 - [ ] **Step 8: Commit the context/Git checkpoint**
 
@@ -3270,12 +3278,15 @@ git commit -m "feat(web): add exact candidate acceptance workflow"
 - Create: `apps/web/src/modules/settings/role-preset-step.tsx`
 - Create: `apps/web/src/modules/settings/assessment-policy-step.tsx`
 - Create: `apps/web/src/modules/settings/repository-step.tsx`
+- Create: `apps/web/src/modules/settings/provider-onboarding-api.ts`
+- Create: `apps/web/src/modules/settings/provider-connections-panel.tsx`
 - Create: `apps/web/src/modules/settings/agent-pack-step.tsx`
 - Create: `apps/web/src/modules/settings/agent-pack-api.ts`
 - Create: `apps/web/src/modules/settings/external-supplier-panel.tsx`
 - Create: `apps/web/src/modules/settings/project-setup-wizard.test.tsx`
 - Test: `apps/web/src/modules/settings/role-preset-step.test.tsx`
 - Test: `apps/web/src/modules/settings/assessment-policy-step.test.tsx`
+- Test: `apps/web/src/modules/settings/provider-connections-panel.test.tsx`
 - Test: `apps/web/src/modules/settings/agent-pack-step.test.tsx`
 - Test: `apps/web/src/modules/settings/external-supplier-panel.test.tsx`
 - Create: `apps/web/src/shared/security/fresh-auth-api.ts`
@@ -3328,6 +3339,19 @@ it('does not treat administrator status as side authority and labels reduced sta
   expect(screen.getByLabelText('业务侧最高负责人')).toBeRequired();
   expect(screen.getByLabelText('开发侧最高负责人')).toBeRequired();
 });
+
+it('binds only an opaque discovered repository and waits for trust registration', async () => {
+  render(<ProviderConnectionsPanel installations={activeInstallations} discoveries={repositoryDiscoveries} />);
+  await userEvent.click(screen.getByRole('button', { name: '绑定到当前项目' }));
+  expect(providerOnboardingMutations.createProjectRepositoryBinding).toHaveBeenCalledWith(
+    expect.objectContaining({ repository_discovery_id: repositoryDiscoveries[0].repository_discovery_id })
+  );
+  const request = providerOnboardingMutations.createProjectRepositoryBinding.mock.calls[0][0];
+  expect(request).not.toHaveProperty('repository_id');
+  expect(request).not.toHaveProperty('endpoint');
+  expect(screen.getByRole('status')).toHaveTextContent('正在验证仓库身份和能力');
+  expect(screen.queryByRole('checkbox', { name: /选择仓库/ })).not.toBeInTheDocument();
+});
 ```
 
 ```tsx
@@ -3352,7 +3376,7 @@ it('treats an active legal hold and waiting period as server gates', () => {
 
 - [ ] **Step 2: Run setup/audit tests and verify they fail**
 
-Run: `pnpm --filter @accord/web test -- project-setup-wizard.test.tsx audit-explorer.test.tsx`
+Run: `pnpm --filter @accord/web test -- project-setup-wizard.test.tsx provider-connections-panel.test.tsx audit-explorer.test.tsx`
 
 Expected: FAIL because settings and audit modules are absent.
 
@@ -3367,7 +3391,7 @@ import {
   confirmRepositoryBindingChange, createExternalSupplierAssignment,
   createExternalSupplierReassignment, createProject, createProjectDelegation,
   createProjectRoleBinding, createProjectSetup, createRepositoryBindingChangeRequest,
-  getProject, getProjectRepositoryBinding,
+  getProject, listProjectRepositoryBindings,
   getActiveAssessmentPolicy, getAssessmentPolicy,
   getProjectSetup, getProjectSidePrincipals,
   getRepositoryBindingChangeRequest, listExternalSupplierAssignments,
@@ -3387,7 +3411,7 @@ export const projectSetupMutations = Object.freeze({
   confirmProjectSetupBusiness, activateProjectSetup
 });
 export const repositoryIdentityQueries = Object.freeze({
-  getProjectRepositoryBinding, getRepositoryBindingChangeRequest
+  listProjectRepositoryBindings, getRepositoryBindingChangeRequest
 });
 export const repositoryIdentityMutations = Object.freeze({
   createRepositoryBindingChangeRequest, confirmRepositoryBindingChange
@@ -3427,11 +3451,45 @@ export const settingsIdentityOperations = Object.freeze({
 });
 ```
 
+Keep Provider connection and discovery in its separate generated owner registry:
+
+```ts
+// apps/web/src/modules/settings/provider-onboarding-api.ts
+import {
+  completeProviderConnectionIntent, createProjectRepositoryBinding,
+  createProviderConnectionIntent, getProjectRepositoryBindingOnboarding,
+  getProviderConnectionIntent, getProviderInstallation,
+  listProviderInstallations, listProviderRepositoryDiscoveries,
+  refreshProviderRepositoryDiscovery, retryProjectRepositoryBindingOnboarding,
+  revokeProviderInstallation, rotateProviderInstallationCredential,
+} from '@accord/api-client';
+
+export const providerOnboardingQueries = Object.freeze({
+  getProviderConnectionIntent, listProviderInstallations, getProviderInstallation,
+  listProviderRepositoryDiscoveries, getProjectRepositoryBindingOnboarding,
+});
+export const providerOnboardingMutations = Object.freeze({
+  createProviderConnectionIntent, completeProviderConnectionIntent,
+  rotateProviderInstallationCredential, revokeProviderInstallation,
+  refreshProviderRepositoryDiscovery, createProjectRepositoryBinding,
+  retryProjectRepositoryBindingOnboarding,
+});
+export const providerOnboardingOperations = Object.freeze({
+  ...providerOnboardingQueries, ...providerOnboardingMutations,
+});
+```
+
+The registry contains exactly the 12 generated `provider-onboarding` operations; the callback-edge operation is intentionally absent from the client. `ProviderConnectionsPanel` supports the five closed Provider families and their server-returned Cloud/Enterprise authentication choices. Starting an OAuth/App flow navigates only to the exact HTTPS `authorization_uri` returned for the current intent after requiring its origin to equal the same generated intent projection's `authorization_origin`; no Installation is assumed to exist before callback completion, and a mismatch, userinfo, fragment, or non-HTTPS URI fails closed without navigation. Manual enterprise setup transfers credentials through the returned one-time same-origin Credential Broker capability component and never places a token, PAT, key or OAuth code in React state, URL, analytics, error text or browser storage. Completion and refresh use the returned ETag/version, stable idempotency key, exact FreshAuth mode and conditional CSRF.
+
+Repository discovery renders display name, Provider/deployment label, default-ref label, observation time, expiry and capability gates, but its only submitted identity is `repository_discovery_id`. Binding progress hydrates through `getProjectRepositoryBindingOnboarding`; `PENDING_TRUST`, probing, registration and reconciliation remain non-selectable. Only after the server's Identity `listProjectRepositoryBindings` projection returns the same opaque Binding as `ACTIVE` with current trust/registration/capability gates and an exact CapabilitySnapshot-to-installation credential-epoch match may `repository-step.tsx` offer it in project setup. Rotation or revocation immediately removes affected bindings from selectable results and displays the returned reconciliation ActionRequests; the browser never patches a Binding state.
+
 Project creation uses `listCurrentSessionProjects`' quoted collection ETag and generated `createProject`; it never supplies tenant authority. The server-drafted wizard then uses the exact nine setup mutations and two reads. It covers repository binding, support cell, standard/strict mode, `精简团队/职责分离/外包交付` role preset, exactly one current principal per side, Business Acceptance Owner, AssessmentPolicy questions/recommendation, Agent Pack install/lock status, CI proof, notifications, and retention. Step values render the generated discriminator union; the browser cannot submit a free-form object. Each step renders server gates and only an enabled matching `allowed_actions.operation_id`; mutations reuse response ETag/numeric version, keep one idempotency key per retry, and request fresh auth only for operations classified MF by the Identity matrix. Leaving and returning calls `getProjectSetup`; no draft is reconstructed from local form state.
+
+The repository step uses paged `listProjectRepositoryBindings` and submits a nonempty, ordered, duplicate-free set of opaque RepositoryBinding IDs. It renders Provider family, endpoint/deployment label and display name for human disambiguation, but never submits a Provider numeric repository ID, hostname, owner/name, or URL as authority. An empty result links directly to `ProviderConnectionsPanel`; it is not an instruction for an operator to seed a database row or edit local configuration.
 
 `getProject` is the sole read projection for the active separation policy, active notification policy, and the current natural person's notification preferences; there is no generated `getProjectSeparationPolicy` alias. `listExternalSupplierAssignments` carries each assignment's current impact, so the browser has no `getExternalSupplierAssignmentImpact` call. The notification settings surface invokes `updateProjectNotificationPolicy` only for an enabled Project Admin action and `updateMyProjectNotificationPreferences` only for the current natural person, never with tenant/actor/user selectors. It renders all four closed channels, immutable urgent delivery, digest timezone/time, ordered escalation offsets, retry/backoff bounds, paired quiet hours, and the authoritative in-app ActionRequest guarantee. Both commands use the exact returned ETag/version and stable idempotency key, refetch `getProject` on success or `409`, and cannot convert urgent work to a digest or disable the in-app authority record.
 
-Repository binding is immutable after activation. A change uses only `createRepositoryBindingChangeRequest`, then the exact development-principal `confirmRepositoryBindingChange`; it displays Context/reconciliation impact and never directly edits a provider/repository value. Submission, development confirmation, business confirmation, and activation are separate durable receipts. The UI does not infer readiness from completed controls and does not skip blocked/unavailable dependency gates.
+Each RepositoryBinding identity tuple is immutable after activation. A change targets one explicit binding and uses only `createRepositoryBindingChangeRequest`, then the exact development-principal `confirmRepositoryBindingChange`; it displays repository-specific Context/reconciliation impact and never directly edits a Provider/repository value. Submission, development confirmation, business confirmation, and activation are separate durable receipts. The UI does not infer readiness from completed controls and does not skip blocked/unavailable dependency gates.
 
 - [ ] **Step 4: Implement signed Agent Pack catalog, installation resources, and fail-closed compatibility**
 
@@ -3605,11 +3663,11 @@ Audit filters include actor, object, action, time, result, risk, and correlation
 
 `DeletionWorkbench` implements both six-operation lifecycles without aliases. It renders requested, waiting-period, blocked-by-hold, approved, executing, failed, cancelled, and completed server states; exact inventory/manifest digests; required distinct-person approval; earliest execution time; provider progress; exclusions; and signed proof/anchor metadata. Create/cancel/approve/execute exist only when their exact generated MF operation is enabled. Countdown text is informational; `execute*DeletionRequest` is never enabled from the browser clock. A new/active hold removes the command after refetch, 409 refreshes all facts, and completion follows `get*DeletionProof`. Project deletion cannot target a project in the body; tenant deletion has no tenant argument. Completed tenant deletion clears session/cache and moves to a terminal signed-proof screen without trying to query erased data.
 
-- [ ] **Step 9: Verify wizard resume, Pack supply chain, policy confirmation, governance, and exact operation ownership**
+- [ ] **Step 9: Verify Provider onboarding, wizard resume, Pack supply chain, governance, and exact operation ownership**
 
-Run: `pnpm --filter @accord/web test -- project-setup-wizard.test.tsx role-preset-step.test.tsx agent-pack-step.test.tsx assessment-policy-step.test.tsx external-supplier-panel.test.tsx fresh-auth-api.test.ts fresh-auth-callback-route.test.tsx audit-explorer.test.tsx audit-export.test.tsx retention-policy-panel.test.tsx legal-hold-panel.test.tsx deletion-workbench.test.tsx`
+Run: `pnpm --filter @accord/web test -- project-setup-wizard.test.tsx provider-connections-panel.test.tsx role-preset-step.test.tsx agent-pack-step.test.tsx assessment-policy-step.test.tsx external-supplier-panel.test.tsx fresh-auth-api.test.ts fresh-auth-callback-route.test.tsx audit-explorer.test.tsx audit-export.test.tsx retention-policy-panel.test.tsx legal-hold-panel.test.tsx deletion-workbench.test.tsx`
 
-Expected: PASS with Task 4/16 registering exactly the Identity-owned generated operation set plus exact three-operation Agent Pack and seven-operation AssessmentPolicy registries. Architecture tests compare sorted keys to backend owner maps and reject aliases, missing/extra operations, `apiFetch`, handwritten API URLs/DTOs/enums, tenant/actor inputs, dynamic methods/hrefs, and non-generated mutation bodies. Pack tests cover resource inventory, digests/signature/trust root, compatibility matrix, closed `install_profile`/`local_install` structures with no shell-command field, required positive generated `distribution_epoch` without client freshness decisions, upgrade/rollback/revocation, same-origin HTTPS one-use download capability, streamed OCI digest verification with partial-output removal, and verified-lock readiness; download intent never becomes installation proof. Strict mode permits configured same-side administrator/principal overlap while retaining both explicit side principals and distinct-natural-person final confirmation; administrator-only fixtures expose no side authority; reduced Standard fixtures visibly downgrade assurance. Setup drafts resume; repository changes require confirmation/reconciliation; supplier expiry links exact impact/reassignment; a cold OIDC callback proves pre-completion session/CSRF bootstrap, one-use pending-record deletion, completion, old-context clearing, and post-rotation session revalidation in that order; audit remains immutable; capability URIs/epochs never persist or leave the application origin; retention is versioned; legal hold dominates; deletion approval/execution/proof are durable and distinct. Every MF action proves quoted ETag/numeric version equality, stable idempotency, runtime conditional CSRF, operation/resource-bound FreshAuth, 409 refetch, and no optimistic authoritative transition.
+Expected: PASS with Task 4/16 registering exactly the Identity-owned generated operation set plus exact 12-operation Provider Onboarding, three-operation Agent Pack and seven-operation AssessmentPolicy registries. Architecture tests compare sorted keys to backend owner maps and reject aliases, missing/extra operations, callback-edge functions in the browser client, `apiFetch`, handwritten API URLs/DTOs/enums, tenant/actor/Provider-native identity inputs, dynamic methods/hrefs, secret/code fields and non-generated mutation bodies. Provider tests cover all five families, one-time connection/callback/manual-capability flows, self-managed endpoint labels, opaque discovery, pending/reconciling non-selection, current trust/registration/unexpired-capability activation with an exact installation credential-epoch match, rotation/revocation and refresh recovery without browser-held credentials. Pack tests cover resource inventory, digests/signature/trust root, compatibility matrix, closed `install_profile`/`local_install` structures with no shell-command field, required positive generated `distribution_epoch` without client freshness decisions, upgrade/rollback/revocation, same-origin HTTPS one-use download capability, streamed OCI digest verification with partial-output removal, and verified-lock readiness; download intent never becomes installation proof. Strict mode permits configured same-side administrator/principal overlap while retaining both explicit side principals and distinct-natural-person final confirmation; administrator-only fixtures expose no side authority; reduced Standard fixtures visibly downgrade assurance. Setup drafts resume; repository changes require confirmation/reconciliation; supplier expiry links exact impact/reassignment; a cold OIDC callback proves pre-completion session/CSRF bootstrap, one-use pending-record deletion, completion, old-context clearing, and post-rotation session revalidation in that order; audit remains immutable; capability URIs/epochs never persist or leave the application origin; retention is versioned; legal hold dominates; deletion approval/execution/proof are durable and distinct. Every MF action proves quoted ETag/numeric version equality, stable idempotency, runtime conditional CSRF, operation/resource-bound FreshAuth, 409 refetch, and no optimistic authoritative transition.
 
 - [ ] **Step 10: Commit the administration checkpoint**
 

@@ -17,7 +17,7 @@
 - Every persisted resource and message carries `tenant_id`. Repository-scoped records additionally carry the provider's immutable repository ID. Generic keys use `{tenant_id, scope_type, scope_id}` and never synthesize repository IDs for tenant-level or pre-binding state.
 - `control-api` and `control-worker` use the same modular application code but have distinct entry points, service accounts, network policies, and database roles.
 - Webhook Edge accepts untrusted provider requests, verifies them, deduplicates them, and emits normalized signals. A webhook never authorizes a state transition and is never the only source of provider truth.
-- Webhook Edge, Attachment Scanner, Agent Pack Gateway, Requirement Publisher, Signing Service, Strict Merge Controller, and break-glass brokers remain independent Java deployments. They may depend on generated contracts and narrowly scoped libraries; security services may not depend on `apps/control-plane/modules/**`.
+- Webhook Edge, Attachment Scanner, Agent Pack Gateway, Provider Connector, Credential Broker, Signing Service, Strict Merge Controller, and break-glass brokers remain independent Java deployments. They may depend on generated contracts and narrowly scoped libraries; security services may not depend on `apps/control-plane/modules/**`.
 - Do not introduce an additional distributed cache or coordination database, Kafka, Camunda, a generic `common` module, source-code storage, or Git-content credentials in the control plane.
 
 ## Target Repository Map
@@ -36,7 +36,8 @@ apps/
   attachment-scanner/              # isolated scanner deployment, added by attachment plan
 security-services/                 # independent Java Spring Boot applications
   signing-service/                 # added by identity/trust plan
-  requirement-publisher/           # added by publication plan
+  provider-connector/              # added by Git delivery plan
+  credential-broker/               # added by Git delivery plan
   merge-controller/                # added by strict-delivery plan
 contracts/
   json-schema/ openapi/ protobuf/ events/ dsse-payloads/ golden-fixtures/
@@ -80,7 +81,6 @@ The current workspace is not implementation-ready merely because this file exist
 - Create: `apps/control-plane/modules/reliability/build.gradle`
 - Create: `apps/webhook-edge/build.gradle`
 - Create: `security-services/signing-service/build.gradle`
-- Create: `security-services/requirement-publisher/build.gradle`
 - Create: `security-services/merge-controller/build.gradle`
 - Create: `cmd/accordctl/build.gradle`
 - Create: `libs/java/observability/build.gradle`
@@ -133,8 +133,8 @@ foreach ($path in $requiredDesign) {
   if ($LASTEXITCODE -ne 0) { throw "design baseline is not tracked: $path" }
 }
 $approvedDigests = [ordered]@{
-  'requirements-agent-platform-design.md' = 'EB662C6A0FB2B0192AAE20D4DD2DD520DB29BD5E554141210C41F2C338A10BB1'
-  'docs/superpowers/specs/2026-07-25-accord-java-python-runtime-design.md' = '9780DD3A502072A38190A30FCDF326452052311E1B240545D8455A2811F3029A'
+  'requirements-agent-platform-design.md' = '0755A08228254311588EE0B867AFEBED6CD49E26B0FCCB790247BFDA31AB2C77'
+  'docs/superpowers/specs/2026-07-25-accord-java-python-runtime-design.md' = '46DE7309CB28F8E59B3FDAB4D6FA664AE4D932FC7F517741681CC25C3B84E4E1'
 }
 function Get-NormalizedSha256([string]$Path) {
   $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
@@ -191,7 +191,6 @@ $required = @(
   'apps/control-plane/modules/reliability/build.gradle',
   'apps/webhook-edge/build.gradle',
   'security-services/signing-service/build.gradle',
-  'security-services/requirement-publisher/build.gradle',
   'security-services/merge-controller/build.gradle',
   'cmd/accordctl/build.gradle',
   'libs/java/observability/build.gradle',
@@ -218,7 +217,6 @@ $gradleProjectDirectories = @(
   'apps/control-plane/modules/reliability',
   'apps/webhook-edge',
   'security-services/signing-service',
-  'security-services/requirement-publisher',
   'security-services/merge-controller',
   'cmd/accordctl',
   'libs/java/observability',
@@ -269,7 +267,6 @@ $settings = Get-Content -Raw -Encoding utf8 settings.gradle
   ':apps:control-plane:modules:reliability',
   ':apps:webhook-edge',
   ':security-services:signing-service',
-  ':security-services:requirement-publisher',
   ':security-services:merge-controller',
   ':cmd:accordctl',
   ':libs:java:observability',
@@ -403,7 +400,6 @@ include(
     ':apps:control-plane:modules:reliability',
     ':apps:webhook-edge',
     ':security-services:signing-service',
-    ':security-services:requirement-publisher',
     ':security-services:merge-controller',
     ':cmd:accordctl',
     ':libs:java:observability',
@@ -545,7 +541,7 @@ tasks.register('resolveAndLockAll') {
 }
 ```
 
-Use this exact Groovy DSL baseline for the four control-plane projects, Webhook Edge, the three security-service projects, and `libs/java/observability`. The application plugins and bounded dependencies are added only by the owning tasks; registering each target now prevents later red tests from failing merely because a runner is absent:
+Use this exact Groovy DSL baseline for the four control-plane projects, Webhook Edge, the two initial security-service projects, and `libs/java/observability`. The application plugins and bounded dependencies are added only by the owning tasks; registering each target now prevents later red tests from failing merely because a runner is absent:
 
 ```groovy
 plugins {
@@ -847,7 +843,7 @@ final class AccordCtlTest {
 }
 ```
 
-The Webhook Edge and three security-service build files use the Java library baseline above only until their owning tasks add Spring Boot entry points. They remain separate Gradle projects and deployable artifacts, may depend on generated contracts and capability-specific libraries, and may not depend on a control-plane domain module. `libs/java/observability` is the only initial shared-library target; it may contain telemetry types only and cannot become a generic utility package.
+The Webhook Edge and two initial security-service build files use the Java library baseline above only until their owning tasks add Spring Boot entry points. They remain separate Gradle projects and deployable artifacts, may depend on generated contracts and capability-specific libraries, and may not depend on a control-plane domain module. Provider Connector, Credential Broker, Agent Pack Gateway, Attachment Scanner, and BreakGlass Broker are registered only by their owning later plans rather than as empty Foundation placeholders. `libs/java/observability` is the only initial shared-library target; it may contain telemetry types only and cannot become a generic utility package.
 
 Create `scripts/run-gradle.ps1` so every plan command has the same Windows/Linux wrapper selection:
 
@@ -951,7 +947,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 git diff --exit-code -- gradle.lockfile settings-gradle.lockfile ':(glob)**/gradle.lockfile' gradle pnpm-lock.yaml uv.lock
 ```
 
-Expected: `design-baseline: PASS` and `workspace-layout: PASS`; Gradle lists exactly sixteen included subprojects (ten Java runtime/library/CLI projects and six shared verification projects); every Java compilation uses an Adoptium Java 21 toolchain; pnpm and uv complete without lock drift; the Python smoke test rejects `source_code`; the Picocli public contract test passes; the generated self-contained launcher prints `Usage: accordctl`; and strict dependency verification accepts every resolved artifact.
+Expected: `design-baseline: PASS` and `workspace-layout: PASS`; Gradle lists exactly fifteen included subprojects (nine Java runtime/library/CLI projects and six shared verification projects); every Java compilation uses an Adoptium Java 21 toolchain; pnpm and uv complete without lock drift; the Python smoke test rejects `source_code`; the Picocli public contract test passes; the generated self-contained launcher prints `Usage: accordctl`; and strict dependency verification accepts every resolved artifact.
 
 - [ ] **Step 6: Commit the locked workspace**
 
@@ -5970,6 +5966,8 @@ components:
 ~~~
 
 The templates render one workload per component, not one shared pod. Database secret keys map only to the owning process's URL/login/password environment names. Webhook bindings mount read-only at `/run/secrets/accord/webhook-bindings.json` on a memory-backed Secret/CSI projection and are never exposed as environment values.
+
+This Foundation checkpoint renders only the repository-event `webhook-edge` profile because the Provider authorization callback contract and edge-local V003 inbox do not exist until Git Delivery Task 5. The canonical V1 boundary manifest already reserves the required `provider-auth-callback-edge` runtime profile; Git Delivery Task 5 must extend this same central chart with that second profile using the same signed image digest and a distinct ServiceAccount, database role, encryption key, ingress path, mTLS audience, queue and NetworkPolicy. M0 must not expose a callback route or create a placeholder identity that can receive traffic.
 
 Worker implementation from Task 12 maintains `/tmp/accord/worker-live` and `worker-ready` with distinct liveness/readiness semantics. The exec command starts the independently packaged, JDK-only `worker-probe.jar` with the Java executable already present in the approved distroless runtime; it never invokes `/bin/sh`. The probe validates argument bounds, ownership, owner-only mode, regular-file type with `NOFOLLOW_LINKS`, bounded content, timestamp parsing, future-clock skew, and maximum age, and exits within the Kubernetes two-second timeout.
 

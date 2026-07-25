@@ -14,8 +14,8 @@ foreach ($path in $requiredDesign) {
   if ($LASTEXITCODE -ne 0) { throw "design baseline is not tracked: $path" }
 }
 $approvedDigests = [ordered]@{
-  'requirements-agent-platform-design.md' = 'EB662C6A0FB2B0192AAE20D4DD2DD520DB29BD5E554141210C41F2C338A10BB1'
-  'docs/superpowers/specs/2026-07-25-accord-java-python-runtime-design.md' = '9780DD3A502072A38190A30FCDF326452052311E1B240545D8455A2811F3029A'
+  'requirements-agent-platform-design.md' = '0755A08228254311588EE0B867AFEBED6CD49E26B0FCCB790247BFDA31AB2C77'
+  'docs/superpowers/specs/2026-07-25-accord-java-python-runtime-design.md' = '46DE7309CB28F8E59B3FDAB4D6FA664AE4D932FC7F517741681CC25C3B84E4E1'
 }
 function Get-NormalizedSha256([string]$Path) {
   $utf8 = New-Object System.Text.UTF8Encoding($false, $true)

@@ -30,7 +30,6 @@ include(
     ':apps:control-plane:modules:reliability',
     ':apps:webhook-edge',
     ':security-services:signing-service',
-    ':security-services:requirement-publisher',
     ':security-services:merge-controller',
     ':cmd:accordctl',
     ':libs:java:observability',
