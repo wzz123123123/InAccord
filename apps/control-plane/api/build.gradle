@@ -1,9 +1,31 @@
 plugins {
-    id 'java-library'
+    alias(libs.plugins.spring.boot)
+    id 'java'
 }
 
 dependencies {
-    testImplementation platform(libs.junit.bom)
-    testImplementation libs.junit.jupiter
-    testImplementation libs.assertj.core
+    implementation project(':apps:control-plane:modules:platform-kernel')
+    implementation project(':apps:control-plane:modules:reliability')
+    implementation enforcedPlatform(libs.spring.boot.bom)
+    implementation platform(libs.spring.modulith.bom)
+    implementation libs.spring.modulith.starter.core
+    implementation libs.spring.boot.web
+    implementation libs.spring.boot.actuator
+    testImplementation libs.spring.boot.test
+    testImplementation libs.spring.modulith.test
+    testImplementation libs.archunit.junit
 }
+
+sourceSets {
+    test {
+        java.srcDir '../../../tests/architecture'
+    }
+}
+
+tasks.withType(Test).configureEach { useJUnitPlatform() }
+
+ext.controlPlaneBoundary = [
+    expectedStartClass: 'com.inforvans.accord.ControlApiApplication',
+    webRuntime: 'required'
+]
+apply from: rootProject.file('tests/architecture/control-plane-runtime-boundaries.gradle')

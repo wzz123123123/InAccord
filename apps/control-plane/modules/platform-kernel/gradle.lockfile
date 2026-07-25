@@ -16,4 +16,6 @@ org.junit.platform:junit-platform-engine:1.13.1=testRuntimeClasspath
 org.junit.platform:junit-platform-launcher:1.13.1=testRuntimeClasspath
 org.junit:junit-bom:5.13.1=testCompileClasspath,testRuntimeClasspath
 org.opentest4j:opentest4j:1.3.0=testCompileClasspath,testRuntimeClasspath
+org.springframework.modulith:spring-modulith-api:1.4.1=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+org.springframework.modulith:spring-modulith-bom:1.4.1=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 empty=annotationProcessor,testAnnotationProcessor

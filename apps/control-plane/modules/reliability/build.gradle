@@ -3,6 +3,9 @@ plugins {
 }
 
 dependencies {
+    implementation project(':apps:control-plane:modules:platform-kernel')
+    api platform(libs.spring.modulith.bom)
+    api libs.spring.modulith.api
     testImplementation platform(libs.junit.bom)
     testImplementation libs.junit.jupiter
     testImplementation libs.assertj.core

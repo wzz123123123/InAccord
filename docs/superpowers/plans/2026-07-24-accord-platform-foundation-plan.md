@@ -1548,16 +1548,29 @@ full commit binding, ancestry, pinned Buf `1.55.1`, and inequality with `HEAD` b
 
 **Files:**
 - Create: `apps/control-plane/api/src/main/java/com/inforvans/accord/ControlApiApplication.java`
-- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/ControlWorkerApplication.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/ControlWorkerApplication.java`
 - Create: `apps/control-plane/modules/platform-kernel/src/main/java/com/inforvans/accord/platformkernel/package-info.java`
 - Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/package-info.java`
 - Create: `apps/control-plane/api/src/test/java/com/inforvans/accord/ModuleBoundaryTest.java`
+- Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/WorkerModuleBoundaryTest.java`
 - Create: `apps/control-plane/api/src/main/resources/application.yml`
 - Create: `apps/control-plane/worker/src/main/resources/application.yml`
 - Create: `tests/architecture/NoSecurityServiceCouplingTest.java`
+- Create: `tests/architecture/control-plane-runtime-boundaries.gradle`
+- Create: `tests/architecture/fixtures/com/inforvans/accord/signing/SigningBoundaryFixture.java`
+- Create: `tests/architecture/fixtures/com/inforvans/accord/gitprovider/GitProviderBoundaryFixture.java`
+- Create: `tests/architecture/fixtures/org/eclipse/jgit/JGitBoundaryFixture.java`
+- Create: `tests/architecture/fixtures/org/gitlab4j/api/GitLabBoundaryFixture.java`
+- Create: `tests/architecture/fixtures/org/kohsuke/github/GitHubBoundaryFixture.java`
 - Modify: `apps/control-plane/api/build.gradle`
 - Modify: `apps/control-plane/worker/build.gradle`
+- Modify: `apps/control-plane/modules/platform-kernel/build.gradle`
 - Modify: `apps/control-plane/modules/reliability/build.gradle`
+- Modify: `gradle/libs.versions.toml`
+- Generate: `apps/control-plane/{api,worker}/gradle.lockfile`
+- Generate: `apps/control-plane/modules/{platform-kernel,reliability}/gradle.lockfile`
+- Generate: `tests/{api,contract,fault-injection,integration,security-negative,state-machine}/gradle.lockfile`
+- Modify: `gradle/verification-metadata.xml`
 
 - [ ] **Step 1: Write failing module and trust-boundary tests**
 
@@ -1578,10 +1591,34 @@ class ModuleBoundaryTest {
     @Test
     void controlPlaneModulesHaveNoCyclesOrUndeclaredAccess() {
         ApplicationModules modules = ApplicationModules.of(ControlApiApplication.class);
-        REQUIRED_MODULES.forEach(expected ->
-            assertThat(modules.getModuleByName(expected))
-                .as("module %s must be discovered", expected)
-                .isPresent());
+        assertThat(modules.stream().map(module -> module.getIdentifier().toString()))
+            .containsExactlyInAnyOrderElementsOf(REQUIRED_MODULES);
+        modules.verify();
+    }
+}
+```
+
+Create `WorkerModuleBoundaryTest.java` with the same exact-set assertion against
+`ControlWorkerApplication.class`; this prevents either deployable from silently discovering an
+entry-point or adapter package as a domain module:
+
+```java
+package com.inforvans.accord;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.util.Set;
+import org.junit.jupiter.api.Test;
+import org.springframework.modulith.core.ApplicationModules;
+
+class WorkerModuleBoundaryTest {
+    private static final Set<String> REQUIRED_MODULES = Set.of("platformkernel", "reliability");
+
+    @Test
+    void workerLoadsTheSameControlPlaneModules() {
+        ApplicationModules modules = ApplicationModules.of(ControlWorkerApplication.class);
+        assertThat(modules.stream().map(module -> module.getIdentifier().toString()))
+            .containsExactlyInAnyOrderElementsOf(REQUIRED_MODULES);
         modules.verify();
     }
 }
@@ -1593,32 +1630,123 @@ Create `NoSecurityServiceCouplingTest.java`:
 package com.inforvans.accord.architecture;
 
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
+import static org.assertj.core.api.Assertions.assertThat;
 
+import com.tngtech.archunit.base.DescribedPredicate;
+import com.tngtech.archunit.core.domain.JavaClass;
 import com.tngtech.archunit.core.domain.JavaClasses;
 import com.tngtech.archunit.core.importer.ClassFileImporter;
 import org.junit.jupiter.api.Test;
 
 class NoSecurityServiceCouplingTest {
+    private static final DescribedPredicate<JavaClass> FORBIDDEN_DEPENDENCIES =
+        JavaClass.Predicates.resideInAnyPackage(
+            "..securityservices..",
+            "..signing..",
+            "..gitprovider..",
+            "..gitcontent..",
+            "..providerconnector..",
+            "..credentialbroker..",
+            "..mergecontroller..",
+            "org.eclipse.jgit..",
+            "org.gitlab4j..",
+            "org.kohsuke.github..");
+
     private final JavaClasses classes = new ClassFileImporter()
         .importPackages("com.inforvans.accord");
 
     @Test
     void controlPlaneCannotDependOnSecurityDeploymentsOrGitContentClients() {
+        assertThat(classes.stream()
+            .anyMatch(type -> type.getPackageName().startsWith("com.inforvans.accord.platformkernel")))
+            .as("platform-kernel classes must be imported")
+            .isTrue();
+        assertThat(classes.stream()
+            .anyMatch(type -> type.getPackageName().startsWith("com.inforvans.accord.reliability")))
+            .as("reliability classes must be imported")
+            .isTrue();
+
         noClasses().that().resideInAPackage("com.inforvans.accord..")
-            .should().dependOnClassesThat().resideInAnyPackage(
-                "..securityservices..",
-                "..gitcontent..")
-            .allowEmptyShould(true)
+            .should().dependOnClassesThat(FORBIDDEN_DEPENDENCIES)
             .check(classes);
     }
+
+    @Test
+    void forbiddenPredicateMatchesRealSecurityAndGitClientNamespaces() throws Exception {
+        Class<?>[] fixtures = {
+            Class.forName("com.inforvans.accord.signing.SigningBoundaryFixture"),
+            Class.forName("com.inforvans.accord.gitprovider.GitProviderBoundaryFixture"),
+            Class.forName("org.eclipse.jgit.JGitBoundaryFixture"),
+            Class.forName("org.gitlab4j.api.GitLabBoundaryFixture"),
+            Class.forName("org.kohsuke.github.GitHubBoundaryFixture")
+        };
+        JavaClasses fixtureClasses = new ClassFileImporter().importClasses(fixtures);
+
+        assertThat(fixtureClasses).allSatisfy(type ->
+            assertThat(FORBIDDEN_DEPENDENCIES.test(type))
+                .as(type.getName())
+                .isTrue());
+    }
+}
+```
+
+Create each listed fixture as an empty `public final` class in the package encoded by its path,
+with only a private constructor. The fixtures are test-only namespace probes: the string-based
+`Class.forName` references prove the deny predicate matches real signing and provider namespaces
+without creating a dependency that would make the production coupling rule fail.
+
+```java
+// tests/architecture/fixtures/com/inforvans/accord/signing/SigningBoundaryFixture.java
+package com.inforvans.accord.signing;
+public final class SigningBoundaryFixture {
+    private SigningBoundaryFixture() {}
+}
+```
+
+```java
+// tests/architecture/fixtures/com/inforvans/accord/gitprovider/GitProviderBoundaryFixture.java
+package com.inforvans.accord.gitprovider;
+public final class GitProviderBoundaryFixture {
+    private GitProviderBoundaryFixture() {}
+}
+```
+
+```java
+// tests/architecture/fixtures/org/eclipse/jgit/JGitBoundaryFixture.java
+package org.eclipse.jgit;
+public final class JGitBoundaryFixture {
+    private JGitBoundaryFixture() {}
+}
+```
+
+```java
+// tests/architecture/fixtures/org/gitlab4j/api/GitLabBoundaryFixture.java
+package org.gitlab4j.api;
+public final class GitLabBoundaryFixture {
+    private GitLabBoundaryFixture() {}
+}
+```
+
+```java
+// tests/architecture/fixtures/org/kohsuke/github/GitHubBoundaryFixture.java
+package org.kohsuke.github;
+public final class GitHubBoundaryFixture {
+    private GitHubBoundaryFixture() {}
 }
 ```
 
 - [ ] **Step 2: Run the tests and verify the missing application roots**
 
-Run: `./gradlew :apps:control-plane:api:test --tests '*ModuleBoundaryTest'`
+Run:
 
-Expected: FAIL because `ControlApiApplication` is unresolved and the Modulith test dependency is absent.
+```bash
+./gradlew :apps:control-plane:api:test :apps:control-plane:worker:test \
+  --tests '*ModuleBoundaryTest' --tests '*NoSecurityServiceCouplingTest'
+```
+
+Expected: FAIL because both application roots are unresolved and the Modulith test dependency is
+absent. The architecture rule must already prove that both control-plane module packages were
+imported, so an empty import can never make the rule pass.
 
 - [ ] **Step 3: Create separate API and worker entry points with one explicit module root**
 
@@ -1631,7 +1759,7 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.modulith.Modulithic;
 
-@Modulithic(systemName = "Accord")
+@Modulithic(systemName = "Accord Control API")
 @SpringBootApplication(scanBasePackages = "com.inforvans.accord")
 public class ControlApiApplication {
     public static void main(String[] args) {
@@ -1644,11 +1772,13 @@ public class ControlApiApplication {
 Create `ControlWorkerApplication.java`:
 
 ```java
-package com.inforvans.accord.controlplane.worker;
+package com.inforvans.accord;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.modulith.Modulithic;
 
+@Modulithic(systemName = "Accord Control Worker")
 @SpringBootApplication(scanBasePackages = "com.inforvans.accord")
 public class ControlWorkerApplication {
     public static void main(String[] args) {
@@ -1658,7 +1788,7 @@ public class ControlWorkerApplication {
 }
 ```
 
-Create the same minimal `application.yml` in both the API and worker projects:
+Create this minimal `application.yml` in the API project:
 
 ```yaml
 spring:
@@ -1666,7 +1796,21 @@ spring:
     detection-strategy: explicitly-annotated
 ```
 
+Create the Worker `application.yml` with the same module strategy and an explicit non-web
+process type:
+
+```yaml
+spring:
+  main:
+    web-application-type: none
+  modulith:
+    detection-strategy: explicitly-annotated
+```
+
 The root package and scan base intentionally cover every current and future `com.inforvans.accord.*` control-plane module. The `explicitly-annotated` strategy is the Spring Modulith 1.4.1 built-in equivalent of `ApplicationModuleDetectionStrategy.explicitlyAnnotated()`; it recursively discovers only packages carrying `@ApplicationModule`, so entry-point and adapter packages are not accidentally promoted to modules. The worker must use the same component-scan root and strategy because it loads the same domain modules in a different process role.
+
+Both application classes deliberately live in `com.inforvans.accord`. Placing the Worker root
+below that package would change the Modulith source root and make discovery differ from the API.
 
 Create the two `package-info.java` declarations:
 
@@ -1699,6 +1843,7 @@ plugins {
 dependencies {
     implementation project(':apps:control-plane:modules:platform-kernel')
     implementation project(':apps:control-plane:modules:reliability')
+    implementation enforcedPlatform(libs.spring.boot.bom)
     implementation platform(libs.spring.modulith.bom)
     implementation libs.spring.modulith.starter.core
     implementation libs.spring.boot.web
@@ -1709,6 +1854,12 @@ dependencies {
 }
 
 tasks.withType(Test).configureEach { useJUnitPlatform() }
+
+ext.controlPlaneBoundary = [
+    expectedStartClass: 'com.inforvans.accord.ControlApiApplication',
+    webRuntime: 'required'
+]
+apply from: rootProject.file('tests/architecture/control-plane-runtime-boundaries.gradle')
 ```
 
 Replace `apps/control-plane/worker/build.gradle` with:
@@ -1722,14 +1873,37 @@ plugins {
 dependencies {
     implementation project(':apps:control-plane:modules:platform-kernel')
     implementation project(':apps:control-plane:modules:reliability')
+    implementation enforcedPlatform(libs.spring.boot.bom)
     implementation platform(libs.spring.modulith.bom)
     implementation libs.spring.modulith.starter.core
     implementation libs.spring.boot.actuator
     testImplementation libs.spring.boot.test
+    testImplementation libs.spring.modulith.test
     testImplementation libs.archunit.junit
 }
 
 tasks.withType(Test).configureEach { useJUnitPlatform() }
+
+ext.controlPlaneBoundary = [
+    expectedStartClass: 'com.inforvans.accord.ControlWorkerApplication',
+    webRuntime: 'forbidden'
+]
+apply from: rootProject.file('tests/architecture/control-plane-runtime-boundaries.gradle')
+```
+
+Add the lightweight Modulith annotation API, without a Boot runtime, to
+`apps/control-plane/modules/platform-kernel/build.gradle`:
+
+```groovy
+dependencies {
+    api platform(libs.spring.modulith.bom)
+    api libs.spring.modulith.api
+    implementation libs.jackson.core
+    implementation libs.jcs
+    testImplementation platform(libs.junit.bom)
+    testImplementation libs.junit.jupiter
+    testImplementation libs.assertj.core
+}
 ```
 
 Replace `apps/control-plane/modules/reliability/build.gradle` with:
@@ -1741,17 +1915,32 @@ plugins {
 
 dependencies {
     implementation project(':apps:control-plane:modules:platform-kernel')
-    implementation platform(libs.spring.modulith.bom)
-    implementation libs.spring.modulith.starter.core
+    api platform(libs.spring.modulith.bom)
+    api libs.spring.modulith.api
     testImplementation platform(libs.junit.bom)
     testImplementation libs.junit.jupiter
     testImplementation libs.assertj.core
 }
-
-tasks.withType(Test).configureEach { useJUnitPlatform() }
 ```
 
-Place `NoSecurityServiceCouplingTest.java` under the API test source set as well as `tests/architecture/` by adding this source-set declaration to the API build file:
+Add exact catalog aliases for `spring-boot-dependencies` and
+`spring-modulith-api`:
+
+```toml
+[libraries]
+spring-boot-bom = { module = "org.springframework.boot:spring-boot-dependencies", version.ref = "spring-boot" }
+spring-modulith-api = { module = "org.springframework.modulith:spring-modulith-api" }
+```
+
+The deployable applications use the Boot BOM as an enforced platform:
+Modulith 1.4.1 requests Boot 3.5.2 transitively, while the approved and plugin-aligned runtime is
+Boot 3.5.3. The explicit enforced platform makes that intentional patch alignment visible and
+keeps `failOnVersionConflict()` effective for every unrelated conflict. Boot application tests
+retain the coherent JUnit line managed and tested by Boot; standalone library tests continue to use
+the repository JUnit BOM directly.
+
+Place `NoSecurityServiceCouplingTest.java` under both deployables' test source sets as well as
+`tests/architecture/` by adding this source-set declaration to both build files:
 
 ```groovy
 sourceSets {
@@ -1761,21 +1950,339 @@ sourceSets {
 }
 ```
 
+Create `control-plane-runtime-boundaries.gradle` as the shared executable-boundary gate applied
+by both deployables:
+
+```groovy
+import java.util.jar.JarFile
+import java.util.jar.JarInputStream
+import org.gradle.api.DefaultTask
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.artifacts.component.ProjectComponentIdentifier
+import org.gradle.api.file.ConfigurableFileCollection
+import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.provider.ListProperty
+import org.gradle.api.provider.Property
+import org.gradle.api.tasks.Classpath
+import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
+import org.gradle.api.tasks.TaskAction
+import org.gradle.work.DisableCachingByDefault
+
+@DisableCachingByDefault(because = 'This verification task has no outputs to cache.')
+abstract class VerifyControlPlaneRuntimeBoundary extends DefaultTask {
+    private static final List<String> FORBIDDEN_CLASS_PREFIXES = [
+        'BOOT-INF/classes/com/inforvans/accord/securityservices/',
+        'BOOT-INF/classes/com/inforvans/accord/signing/',
+        'BOOT-INF/classes/com/inforvans/accord/gitprovider/',
+        'BOOT-INF/classes/com/inforvans/accord/gitcontent/',
+        'BOOT-INF/classes/com/inforvans/accord/providerconnector/',
+        'BOOT-INF/classes/com/inforvans/accord/credentialbroker/',
+        'BOOT-INF/classes/com/inforvans/accord/mergecontroller/'
+    ]
+    private static final List<String> FORBIDDEN_LIBRARY_FRAGMENTS = [
+        'jgit',
+        'gitlab4j',
+        'github-api',
+        'git-content',
+        'signing-service',
+        'provider-connector',
+        'credential-broker',
+        'merge-controller'
+    ]
+    private static final List<String> WEB_LIBRARY_PREFIXES = [
+        'BOOT-INF/lib/spring-web-',
+        'BOOT-INF/lib/spring-webmvc-',
+        'BOOT-INF/lib/tomcat-',
+        'BOOT-INF/lib/jetty-',
+        'BOOT-INF/lib/undertow-'
+    ]
+    private static final List<String> EMBEDDED_SERVER_LIBRARY_PREFIXES = [
+        'BOOT-INF/lib/tomcat-embed-core-',
+        'BOOT-INF/lib/jetty-server-',
+        'BOOT-INF/lib/undertow-core-'
+    ]
+    private static final List<String> FORBIDDEN_NESTED_CLASS_PREFIXES = [
+        'com/inforvans/accord/securityservices/',
+        'com/inforvans/accord/signing/',
+        'com/inforvans/accord/gitprovider/',
+        'com/inforvans/accord/gitcontent/',
+        'com/inforvans/accord/providerconnector/',
+        'com/inforvans/accord/credentialbroker/',
+        'com/inforvans/accord/mergecontroller/',
+        'org/eclipse/jgit/',
+        'org/gitlab4j/',
+        'org/kohsuke/github/'
+    ]
+
+    @Classpath
+    abstract ConfigurableFileCollection getRuntimeClasspath()
+
+    @Input
+    abstract ListProperty<String> getRuntimeComponents()
+
+    @InputFile
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract RegularFileProperty getArchiveFile()
+
+    @Input
+    abstract Property<String> getExpectedStartClass()
+
+    @Input
+    abstract Property<String> getWebRuntimePolicy()
+
+    @TaskAction
+    void verifyBoundary() {
+        [
+            'project|:security-services:signing-service',
+            'module|org.eclipse.jgit|org.eclipse.jgit',
+            'module|org.gitlab4j|gitlab4j-api',
+            'module|org.kohsuke|github-api',
+            'module|com.example|git-content-client'
+        ].each { probe ->
+            if (!VerifyControlPlaneRuntimeBoundary.isForbiddenCoordinate(probe)) {
+                throw new GradleException("Forbidden component policy missed probe: ${probe}")
+            }
+        }
+        [
+            'BOOT-INF/classes/com/inforvans/accord/signing/service/Signer.class',
+            'BOOT-INF/classes/com/inforvans/accord/gitprovider/GitClient.class',
+            'BOOT-INF/lib/org.eclipse.jgit-7.0.0.jar',
+            'BOOT-INF/lib/gitlab4j-api-6.0.0.jar',
+            'BOOT-INF/lib/github-api-1.330.jar',
+            'BOOT-INF/lib/git-content-client-1.0.0.jar'
+        ].each { probe ->
+            if (!VerifyControlPlaneRuntimeBoundary.isForbiddenArchiveEntry(probe)) {
+                throw new GradleException("Forbidden archive policy missed probe: ${probe}")
+            }
+        }
+        if (VerifyControlPlaneRuntimeBoundary.hasEmbeddedServer([
+                'BOOT-INF/lib/spring-web-6.2.8.jar'
+            ]) || !VerifyControlPlaneRuntimeBoundary.hasEmbeddedServer([
+                'BOOT-INF/lib/tomcat-embed-core-10.1.42.jar'
+            ])) {
+            throw new GradleException('Embedded server policy failed its positive/negative probes')
+        }
+        [
+            'com/inforvans/accord/signing/Signer.class',
+            'org/eclipse/jgit/api/Git.class'
+        ].each { probe ->
+            if (!VerifyControlPlaneRuntimeBoundary.isForbiddenNestedClassEntry(probe)) {
+                throw new GradleException("Nested archive policy missed probe: ${probe}")
+            }
+        }
+
+        def forbiddenComponents = runtimeComponents.get().findAll {
+            VerifyControlPlaneRuntimeBoundary.isForbiddenCoordinate(it)
+        }
+        if (!forbiddenComponents.empty) {
+            throw new GradleException(
+                "Forbidden runtime components: ${forbiddenComponents.join(', ')}")
+        }
+
+        new JarFile(archiveFile.get().asFile).withCloseable { jar ->
+            def startClass = jar.manifest.mainAttributes.getValue('Start-Class')
+            if (startClass != expectedStartClass.get()) {
+                throw new GradleException(
+                    "Expected Start-Class ${expectedStartClass.get()}, found ${startClass}")
+            }
+
+            def entries = []
+            def enumeration = jar.entries()
+            while (enumeration.hasMoreElements()) {
+                entries.add(enumeration.nextElement().name)
+            }
+
+            def forbiddenEntries = entries.findAll {
+                VerifyControlPlaneRuntimeBoundary.isForbiddenArchiveEntry(it)
+            }
+            if (!forbiddenEntries.empty) {
+                throw new GradleException(
+                    "Forbidden executable archive entries: ${forbiddenEntries.join(', ')}")
+            }
+
+            def forbiddenNestedEntries = []
+            entries.findAll {
+                it.startsWith('BOOT-INF/lib/') && it.endsWith('.jar')
+            }.each { nestedArchive ->
+                new JarInputStream(jar.getInputStream(jar.getJarEntry(nestedArchive)))
+                    .withCloseable { nestedJar ->
+                        def nestedEntry = nestedJar.nextJarEntry
+                        while (nestedEntry != null) {
+                            if (VerifyControlPlaneRuntimeBoundary
+                                    .isForbiddenNestedClassEntry(nestedEntry.name)) {
+                                forbiddenNestedEntries.add(
+                                    "${nestedArchive}!/${nestedEntry.name}")
+                            }
+                            nestedEntry = nestedJar.nextJarEntry
+                        }
+                    }
+            }
+            if (!forbiddenNestedEntries.empty) {
+                throw new GradleException(
+                    "Forbidden nested archive entries: ${forbiddenNestedEntries.join(', ')}")
+            }
+
+            def webLibraries = entries.findAll { entry ->
+                VerifyControlPlaneRuntimeBoundary.WEB_LIBRARY_PREFIXES.any {
+                    entry.startsWith(it)
+                }
+            }
+            if (webRuntimePolicy.get() == 'required' &&
+                    !VerifyControlPlaneRuntimeBoundary.hasEmbeddedServer(entries)) {
+                throw new GradleException('The control API executable is missing its web runtime')
+            }
+            if (webRuntimePolicy.get() == 'forbidden' && !webLibraries.empty) {
+                throw new GradleException(
+                    "The control Worker executable contains web libraries: ${webLibraries.join(', ')}")
+            }
+        }
+    }
+
+    static boolean isForbiddenCoordinate(String coordinate) {
+        if (coordinate.startsWith('project|')) {
+            return coordinate.substring('project|'.length()).startsWith(':security-services:')
+        }
+        if (!coordinate.startsWith('module|')) {
+            return false
+        }
+
+        def parts = coordinate.split('\\|', -1)
+        if (parts.length != 3) {
+            return false
+        }
+        def group = parts[1]
+        def module = parts[2]
+        def normalizedModule = module.toLowerCase(Locale.ROOT).replaceAll('[^a-z0-9]', '')
+        group.startsWith('org.eclipse.jgit') ||
+            group.startsWith('org.gitlab4j') ||
+            (group == 'org.kohsuke' && module == 'github-api') ||
+            normalizedModule.contains('gitcontent')
+    }
+
+    static boolean isForbiddenArchiveEntry(String entry) {
+        def normalized = entry.toLowerCase(Locale.ROOT)
+        VerifyControlPlaneRuntimeBoundary.FORBIDDEN_CLASS_PREFIXES.any {
+            entry.startsWith(it)
+        } ||
+            (entry.startsWith('BOOT-INF/lib/') &&
+                (VerifyControlPlaneRuntimeBoundary.FORBIDDEN_LIBRARY_FRAGMENTS.any {
+                    normalized.contains(it)
+                } || normalized.replaceAll('[^a-z0-9]', '').contains('gitcontent')))
+    }
+
+    static boolean hasEmbeddedServer(Collection<String> entries) {
+        entries.any { entry ->
+            VerifyControlPlaneRuntimeBoundary.EMBEDDED_SERVER_LIBRARY_PREFIXES.any {
+                entry.startsWith(it)
+            }
+        }
+    }
+
+    static boolean isForbiddenNestedClassEntry(String entry) {
+        VerifyControlPlaneRuntimeBoundary.FORBIDDEN_NESTED_CLASS_PREFIXES.any {
+            entry.startsWith(it)
+        }
+    }
+}
+
+def boundary = project.extensions.extraProperties.get('controlPlaneBoundary')
+def configuredStartClass = boundary.expectedStartClass as String
+def configuredWebRuntimePolicy = boundary.webRuntime as String
+
+if (!(configuredWebRuntimePolicy in ['required', 'forbidden'])) {
+    throw new GradleException(
+        "Unsupported control-plane web runtime policy: ${configuredWebRuntimePolicy}")
+}
+
+def runtimeComponentCoordinates = configurations.runtimeClasspath.incoming.artifacts
+    .resolvedArtifacts.map { artifacts ->
+        artifacts.collect { artifact ->
+            def id = artifact.id.componentIdentifier
+            if (id instanceof ProjectComponentIdentifier) {
+                return "project|${id.projectPath}"
+            }
+            if (id instanceof ModuleComponentIdentifier) {
+                return "module|${id.group}|${id.module}"
+            }
+            "other|${id.displayName}"
+        }.unique().sort()
+    }
+
+def bootJarTask = tasks.named('bootJar')
+def boundaryTask = tasks.register(
+    'verifyControlPlaneRuntimeBoundary', VerifyControlPlaneRuntimeBoundary) {
+    group = 'verification'
+    description = 'Verifies control-plane process, dependency, and executable archive boundaries.'
+    dependsOn bootJarTask
+    runtimeClasspath.from(configurations.runtimeClasspath)
+    runtimeComponents.set(runtimeComponentCoordinates)
+    archiveFile.set(bootJarTask.flatMap { it.archiveFile })
+    expectedStartClass.set(configuredStartClass)
+    webRuntimePolicy.set(configuredWebRuntimePolicy)
+}
+
+tasks.named('check') {
+    dependsOn boundaryTask
+}
+```
+
+The component and archive policy probes make the deny logic non-vacuous. The task resolves the
+actual runtime graph, opens the produced Boot JAR, checks its `Start-Class`, scans embedded
+classes/libraries and every nested dependency JAR namespace, enforces the API/Worker web-runtime
+policy, and is a dependency of standard
+`check` in both deployables. Its task action reads only annotated scalar, component-list,
+classpath, and archive-file inputs; it never captures a `Project`, `Configuration`, `Task`, or
+`TaskProvider`, so the repository's default configuration cache remains enforceable.
+
+Refresh every affected lock and then regenerate verification evidence in a separate invocation:
+
+```bash
+./gradlew resolveAndLockAll --write-locks --no-configuration-cache --no-daemon
+./gradlew resolveAndLockAll --write-verification-metadata sha256,pgp \
+  --no-configuration-cache --no-daemon
+```
+
+Expected: both commands succeed. Review every new ignored PGP key; an unavailable key is acceptable
+only when the entry retains the exact key-server reason and every affected artifact remains pinned
+by SHA-256. `verify-metadata` and `verify-signatures` remain enabled, every trusted key is scoped,
+and no artifact lacks checksum or trusted-signature evidence.
+
 - [ ] **Step 5: Verify both application boundaries**
 
 Run:
 
 ```bash
-./gradlew :apps:control-plane:api:test --tests '*ModuleBoundaryTest' --tests '*NoSecurityServiceCouplingTest'
-./gradlew :apps:control-plane:api:bootJar :apps:control-plane:worker:bootJar
+./gradlew :apps:control-plane:api:check :apps:control-plane:worker:check \
+  --rerun-tasks --dependency-verification=strict
+./gradlew :apps:control-plane:api:check :apps:control-plane:worker:check \
+  --rerun-tasks --dependency-verification=strict
 ```
 
-Expected: both architecture tests pass; two different executable jars are produced; `jar tf` shows no package under `securityservices` or `gitcontent` in either jar.
+The two `check` lifecycles run the shared ArchUnit suite and
+`verifyControlPlaneRuntimeBoundary`. That gate opens both Boot JAR manifests and entries with a
+structured ZIP reader. It asserts that the API starts
+`com.inforvans.accord.ControlApiApplication`, the Worker starts
+`com.inforvans.accord.ControlWorkerApplication`, neither JAR contains `securityservices` or
+`gitcontent`/`git-content`, including inside a renamed nested library; the API embeds a supported
+Tomcat, Jetty, or Undertow server core rather than only `spring-web`, and the Worker embeds no
+Spring Web, Tomcat, Undertow, or Jetty library. It also resolves both `runtimeClasspath` graphs and fails on any
+`security-services`, JGit, GitLab4J, GitHub, or `gitcontent` component.
+
+Expected: both architecture suites pass; exactly two different executable JARs are produced; the
+Worker stays non-web; and all forbidden namespace probes, package rules, archive entries, and
+dependency-graph checks pass inside the standard Gradle lifecycle. The first invocation stores a
+configuration-cache entry with zero problems, and the identical second invocation reports
+`Configuration cache entry reused`; disabling the cache is not an acceptable substitute.
 
 - [ ] **Step 6: Commit the executable boundaries**
 
 ```bash
-git add apps/control-plane tests/architecture
+git add apps/control-plane tests/architecture gradle/libs.versions.toml \
+  gradle/verification-metadata.xml tests/*/gradle.lockfile \
+  docs/superpowers/plans/2026-07-24-accord-platform-foundation-plan.md
 git commit -m "feat: enforce control-plane module boundaries"
 ```
 
