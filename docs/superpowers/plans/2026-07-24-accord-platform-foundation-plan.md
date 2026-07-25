@@ -1529,15 +1529,20 @@ buf generate
 
 Expected: `protobuf-contracts: PASS`; generation creates Java and gRPC sources under ignored `build/`.
 
-- [ ] **Step 5: Commit and verify the protobuf compatibility baseline**
+- [ ] **Step 5: Commit the initial protobuf development baseline**
 
 ```bash
-git add buf.yaml buf.gen.yaml contracts/protobuf tests/contracts/verify-protobuf.ps1
+git add docs/superpowers/plans/2026-07-24-accord-platform-foundation-plan.md buf.yaml buf.gen.yaml contracts/protobuf tests/contracts/verify-protobuf.ps1
 git commit -m "feat: define protobuf service boundaries"
-buf breaking --against '.git#ref=HEAD'
 ```
 
-Expected: the commit succeeds and Buf reports no breaking change against the newly committed baseline.
+Expected: the commit succeeds and establishes the first development baseline. Do not run
+`buf breaking` against `HEAD`; a self-comparison is vacuous and is not compatibility evidence.
+The first accepted production baseline is the signed `accord-contract-baseline-v1-m0` tag created
+by the enterprise master plan. After that tag exists, every later protobuf change runs
+`tests/architecture/verify-protobuf-compatibility.ps1`, which verifies the signed tag, its exact
+full commit binding, ancestry, pinned Buf `1.55.1`, and inequality with `HEAD` before invoking
+`buf breaking --against ".git#ref=<full-baseline-sha>"`.
 
 ### Task 5: Enforce Spring Modulith And Deployment Boundaries
 

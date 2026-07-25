@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package accord.reliability.v1;
+
+import "accord/common/v1/context.proto";
+
+option java_multiple_files = true;
+option java_package = "com.inforvans.accord.contracts.reliability.v1";
+
+service ReliabilityAdminService {
+  rpc RetryOutboxEvent(RetryOutboxEventRequest) returns (RetryOutboxEventResponse);
+}
+
+message RetryOutboxEventRequest {
+  accord.common.v1.RequestContext context = 1;
+  string event_id = 2;
+  string idempotency_key = 3;
+}
+
+message RetryOutboxEventResponse {
+  string event_id = 1;
+  string state = 2;
+}

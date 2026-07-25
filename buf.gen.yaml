@@ -1,0 +1,9 @@
+version: v2
+clean: true
+plugins:
+  - remote: buf.build/protocolbuffers/java:v29.3
+    revision: 1
+    out: build/generated/protobuf/java
+  - remote: buf.build/grpc/java:v1.71.0
+    revision: 1
+    out: build/generated/protobuf/grpc
