@@ -3239,662 +3239,196 @@ created or modified source/configuration file listed above.
 ### Task 7: Implement Expected-Version CAS And Persistent Idempotency
 
 **Files:**
-- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExpectedVersion.java`
-- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/CommandKey.java`
-- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/StoredHttpResult.java`
-- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ClaimLease.java`
-- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/Claim.java`
-- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/VersionConflict.java`
-- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/JooqCommandGate.java`
-- Create: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/JooqCommandGateTest.java`
-- Modify: `apps/control-plane/modules/reliability/build.gradle`
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExpectedVersion.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/CommandKey.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/StoredHttpResult.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ClaimLease.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/Claim.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/VersionConflict.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/JooqCommandGate.java
+- Create: apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/JooqCommandGateTest.java
+- Modify: apps/control-plane/modules/reliability/build.gradle
+- Modify: apps/control-plane/modules/reliability/gradle.lockfile
+- Modify: apps/control-plane/api/gradle.lockfile
+- Modify: apps/control-plane/worker/gradle.lockfile
+- Modify: gradle/verification-metadata.xml
 
-- [ ] **Step 1: Write failing integration tests for replay, digest conflict, and CAS**
+- [ ] **Step 1: Write failing PostgreSQL integration tests for command ownership and CAS**
 
-Create `JooqCommandGateTest.java`:
+Use the pinned PostgreSQL image and the real API/worker login roles. Each test opens explicit physical JDBC connections, executes SET ROLE, installs transaction-local app.tenant_id, and calls JooqCommandGate with the caller-owned jOOQ DSLContext. Cover these exact behaviors:
 
-```java
-package com.inforvans.accord.reliability;
+1. simultaneous initial claims produce one generation-1 acquisition and one in-progress result;
+2. the same key with a changed fingerprint returns a payload-free conflict without changing the stored fingerprint;
+3. simultaneous expired takeovers produce one new generation/token and one in-progress result;
+4. an independent administrator connection observes the waiter's exact PostgreSQL backend PID as an active `FOR UPDATE` Lock wait with an ungranted `pg_locks` entry before the original database deadline; the waiter then decides expiry using database time observed after it acquires the row lock;
+5. simultaneous renewals of the same fence allow exactly one extension;
+6. renewal extends the prior stored deadline and rejects altered owner, generation, token, or exact deadline;
+7. simultaneous ExpectedVersion(0) creations store version 1 and report actual version 1 to the loser;
+8. simultaneous ExpectedVersion(1) updates store version 2 and report actual version 2 to the loser;
+9. a missing positive expected version does not insert an aggregate head;
+10. stale or naturally expired completion rolls back a preceding aggregate mutation;
+11. completed replay preserves exact body text and canonical logical headers;
+12. completion requires the matching tenant/type/id/version row in aggregate_head;
+13. public values reject malformed, oversized, control-bearing, or sensitive input before SQL; shared actor, route, owner, and aggregate-type limits count Unicode code points like PostgreSQL `varchar(n)`, accept supplementary code points at each exact limit, reject one beyond it, and reject U+0000 or isolated surrogates; the idempotency key rejects non-ASCII characters; response header values allow horizontal tab and valid supplementary Unicode but reject controls and isolated surrogates with strict UTF-8 validation; and the bounded response body accepts exact-limit UTF-8;
+14. malformed persisted header JSON fails closed;
+15. deletion between insert conflict and locked select is retried once.
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+Run:
 
-import com.inforvans.accord.database.ControlPlaneTestRoles;
-import java.time.Clock;
-import java.time.Duration;
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.util.Map;
-import java.util.UUID;
-import java.util.function.Function;
-import org.flywaydb.core.Flyway;
-import org.jooq.DSLContext;
-import org.jooq.Record;
-import org.jooq.SQLDialect;
-import org.jooq.impl.DSL;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.testcontainers.containers.PostgreSQLContainer;
+~~~powershell
+$env:JAVA_HOME='C:\Users\m1560\.jdks\jdk-21.0.11+10'
+.\gradlew.bat :apps:control-plane:modules:reliability:test --tests '*JooqCommandGateTest' --no-daemon --rerun-tasks
+~~~
 
-class JooqCommandGateTest {
-    private static final UUID TENANT_ID =
-        UUID.fromString("10000000-0000-0000-0000-000000000001");
-    private static final UUID AGGREGATE_ID =
-        UUID.fromString("20000000-0000-0000-0000-000000000001");
-    private static final Clock CLOCK = Clock.fixed(
-        Instant.parse("2026-07-24T10:00:00Z"), ZoneOffset.UTC);
+Expected RED: test compilation fails because the seven production command-gate types do not exist. After the initial implementation, behavioral failures must remain visible until database timestamp and JSONB parameters are explicitly typed.
 
-    private PostgreSQLContainer<?> postgres;
-    private JooqCommandGate gate;
-    private DSLContext dsl;
+- [ ] **Step 2: Define closed, validated command-gate values**
 
-    @BeforeEach
-    void start() {
-        postgres = new PostgreSQLContainer<>("postgres:17.5");
-        postgres.start();
-        ControlPlaneTestRoles.bootstrap(
-            postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
-        Flyway.configure()
-            .dataSource(
-                postgres.getJdbcUrl(),
-                ControlPlaneTestRoles.MIGRATOR_LOGIN,
-                ControlPlaneTestRoles.MIGRATOR_PASSWORD)
-            .initSql("SET ROLE accord_migrator")
-            .locations("filesystem:../../../../database/control-plane/migrations")
-            .load()
-            .migrate();
-        dsl = DSL.using(
-            ControlPlaneTestRoles.jdbcUrlWithRole(postgres.getJdbcUrl(), "accord_api"),
-            ControlPlaneTestRoles.API_LOGIN,
-            ControlPlaneTestRoles.API_PASSWORD,
-            SQLDialect.POSTGRES);
-        gate = new JooqCommandGate(CLOCK);
-    }
+Use these public shapes:
 
-    @AfterEach
-    void stop() {
-        dsl.close();
-        postgres.stop();
-    }
-
-    @Test
-    void completedRetryReplaysExactResultAndChangedPayloadConflicts() {
-        CommandKey key = key("contract-validations.create", "idem-000000000001");
-        Claim.Acquired acquired = assertInstanceOf(
-            Claim.Acquired.class,
-            inTenant(tx -> gate.claim(
-                tx, key, digest('a'), "api-1", Duration.ofSeconds(30))));
-        StoredHttpResult response = new StoredHttpResult(
-            201,
-            Map.of("ETag", "\"1\""),
-            "{\"version\": 1, \"details\": {\"b\": 2, \"a\": 1}}");
-        inTenant(tx -> {
-            gate.complete(
-                tx, key, acquired.lease(), response,
-                "validation", AGGREGATE_ID, 1, Duration.ofHours(24));
-            return null;
-        });
-
-        Claim.Replay replay = assertInstanceOf(
-            Claim.Replay.class,
-            inTenant(tx -> gate.claim(
-                tx, key, digest('a'), "api-2", Duration.ofSeconds(30))));
-        assertEquals(response, replay.result());
-        assertInstanceOf(
-            Claim.RequestConflict.class,
-            inTenant(tx -> gate.claim(
-                tx, key, digest('b'), "api-2", Duration.ofSeconds(30))));
-    }
-
-    @Test
-    void takeoverChangesFenceAndStaleHandleRollsBackBusinessMutation() {
-        CommandKey key = key("requirements.update", "idem-000000000002");
-        ClaimLease stale = assertInstanceOf(
-            Claim.Acquired.class,
-            inTenant(tx -> gate.claim(
-                tx, key, digest('c'), "api-instance-7", Duration.ofSeconds(30))))
-            .lease();
-
-        JooqCommandGate recovered = new JooqCommandGate(
-            Clock.fixed(CLOCK.instant().plusSeconds(31), ZoneOffset.UTC));
-        ClaimLease current = assertInstanceOf(
-            Claim.Acquired.class,
-            inTenant(tx -> recovered.claim(
-                tx, key, digest('c'), "api-instance-7", Duration.ofSeconds(30))))
-            .lease();
-        assertEquals(stale.generation() + 1, current.generation());
-        assertNotEquals(stale.token(), current.token());
-
-        StoredHttpResult response = new StoredHttpResult(200, Map.of(), "{}");
-        assertThrows(IllegalStateException.class, () -> inTenant(tx -> {
-            gate.advance(
-                tx, TENANT_ID, "requirement", AGGREGATE_ID, new ExpectedVersion(0));
-            gate.complete(
-                tx, key, stale, response,
-                "requirement", AGGREGATE_ID, 1, Duration.ofHours(24));
-            return null;
-        }));
-        assertEquals(0, aggregateCount());
-
-        assertThrows(
-            IllegalStateException.class,
-            () -> inTenant(tx -> recovered.renew(
-                tx, key, stale, Duration.ofSeconds(30))));
-        inTenant(tx -> {
-            long version = recovered.advance(
-                tx, TENANT_ID, "requirement", AGGREGATE_ID, new ExpectedVersion(0));
-            recovered.complete(
-                tx, key, current, response,
-                "requirement", AGGREGATE_ID, version, Duration.ofHours(24));
-            return null;
-        });
-        assertEquals(1L, aggregateVersion());
-        assertInstanceOf(
-            Claim.Replay.class,
-            inTenant(tx -> recovered.claim(
-                tx, key, digest('c'), "api-3", Duration.ofSeconds(30))));
-    }
-
-    @Test
-    void renewalIsCompareAndSwapFenced() {
-        CommandKey key = key("requirements.update", "idem-000000000003");
-        ClaimLease lease = assertInstanceOf(
-            Claim.Acquired.class,
-            inTenant(tx -> gate.claim(
-                tx, key, digest('d'), "api-1", Duration.ofSeconds(30))))
-            .lease();
-
-        JooqCommandGate renewing = new JooqCommandGate(
-            Clock.fixed(CLOCK.instant().plusSeconds(10), ZoneOffset.UTC));
-        ClaimLease renewed = inTenant(
-            tx -> renewing.renew(tx, key, lease, Duration.ofSeconds(30)));
-        assertEquals(CLOCK.instant().plusSeconds(40), renewed.leaseUntil().toInstant());
-        assertThrows(
-            IllegalStateException.class,
-            () -> inTenant(tx -> renewing.renew(
-                tx, key, lease, Duration.ofSeconds(30))));
-    }
-
-    @Test
-    void unsafeReplayHeadersAreRejectedBeforePersistence() {
-        CommandKey key = key("requirements.update", "idem-000000000004");
-        ClaimLease lease = assertInstanceOf(
-            Claim.Acquired.class,
-            inTenant(tx -> gate.claim(
-                tx, key, digest('e'), "api-1", Duration.ofSeconds(30))))
-            .lease();
-        StoredHttpResult unsafe = new StoredHttpResult(
-            200, Map.of("Set-Cookie", "session=secret"), "{}");
-
-        assertThrows(IllegalArgumentException.class, () -> inTenant(tx -> {
-            gate.complete(
-                tx, key, lease, unsafe,
-                "requirement", AGGREGATE_ID, 1, Duration.ofHours(24));
-            return null;
-        }));
-    }
-
-    @Test
-    void onlyMatchingAggregateVersionAdvances() {
-        assertEquals(
-            1L,
-            inTenant(tx -> gate.advance(
-                tx, TENANT_ID, "validation", AGGREGATE_ID, new ExpectedVersion(0))));
-        assertThrows(
-            VersionConflict.class,
-            () -> inTenant(tx -> gate.advance(
-                tx, TENANT_ID, "validation", AGGREGATE_ID, new ExpectedVersion(0))));
-        assertEquals(
-            2L,
-            inTenant(tx -> gate.advance(
-                tx, TENANT_ID, "validation", AGGREGATE_ID, new ExpectedVersion(1))));
-    }
-
-    private CommandKey key(String route, String idempotencyKey) {
-        return new CommandKey(TENANT_ID, "user-7", route, idempotencyKey);
-    }
-
-    private static String digest(char value) {
-        return "sha256:" + String.valueOf(value).repeat(64);
-    }
-
-    private int aggregateCount() {
-        return inTenant(tx -> tx.fetchOne("""
-            SELECT count(*) AS value FROM aggregate_head
-            WHERE tenant_id=? AND aggregate_type='requirement' AND aggregate_id=?
-            """, TENANT_ID, AGGREGATE_ID).get("value", Integer.class));
-    }
-
-    private long aggregateVersion() {
-        return inTenant(tx -> tx.fetchOne("""
-            SELECT version FROM aggregate_head
-            WHERE tenant_id=? AND aggregate_type='requirement' AND aggregate_id=?
-            """, TENANT_ID, AGGREGATE_ID).get("version", Long.class));
-    }
-
-    private <T> T inTenant(Function<DSLContext, T> block) {
-        return dsl.transactionResult(configuration -> {
-            DSLContext tx = configuration.dsl();
-            tx.execute(
-                "SELECT set_config('app.tenant_id', ?, true)", TENANT_ID.toString());
-            return block.apply(tx);
-        });
-    }
-}
-```
-
-- [ ] **Step 2: Run the tests and verify the undefined command gate**
-
-Run: `./gradlew :apps:control-plane:modules:reliability:test --tests '*JooqCommandGateTest'`
-
-Expected: FAIL because `JooqCommandGate`, `CommandKey`, `Claim`, and `ExpectedVersion` are unresolved.
-
-- [ ] **Step 3: Define exact command and conflict types**
-
-Create the six model files listed above. Each `public` type lives in its matching file:
-
-```java
-// ExpectedVersion.java
-package com.inforvans.accord.reliability;
-
-public record ExpectedVersion(long value) {
-    public ExpectedVersion {
-        if (value < 0) {
-            throw new IllegalArgumentException("expected version must be non-negative");
-        }
-    }
-}
-
-// CommandKey.java
-package com.inforvans.accord.reliability;
-
-import java.util.Objects;
-import java.util.UUID;
-
+~~~java
+public record ExpectedVersion(long value) {}
 public record CommandKey(
-    UUID tenantId,
-    String actorId,
-    String routeKey,
-    String idempotencyKey
-) {
-    public CommandKey {
-        Objects.requireNonNull(tenantId, "tenantId");
-        actorId = requireBounded(actorId, "actorId", 255);
-        routeKey = requireBounded(routeKey, "routeKey", 128);
-        idempotencyKey = requireBounded(idempotencyKey, "idempotencyKey", 128);
-    }
-
-    private static String requireBounded(String value, String name, int maximum) {
-        if (value == null || value.isBlank() || value.length() > maximum) {
-            throw new IllegalArgumentException(name + " is blank or too long");
-        }
-        return value;
-    }
-}
-
-// StoredHttpResult.java
-package com.inforvans.accord.reliability;
-
-import java.util.Map;
-
-public record StoredHttpResult(int status, Map<String, String> headers, String body) {
-    public StoredHttpResult {
-        if (status < 100 || status > 599) {
-            throw new IllegalArgumentException("invalid HTTP status");
-        }
-        headers = Map.copyOf(headers);
-        if (body == null) {
-            throw new IllegalArgumentException("body is required");
-        }
-    }
-}
-
-// ClaimLease.java
-package com.inforvans.accord.reliability;
-
-import java.time.OffsetDateTime;
-import java.util.UUID;
-
+    UUID tenantId, String actorId, String routeKey, String idempotencyKey) {}
+public record StoredHttpResult(
+    int status, Map<String, String> headers, String body) {}
 public record ClaimLease(
-    String owner,
-    long generation,
-    UUID token,
-    OffsetDateTime leaseUntil
-) {}
-
-// Claim.java
-package com.inforvans.accord.reliability;
-
-import java.time.OffsetDateTime;
-
+    String owner, long generation, UUID token, OffsetDateTime leaseUntil) {}
 public sealed interface Claim
         permits Claim.Acquired, Claim.InProgress, Claim.Replay, Claim.RequestConflict {
     record Acquired(ClaimLease lease) implements Claim {}
     record InProgress(OffsetDateTime leaseUntil) implements Claim {}
     record Replay(StoredHttpResult result) implements Claim {}
-    record RequestConflict(String originalFingerprint) implements Claim {}
+    record RequestConflict() implements Claim {}
 }
-
-// VersionConflict.java
-package com.inforvans.accord.reliability;
-
 public final class VersionConflict extends RuntimeException {
-    private final long expected;
-    private final Long actual;
-
-    public VersionConflict(long expected, Long actual) {
-        super("expected aggregate version " + expected + " but was "
-            + (actual == null ? "absent" : actual));
-        this.expected = expected;
-        this.actual = actual;
-    }
-
-    public long expected() {
-        return expected;
-    }
-
-    public Long actual() {
-        return actual;
-    }
+    public long expected();
+    public Long actual();
 }
-```
+~~~
 
-- [ ] **Step 4: Implement atomic claims, durable replies, and aggregate CAS in jOOQ**
+ExpectedVersion rejects negative values. CommandKey requires a tenant, bounded actor and route values, and an idempotency key matching [A-Za-z0-9._:-]{16,128}. The shared bounded-text validator used by actor ID, route key, claim owner, and aggregate type rejects U+0000 and ISO control characters, runs a UTF-8 `CharsetEncoder` with malformed and unmappable input set to `REPORT`, and only then enforces its maximum with Unicode code-point count rather than UTF-16 code-unit count. Valid Unicode, including supplementary code points through the exact PostgreSQL `varchar(n)` character limit, remains accepted. Conflict results never return the stored request fingerprint.
 
-Create `JooqCommandGate.java`:
+StoredHttpResult accepts status 100-599, copies and case-folds headers into an immutable sorted map, rejects case-insensitive duplicates, invalid names/values, `Authentication-Info`, other credential-bearing headers, and hop-by-hop headers. Header values allow horizontal tab but reject U+0000, other controls, and malformed or unmappable input with a strict UTF-8 encoder before SQL. The response body rejects U+0000 and malformed or unmappable input with the same strict encoder, then bounds the encoder output to 1 MiB. The database JSON representation of the headers is independently bounded to 64 KiB.
 
-```java
-package com.inforvans.accord.reliability;
+- [ ] **Step 3: Implement initial claim, replay, and takeover with PostgreSQL time**
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
-import java.time.Clock;
-import java.time.Duration;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
-import java.util.regex.Pattern;
-import org.jooq.DSLContext;
-import org.jooq.JSONB;
-import org.jooq.Record;
+JooqCommandGate has no clock, pool, or transaction ownership. Its public constructor needs no infrastructure argument; each operation receives the caller's transaction-scoped DSLContext.
 
-public final class JooqCommandGate {
-    private static final Pattern FINGERPRINT = Pattern.compile("^sha256:[0-9a-f]{64}$");
-    private static final Set<String> FORBIDDEN_REPLAY_HEADERS = Set.of(
-        "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-        "set-cookie", "te", "trailer", "transfer-encoding", "upgrade"
-    );
-    private static final TypeReference<Map<String, String>> HEADER_MAP =
-        new TypeReference<>() {};
+Initial claim inserts a valid placeholder before it asks the database for current time:
 
-    private final Clock clock;
-    private final ObjectMapper mapper;
+~~~sql
+INSERT INTO idempotency_result (
+  tenant_id, actor_id, route_key, idempotency_key,
+  request_fingerprint, state, claim_owner, claim_generation,
+  claim_token, lease_until, expires_at
+) VALUES (?, ?, ?, ?, ?, 'STARTED', ?, 1, ?,
+          '-infinity'::timestamptz, '-infinity'::timestamptz)
+ON CONFLICT DO NOTHING
+RETURNING claim_generation
+~~~
 
-    public JooqCommandGate(Clock clock) {
-        this(clock, new ObjectMapper());
-    }
+If inserted, read clock_timestamp() and replace both placeholder deadlines with database_now + lease_duration under owner/generation/token/-infinity predicates. Never calculate a correctness deadline from a JVM clock.
 
-    public JooqCommandGate(Clock clock, ObjectMapper mapper) {
-        this.clock = clock;
-        this.mapper = mapper;
-    }
+If the insert conflicts, lock the exact tenant/actor/route/key row with FOR UPDATE. A missing row can occur when a concurrent worker deletes an expired row between the conflict and select; retry the insert/select sequence once, then fail closed. Compare the fingerprint after the lock. Completed state returns exact persisted status, validated canonical headers, and exact text body. A live started state returns InProgress.
 
-    public Claim claim(
-            DSLContext tx,
-            CommandKey key,
-            String requestFingerprint,
-            String owner,
-            Duration leaseDuration) {
-        requireFingerprint(requestFingerprint);
-        requirePositive(leaseDuration, "leaseDuration");
-        OffsetDateTime now = now();
-        OffsetDateTime leaseUntil = now.plus(leaseDuration);
-        UUID token = UUID.randomUUID();
+For an expired state, increment generation with overflow detection, generate a fresh opaque token, and update through all of these predicates:
 
-        int inserted = tx.execute("""
-            INSERT INTO idempotency_result (
-              tenant_id,actor_id,route_key,idempotency_key,request_fingerprint,state,
-              claim_owner,claim_generation,claim_token,lease_until,expires_at
-            ) VALUES (?, ?, ?, ?, ?, 'STARTED', ?, 1, ?, ?, ?)
-            ON CONFLICT DO NOTHING
-            """,
-            key.tenantId(), key.actorId(), key.routeKey(), key.idempotencyKey(),
-            requestFingerprint, owner, token, leaseUntil, leaseUntil);
-        if (inserted == 1) {
-            return new Claim.Acquired(new ClaimLease(owner, 1, token, leaseUntil));
-        }
+~~~sql
+state = 'STARTED'
+AND claim_owner = ?
+AND claim_generation = ?
+AND claim_token = ?
+AND lease_until = CAST(? AS timestamptz)
+AND lease_until <= CAST(? AS timestamptz)
+~~~
 
-        Record row = tx.fetchOne("""
-            SELECT request_fingerprint,state,claim_owner,claim_generation,claim_token,
-                   lease_until,response_status,response_headers,response_body
-            FROM idempotency_result
-            WHERE tenant_id=? AND actor_id=? AND route_key=? AND idempotency_key=?
-            FOR UPDATE
-            """, key.tenantId(), key.actorId(), key.routeKey(), key.idempotencyKey());
-        if (row == null) {
-            throw new IllegalStateException("idempotency row disappeared");
-        }
+The update computes its returned deadline from the same captured database timestamp. Owner strings identify executors but are never treated as unique fences.
 
-        String originalFingerprint = required(row, "request_fingerprint", String.class);
-        if (!originalFingerprint.equals(requestFingerprint)) {
-            return new Claim.RequestConflict(originalFingerprint);
-        }
-        if ("STARTED".equals(required(row, "state", String.class))) {
-            String currentOwner = required(row, "claim_owner", String.class);
-            long currentGeneration = required(row, "claim_generation", Long.class);
-            UUID currentToken = required(row, "claim_token", UUID.class);
-            OffsetDateTime currentLease = required(row, "lease_until", OffsetDateTime.class);
-            if (currentLease.isAfter(now)) {
-                return new Claim.InProgress(currentLease);
-            }
+- [ ] **Step 4: Implement renewal and completion with full fences**
 
-            long nextGeneration = Math.addExact(currentGeneration, 1);
-            UUID nextToken = UUID.randomUUID();
-            int takenOver = tx.execute("""
-                UPDATE idempotency_result
-                SET claim_owner=?, claim_generation=?, claim_token=?,
-                    lease_until=?, expires_at=?
-                WHERE tenant_id=? AND actor_id=? AND route_key=? AND idempotency_key=?
-                  AND state='STARTED' AND claim_owner=? AND claim_generation=?
-                  AND claim_token=? AND lease_until=?
-                """,
-                owner, nextGeneration, nextToken, leaseUntil, leaseUntil,
-                key.tenantId(), key.actorId(), key.routeKey(), key.idempotencyKey(),
-                currentOwner, currentGeneration, currentToken, currentLease);
-            requireSingleRow(takenOver, "locked idempotency lease changed unexpectedly");
-            return new Claim.Acquired(
-                new ClaimLease(owner, nextGeneration, nextToken, leaseUntil));
-        }
+Before renewal or completion, lock the command row and then fetch clock_timestamp(). Renewal adds the requested interval to the prior stored deadline, not to observation time. It requires matching tenant/actor/route/key, started state, owner, generation, token, exact deadline, and a deadline still greater than database time.
 
-        JSONB storedHeaders = required(row, "response_headers", JSONB.class);
-        try {
-            Map<String, String> headers = mapper.readValue(storedHeaders.data(), HEADER_MAP);
-            return new Claim.Replay(new StoredHttpResult(
-                required(row, "response_status", Integer.class),
-                headers,
-                required(row, "response_body", String.class)));
-        } catch (JsonProcessingException error) {
-            throw new IllegalStateException("stored idempotency headers are invalid", error);
-        }
-    }
+Completion validates the response before persistence and atomically transitions the row to completed. It clears owner/token/deadline, stores status/canonical headers/exact text body, binds aggregate type/id/version, and computes retention from the captured database timestamp. Its WHERE clause requires the same full live lease fence and:
 
-    public void complete(
-            DSLContext tx,
-            CommandKey key,
-            ClaimLease lease,
-            StoredHttpResult result,
-            String aggregateType,
-            UUID aggregateId,
-            long aggregateVersion,
-            Duration resultTtl) {
-        validateStoredResult(result);
-        requirePositive(resultTtl, "resultTtl");
-        OffsetDateTime now = now();
-        JSONB headers;
-        try {
-            headers = JSONB.valueOf(mapper.writeValueAsString(result.headers()));
-        } catch (JsonProcessingException error) {
-            throw new IllegalArgumentException("response headers are not serializable", error);
-        }
+~~~sql
+EXISTS (
+  SELECT 1
+  FROM aggregate_head AS aggregate
+  WHERE aggregate.tenant_id = stored.tenant_id
+    AND aggregate.aggregate_type = ?
+    AND aggregate.aggregate_id = ?
+    AND aggregate.version = ?
+)
+~~~
 
-        int updated = tx.execute("""
-            UPDATE idempotency_result
-            SET state='COMPLETED', claim_owner=NULL, claim_token=NULL, lease_until=NULL,
-                response_status=?, response_headers=?, response_body=?,
-                aggregate_type=?, aggregate_id=?, aggregate_version=?,
-                completed_at=?, expires_at=?
-            WHERE tenant_id=? AND actor_id=? AND route_key=? AND idempotency_key=?
-              AND state='STARTED' AND claim_owner=? AND claim_generation=?
-              AND claim_token=? AND lease_until=? AND lease_until>?
-            """,
-            result.status(), headers, result.body(), aggregateType, aggregateId, aggregateVersion,
-            now, now.plus(resultTtl),
-            key.tenantId(), key.actorId(), key.routeKey(), key.idempotencyKey(),
-            lease.owner(), lease.generation(), lease.token(), lease.leaseUntil(), now);
-        requireSingleRow(updated, "idempotency lease is stale, lost, or already completed");
-    }
+The caller must commit the visible STARTED claim before business work. Aggregate, domain, audit, outbox, and completion writes share a later transaction, so any stale/expired/mismatched completion fence rolls all preceding business writes back. A deterministic rejection that is eligible for replay follows the same two-transaction rule: after acquisition, its outcome aggregate/version, required audit/outbox facts, rejection response, and fenced completion persist together in the second transaction. Authentication, protocol, and fingerprint validation that fail before a claim are never stored as command results.
 
-    public ClaimLease renew(
-            DSLContext tx,
-            CommandKey key,
-            ClaimLease lease,
-            Duration leaseDuration) {
-        requirePositive(leaseDuration, "leaseDuration");
-        OffsetDateTime now = now();
-        OffsetDateTime nextLease = now.plus(leaseDuration);
-        int updated = tx.execute("""
-            UPDATE idempotency_result
-            SET lease_until=?, expires_at=?
-            WHERE tenant_id=? AND actor_id=? AND route_key=? AND idempotency_key=?
-              AND state='STARTED' AND claim_owner=? AND claim_generation=?
-              AND claim_token=? AND lease_until=? AND lease_until>?
-            """,
-            nextLease, nextLease,
-            key.tenantId(), key.actorId(), key.routeKey(), key.idempotencyKey(),
-            lease.owner(), lease.generation(), lease.token(), lease.leaseUntil(), now);
-        requireSingleRow(updated, "idempotency lease cannot be renewed");
-        return new ClaimLease(
-            lease.owner(), lease.generation(), lease.token(), nextLease);
-    }
+- [ ] **Step 5: Implement exact expected-version aggregate CAS**
 
-    public long advance(
-            DSLContext tx,
-            UUID tenantId,
-            String aggregateType,
-            UUID aggregateId,
-            ExpectedVersion expected) {
-        long next = Math.addExact(expected.value(), 1);
-        int changed;
-        if (expected.value() == 0) {
-            changed = tx.execute("""
-                INSERT INTO aggregate_head (tenant_id,aggregate_type,aggregate_id,version)
-                VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING
-                """, tenantId, aggregateType, aggregateId, next);
-        } else {
-            changed = tx.execute("""
-                UPDATE aggregate_head SET version=?, updated_at=transaction_timestamp()
-                WHERE tenant_id=? AND aggregate_type=? AND aggregate_id=? AND version=?
-                """, next, tenantId, aggregateType, aggregateId, expected.value());
-        }
-        if (changed == 1) {
-            return next;
-        }
-        Record row = tx.fetchOne("""
-            SELECT version FROM aggregate_head
-            WHERE tenant_id=? AND aggregate_type=? AND aggregate_id=?
-            """, tenantId, aggregateType, aggregateId);
-        Long actual = row == null ? null : row.get("version", Long.class);
-        throw new VersionConflict(expected.value(), actual);
-    }
+advance validates tenant/type/id and computes next = expected + 1 with overflow detection.
 
-    private void validateStoredResult(StoredHttpResult result) {
-        if (result.body().getBytes(StandardCharsets.UTF_8).length > 1_048_576) {
-            throw new IllegalArgumentException("stored response body exceeds 1 MiB");
-        }
-        try {
-            if (mapper.writeValueAsBytes(result.headers()).length > 65_536) {
-                throw new IllegalArgumentException("stored response headers exceed 64 KiB");
-            }
-        } catch (JsonProcessingException error) {
-            throw new IllegalArgumentException("response headers are not serializable", error);
-        }
-        boolean unsafe = result.headers().keySet().stream()
-            .map(name -> name.toLowerCase(Locale.ROOT))
-            .anyMatch(FORBIDDEN_REPLAY_HEADERS::contains);
-        if (unsafe) {
-            throw new IllegalArgumentException(
-                "hop-by-hop and credential-bearing response headers cannot be replayed");
-        }
-    }
+For ExpectedVersion(0), use INSERT ... ON CONFLICT DO NOTHING to create version 1. For positive expectations, use one update containing WHERE version = expected. Both paths set updated_at=clock_timestamp(). If no row changes, read the actual row under tenant RLS and throw VersionConflict(expected, actual); never insert for a missing positive expectation.
 
-    private OffsetDateTime now() {
-        return OffsetDateTime.ofInstant(clock.instant(), ZoneOffset.UTC);
-    }
+- [ ] **Step 6: Declare the minimal production and test dependency boundary**
 
-    private static void requireFingerprint(String value) {
-        if (value == null || !FINGERPRINT.matcher(value).matches()) {
-            throw new IllegalArgumentException("request fingerprint must be canonical SHA-256");
-        }
-    }
+Reliability exposes jOOQ in its public method signatures and therefore declares api libs.jooq.runtime. It imports no production class from database:control-plane; that project appears only as testFixtures for role/bootstrap support. The library does not own a pool, transaction manager, or Spring auto-configuration, so it must not depend on spring-boot-starter-jooq or export the Spring Boot BOM. A process that later constructs the caller-owned DSLContext declares that starter at the process boundary.
 
-    private static void requirePositive(Duration value, String name) {
-        if (value == null || value.isZero() || value.isNegative()) {
-            throw new IllegalArgumentException(name + " must be positive");
-        }
-    }
-
-    private static void requireSingleRow(int count, String message) {
-        if (count != 1) {
-            throw new IllegalStateException(message);
-        }
-    }
-
-    private static <T> T required(Record row, String field, Class<T> type) {
-        T value = row.get(field, type);
-        if (value == null) {
-            throw new IllegalStateException(field + " is unexpectedly null");
-        }
-        return value;
-    }
-}
-```
-
-`JooqCommandGate` owns no pool and opens no transaction. Every method requires the caller's `DSLContext`, but transaction boundaries are deliberate: `claim` runs in a short transaction that commits the visible `STARTED` row before business work begins; aggregate CAS, domain/audit/outbox writes, and fenced `complete` run together in a later transaction. A completion fence failure therefore rolls every business write back. `renew` also commits independently before the old deadline. There is no pool-owning overload, deprecated or otherwise, and Reliability never imports Identity or `TenantTransactions`. `claim_owner` is the stable process/command-executor identity, not a user value; correctness never depends on its uniqueness. Each acquisition carries a monotonic generation plus opaque UUID token, and takeover increments/replaces both even if the process identity string is reused. Completion and renewal compare owner, generation, token, exact lease deadline, and live state. `expires_at` follows the lease while running and becomes the completed-result retention deadline only in `complete`. Exactly one expired claimant can take over under the locked row. `response_body` is `text`, not `jsonb`, so replay preserves the exact UTF-8 response representation instead of allowing PostgreSQL JSONB normalization to reorder keys or whitespace; command responses are bounded to 1 MiB and may not persist hop-by-hop or `Set-Cookie` headers.
-
-Add these dependencies to `reliability/build.gradle`:
-
-```groovy
-implementation project(':database:control-plane')
-implementation libs.spring.boot.jooq
+~~~groovy
+implementation project(':apps:control-plane:modules:platform-kernel')
+api platform(libs.spring.modulith.bom)
+api libs.spring.modulith.api
+api libs.jooq.runtime
 implementation libs.jackson.databind
+
+testImplementation enforcedPlatform(libs.junit.bom)
+testImplementation enforcedPlatform(libs.jackson.bom)
+testImplementation enforcedPlatform(libs.slf4j.bom)
 testImplementation testFixtures(project(':database:control-plane'))
 testImplementation libs.flyway.core
 testImplementation libs.flyway.postgresql
 testImplementation libs.testcontainers.junit
 testImplementation libs.testcontainers.postgresql
-```
+testCompileOnly 'jakarta.xml.bind:jakarta.xml.bind-api:4.0.2'
+testRuntimeOnly libs.slf4j.simple
+~~~
 
-- [ ] **Step 5: Run the persistence and conflict tests**
+Use the existing enforced JUnit, Jackson, and SLF4J test platforms plus the catalog-pinned Flyway and Testcontainers modules. Resolve naturally without force/strict constraints; add a narrow constraint only if a clean lock refresh proves a real unresolved version conflict. Do not add a Spring Boot platform/starter to this library and do not add a second SLF4J provider.
 
-Run: `./gradlew :apps:control-plane:modules:reliability:test --tests '*JooqCommandGateTest'`
+Refresh only this project lock with configuration cache disabled:
 
-Expected: PASS. A repeated identical key returns byte-equivalent status, headers, and JSON body; a changed fingerprint yields `RequestConflict`; takeover with the same owner identity increments the generation and replaces the opaque token; the stale handle can neither renew nor complete, its aggregate write rolls back with the failed fenced transaction, and the current fence commits aggregate version 1; and stale expected version yields `VersionConflict` while leaving the head at version 1.
+~~~powershell
+$env:JAVA_HOME='C:\Users\m1560\.jdks\jdk-21.0.11+10'
+.\gradlew.bat :apps:control-plane:modules:reliability:dependencies --write-locks --no-configuration-cache --no-daemon --dependency-verification=strict
+~~~
 
-- [ ] **Step 6: Commit command safety primitives**
+Because jOOQ is an exported method-signature dependency, run the repository lock resolver after the focused reliability report so it resolves the API and worker outgoing variants. Only reliability, API, and worker locks may change. Only jOOQ, R2DBC SPI, and Reactive Streams may be added to the consumer compile/runtime/test lock sets; Spring JDBC, Hikari, and jOOQ auto-configuration remain process-owned and must not arrive transitively from reliability.
 
-```bash
-git add apps/control-plane/modules/reliability/build.gradle apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/JooqCommandGateTest.java
-git commit -m "feat: persist idempotency and expected-version CAS"
-```
+~~~powershell
+$env:JAVA_HOME='C:\Users\m1560\.jdks\jdk-21.0.11+10'
+.\gradlew.bat resolveAndLockAll --write-locks --no-configuration-cache --no-daemon --dependency-verification=strict
+~~~
 
+Generate any newly required artifact checksums/signature trust with --write-verification-metadata sha256,pgp, inspect the exact XML diff, repeat both writers, and require identical hashes on the second run.
+
+- [ ] **Step 7: Verify and commit command safety primitives**
+
+Run fresh tests and boundary checks:
+
+~~~powershell
+$env:JAVA_HOME='C:\Users\m1560\.jdks\jdk-21.0.11+10'
+.\gradlew.bat :database:control-plane:test :apps:control-plane:modules:reliability:test :apps:control-plane:api:check :apps:control-plane:worker:check --no-daemon --rerun-tasks --dependency-verification=strict
+.\gradlew.bat check --no-daemon --dependency-verification=strict
+powershell.exe -NoProfile -File tests/bootstrap/verify-workspace.ps1
+git diff --check
+~~~
+
+Also require no production database:control-plane dependency/import, no java.time.Clock or clock.instant, no reliability Spring Boot enforcedPlatform, no unsafe replay header, and no secret-like material. Confirm the fresh JUnit XML reports 19 tests, zero failures/errors/skips, and exactly one runtime SLF4J provider.
+
+~~~bash
+git add docs/superpowers/plans/2026-07-24-accord-platform-foundation-plan.md apps/control-plane/api/gradle.lockfile apps/control-plane/worker/gradle.lockfile apps/control-plane/modules/reliability/build.gradle apps/control-plane/modules/reliability/gradle.lockfile apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/JooqCommandGateTest.java gradle/verification-metadata.xml
+git commit -m "feat: add persistent command gate"
+~~~
 ### Task 8: Add Transactional Domain Events, Outbox, Inbox, And External Intents
 
 **Files:**
@@ -6084,6 +5618,8 @@ Completion, failure, renewal, and recovery compare the complete fence. They clea
 6. At `maxAttempts`, transition once to `DEAD` and page on dead count/oldest age. `DEAD` is never polled automatically.
 7. After each batch, reschedule the tenant work slot to the earliest ready outbox/inbox time, or release it with a bounded idle rescan. This update uses the tenant-work fence.
 8. Unknown destination or handler fails closed and follows retry/dead policy; it is never acknowledged as success.
+
+Any idempotency-result cleanup added in this task must use database time and bounded batches, and may delete only rows whose `state='COMPLETED'` and `expires_at < clock_timestamp()`. It must never delete a `STARTED` row, even after its lease or `expires_at` has passed; abandoned `STARTED` work is recovered only through the fenced claim-takeover path.
 
 Add property-based tests with jqwik for delay monotonicity, maximum cap, deterministic jitter, generation growth, and stale-fence rejection. Add fault-injection tests for database disconnect before/after each state transition and process termination after external success but before local acknowledgement.
 
