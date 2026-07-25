@@ -1,0 +1,62 @@
+plugins {
+    alias(libs.plugins.spring.boot) apply false
+    alias(libs.plugins.cyclonedx)
+    alias(libs.plugins.jlink) apply false
+}
+
+allprojects {
+    group = 'com.inforvans.accord'
+    version = '0.1.0-SNAPSHOT'
+}
+
+configurations {
+    platformBaselines {
+        canBeConsumed = false
+        canBeResolved = true
+        visible = false
+        description = 'Resolves cross-project BOMs into the root dependency lock.'
+    }
+}
+
+dependencies {
+    platformBaselines enforcedPlatform(libs.junit.bom)
+    platformBaselines enforcedPlatform(libs.jackson.bom)
+    platformBaselines enforcedPlatform(libs.slf4j.bom)
+}
+
+dependencyLocking { lockAllConfigurations() }
+
+subprojects {
+    plugins.withId('java') {
+        java {
+            toolchain {
+                languageVersion = JavaLanguageVersion.of(21)
+                vendor = JvmVendorSpec.ADOPTIUM
+            }
+        }
+        dependencies {
+            testRuntimeOnly libs.junit.platform.launcher
+        }
+        tasks.withType(JavaCompile).configureEach {
+            options.release = 21
+            options.encoding = 'UTF-8'
+            options.compilerArgs += ['-parameters', '-Xlint:all', '-Werror']
+        }
+        tasks.withType(Test).configureEach { useJUnitPlatform() }
+        tasks.withType(AbstractArchiveTask).configureEach {
+            preserveFileTimestamps = false
+            reproducibleFileOrder = true
+        }
+    }
+    configurations.configureEach { resolutionStrategy.failOnVersionConflict() }
+    dependencyLocking { lockAllConfigurations() }
+}
+
+tasks.register('resolveAndLockAll') {
+    notCompatibleWithConfigurationCache('Resolves every project configuration to refresh dependency locks.')
+    doLast {
+        allprojects.each { project ->
+            project.configurations.findAll { it.canBeResolved }.each { it.resolve() }
+        }
+    }
+}

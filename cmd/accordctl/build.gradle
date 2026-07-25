@@ -1,0 +1,49 @@
+plugins {
+    id 'application'
+    alias(libs.plugins.jlink)
+}
+
+dependencies {
+    implementation libs.picocli
+    annotationProcessor libs.picocli.codegen
+    testImplementation platform(libs.junit.bom)
+    testImplementation libs.junit.jupiter
+    testImplementation libs.assertj.core
+}
+
+application {
+    mainModule = 'com.inforvans.accord.cli'
+    mainClass = 'com.inforvans.accord.cli.AccordCtl'
+}
+
+tasks.named('compileJava', JavaCompile) {
+    options.compilerArgs += ['-Xlint:-processing']
+}
+
+tasks.configureEach { task ->
+    if (task.class.name.startsWith('org.beryx.jlink.')) {
+        task.notCompatibleWithConfigurationCache('Beryx jlink 3.2.1 requires uncached execution on Gradle 8.14.3.')
+    }
+}
+
+def normalizedOs = System.getProperty('os.name', 'unknown')
+    .toLowerCase(java.util.Locale.ROOT)
+def archiveOs
+if (normalizedOs.contains('windows')) {
+    archiveOs = 'windows'
+} else if (normalizedOs.contains('mac') || normalizedOs.contains('darwin')) {
+    archiveOs = 'macos'
+} else if (normalizedOs.contains('linux')) {
+    archiveOs = 'linux'
+} else {
+    throw new GradleException("Unsupported accordctl packaging OS: ${normalizedOs}")
+}
+
+jlink {
+    options = ['--strip-debug', '--no-header-files', '--no-man-pages', '--compress=zip-6']
+    launcher { name = 'accordctl' }
+    imageZip = layout.buildDirectory
+        .file("distributions/accordctl-${archiveOs}.zip")
+        .get()
+        .asFile
+}

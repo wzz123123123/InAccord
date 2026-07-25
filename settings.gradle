@@ -1,0 +1,43 @@
+pluginManagement {
+    def pluginMirror = System.getenv('ACCORD_GRADLE_PLUGIN_MIRROR_URL')
+    if (System.getenv('CI') == 'true' && !pluginMirror) {
+        throw new GradleException('ACCORD_GRADLE_PLUGIN_MIRROR_URL is required in CI')
+    }
+    repositories {
+        if (pluginMirror) { maven { url = uri(pluginMirror) } }
+        else { gradlePluginPortal(); mavenCentral() }
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    def dependencyMirror = System.getenv('ACCORD_MAVEN_MIRROR_URL')
+    if (System.getenv('CI') == 'true' && !dependencyMirror) {
+        throw new GradleException('ACCORD_MAVEN_MIRROR_URL is required in CI')
+    }
+    repositories {
+        if (dependencyMirror) { maven { url = uri(dependencyMirror) } }
+        else { mavenCentral() }
+    }
+}
+
+rootProject.name = 'accord'
+
+include(
+    ':apps:control-plane:api',
+    ':apps:control-plane:worker',
+    ':apps:control-plane:modules:platform-kernel',
+    ':apps:control-plane:modules:reliability',
+    ':apps:webhook-edge',
+    ':security-services:signing-service',
+    ':security-services:requirement-publisher',
+    ':security-services:merge-controller',
+    ':cmd:accordctl',
+    ':libs:java:observability',
+    ':tests:contract',
+    ':tests:integration',
+    ':tests:api',
+    ':tests:security-negative',
+    ':tests:state-machine',
+    ':tests:fault-injection'
+)

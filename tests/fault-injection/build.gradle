@@ -1,0 +1,14 @@
+plugins { id 'java-library' }
+
+dependencies {
+    testImplementation project(':apps:control-plane:modules:platform-kernel')
+    testImplementation enforcedPlatform(libs.junit.bom)
+    testImplementation enforcedPlatform(libs.jackson.bom)
+    testImplementation enforcedPlatform(libs.slf4j.bom)
+    testImplementation libs.junit.jupiter
+    testImplementation libs.assertj.core
+    testImplementation libs.jqwik
+    testImplementation libs.json.schema.validator
+    testImplementation libs.testcontainers.junit
+    testImplementation libs.testcontainers.postgresql
+}

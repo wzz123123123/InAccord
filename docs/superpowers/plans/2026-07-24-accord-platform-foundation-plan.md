@@ -110,7 +110,7 @@ The current workspace is not implementation-ready merely because this file exist
 - Generate: `gradle/verification-metadata.xml`
 - Generate: `pnpm-lock.yaml`
 - Generate: `uv.lock`
-- Generate: `gradle.lockfile` and subproject `gradle.lockfile` files
+- Generate: `gradle.lockfile`, `settings-gradle.lockfile`, and subproject `gradle.lockfile` files
 
 - [ ] **Step 1: Write the failing workspace-layout test**
 
@@ -136,8 +136,19 @@ $approvedDigests = [ordered]@{
   'requirements-agent-platform-design.md' = 'EB662C6A0FB2B0192AAE20D4DD2DD520DB29BD5E554141210C41F2C338A10BB1'
   'docs/superpowers/specs/2026-07-25-accord-java-python-runtime-design.md' = '9780DD3A502072A38190A30FCDF326452052311E1B240545D8455A2811F3029A'
 }
+function Get-NormalizedSha256([string]$Path) {
+  $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+  $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $Path))
+  $normalizedBytes = $utf8.GetBytes($utf8.GetString($bytes).Replace("`r`n", "`n"))
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    return [BitConverter]::ToString($sha256.ComputeHash($normalizedBytes)).Replace('-', '')
+  } finally {
+    $sha256.Dispose()
+  }
+}
 foreach ($entry in $approvedDigests.GetEnumerator()) {
-  $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $entry.Key).Hash
+  $actual = Get-NormalizedSha256 -Path $entry.Key
   if ($actual -cne $entry.Value) {
     throw "approved design digest mismatch for $($entry.Key): $actual"
   }
@@ -152,14 +163,28 @@ Create `tests/bootstrap/verify-workspace.ps1`:
 ```powershell
 $ErrorActionPreference = 'Stop'
 $required = @(
+  '.editorconfig',
+  '.gitattributes',
+  '.gitignore',
   '.tool-versions',
   'settings.gradle',
   'build.gradle',
+  'gradle.properties',
   'gradle/libs.versions.toml',
+  'gradlew',
+  'gradlew.bat',
+  'gradle/wrapper/gradle-wrapper.jar',
+  'gradle/wrapper/gradle-wrapper.properties',
+  'gradle/wrapper/gradle-wrapper.jar.sha256',
+  'gradle/verification-metadata.xml',
+  'gradle.lockfile',
+  'settings-gradle.lockfile',
   'package.json',
+  'pnpm-lock.yaml',
   'tsconfig.base.json',
   'pnpm-workspace.yaml',
   'pyproject.toml',
+  'uv.lock',
   'apps/control-plane/api/build.gradle',
   'apps/control-plane/worker/build.gradle',
   'apps/control-plane/modules/platform-kernel/build.gradle',
@@ -181,26 +206,54 @@ $required = @(
   'cmd/accordctl/src/test/java/com/inforvans/accord/cli/AccordCtlTest.java',
   'apps/web/package.json',
   'apps/agent-runtime/pyproject.toml',
+  'apps/agent-runtime/src/accord_agent_runtime/__init__.py',
   'apps/agent-runtime/src/accord_agent_runtime/boundary.py',
-  'apps/agent-runtime/tests/test_bootstrap.py'
+  'apps/agent-runtime/tests/test_bootstrap.py',
+  'scripts/run-gradle.ps1'
 )
+$gradleProjectDirectories = @(
+  'apps/control-plane/api',
+  'apps/control-plane/worker',
+  'apps/control-plane/modules/platform-kernel',
+  'apps/control-plane/modules/reliability',
+  'apps/webhook-edge',
+  'security-services/signing-service',
+  'security-services/requirement-publisher',
+  'security-services/merge-controller',
+  'cmd/accordctl',
+  'libs/java/observability',
+  'tests/contract',
+  'tests/integration',
+  'tests/api',
+  'tests/security-negative',
+  'tests/state-machine',
+  'tests/fault-injection'
+)
+$required += $gradleProjectDirectories | ForEach-Object { "$_/gradle.lockfile" }
 $missing = $required | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }
 if ($missing.Count -gt 0) {
   throw "Missing workspace files: $($missing -join ', ')"
 }
-$forbiddenDirectories = Get-ChildItem -Directory -Recurse | Where-Object { $_.Name -eq 'common' }
+$sourceRoots = @('apps', 'security-services', 'cmd', 'libs', 'tests')
+$generatedDirectoryPattern = '[\\/](?:\.gradle|\.venv|node_modules|build|dist|\.pytest_cache|__pycache__|\.mypy_cache|\.ruff_cache)[\\/]'
+$forbiddenDirectories = Get-ChildItem $sourceRoots -Directory -Recurse -ErrorAction SilentlyContinue |
+  Where-Object {
+    $_.FullName -notmatch $generatedDirectoryPattern -and
+    $_.Name -eq 'common'
+  }
 if ($forbiddenDirectories) {
   throw "Unbounded common module found: $($forbiddenDirectories.FullName -join ', ')"
 }
 $approvedExtensions = @(
   '.java', '.py', '.ts', '.tsx', '.js', '.mjs', '.sql', '.proto',
   '.json', '.yaml', '.yml', '.md', '.toml', '.ps1', '.gradle',
-  '.properties', '.xml', '.html', '.css', '.svg', '.lock', '.bat',
+  '.properties', '.xml', '.html', '.css', '.svg', '.lock', '.lockfile', '.bat',
   '.jar', '.sha256'
 )
 $approvedExtensionlessNames = @('Dockerfile', 'gradlew')
-$unexpectedRuntimeFiles = Get-ChildItem apps,security-services,cmd,libs,tests -Recurse -File -ErrorAction SilentlyContinue |
+$unexpectedRuntimeFiles = Get-ChildItem $sourceRoots -Recurse -File -ErrorAction SilentlyContinue |
   Where-Object {
+    $_.FullName -notmatch $generatedDirectoryPattern -and
     $_.Extension -notin $approvedExtensions -and
     $_.Name -notin $approvedExtensionlessNames
   }
@@ -242,9 +295,13 @@ foreach ($tool in $expectedTools.GetEnumerator()) {
     throw "Tool version is not pinned: $($tool.Key) $($tool.Value)"
   }
 }
-if ((Get-Content -Raw gradle/wrapper/gradle-wrapper.properties -ErrorAction SilentlyContinue) -and
-    -not (Select-String -Quiet gradle/wrapper/gradle-wrapper.properties -Pattern '^distributionSha256Sum=bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531$')) {
+if (-not (Select-String -Quiet gradle/wrapper/gradle-wrapper.properties -Pattern '^distributionSha256Sum=bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531$')) {
   throw 'Gradle wrapper distribution checksum is absent or wrong'
+}
+$expectedWrapperJarHash = (Get-Content -Raw -Encoding ascii gradle/wrapper/gradle-wrapper.jar.sha256).Trim()
+$actualWrapperJarHash = (Get-FileHash -Algorithm SHA256 gradle/wrapper/gradle-wrapper.jar).Hash.ToLowerInvariant()
+if ($actualWrapperJarHash -cne $expectedWrapperJarHash) {
+  throw "Gradle wrapper JAR checksum mismatch: $actualWrapperJarHash"
 }
 Write-Output 'workspace-layout: PASS'
 ```
@@ -378,8 +435,9 @@ jqwik = "1.9.2"
 json-schema-validator = "1.5.6"
 pitest-gradle = "1.15.0"
 picocli = "4.7.7"
-jlink = "3.1.3"
+jlink = "3.2.1"
 jackson = "2.19.1"
+slf4j = "2.0.17"
 
 [libraries]
 spring-modulith-bom = { module = "org.springframework.modulith:spring-modulith-bom", version.ref = "spring-modulith" }
@@ -403,12 +461,15 @@ temporal-testing = { module = "io.temporal:temporal-testing", version.ref = "tem
 jcs = { module = "io.github.erdtman:java-json-canonicalization", version.ref = "jcs" }
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
 assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
 jqwik = { module = "net.jqwik:jqwik", version.ref = "jqwik" }
 json-schema-validator = { module = "com.networknt:json-schema-validator", version.ref = "json-schema-validator" }
 picocli = { module = "info.picocli:picocli", version.ref = "picocli" }
 picocli-codegen = { module = "info.picocli:picocli-codegen", version.ref = "picocli" }
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
+jackson-bom = { module = "com.fasterxml.jackson:jackson-bom", version.ref = "jackson" }
+slf4j-bom = { module = "org.slf4j:slf4j-bom", version.ref = "slf4j" }
 
 [plugins]
 spring-boot = { id = "org.springframework.boot", version.ref = "spring-boot" }
@@ -431,6 +492,23 @@ allprojects {
     version = '0.1.0-SNAPSHOT'
 }
 
+configurations {
+    platformBaselines {
+        canBeConsumed = false
+        canBeResolved = true
+        visible = false
+        description = 'Resolves cross-project BOMs into the root dependency lock.'
+    }
+}
+
+dependencies {
+    platformBaselines enforcedPlatform(libs.junit.bom)
+    platformBaselines enforcedPlatform(libs.jackson.bom)
+    platformBaselines enforcedPlatform(libs.slf4j.bom)
+}
+
+dependencyLocking { lockAllConfigurations() }
+
 subprojects {
     plugins.withId('java') {
         java {
@@ -438,6 +516,9 @@ subprojects {
                 languageVersion = JavaLanguageVersion.of(21)
                 vendor = JvmVendorSpec.ADOPTIUM
             }
+        }
+        dependencies {
+            testRuntimeOnly libs.junit.platform.launcher
         }
         tasks.withType(JavaCompile).configureEach {
             options.release = 21
@@ -455,6 +536,7 @@ subprojects {
 }
 
 tasks.register('resolveAndLockAll') {
+    notCompatibleWithConfigurationCache('Resolves every project configuration to refresh dependency locks.')
     doLast {
         allprojects.each { project ->
             project.configurations.findAll { it.canBeResolved }.each { it.resolve() }
@@ -484,7 +566,9 @@ plugins { id 'java-library' }
 
 dependencies {
     testImplementation project(':apps:control-plane:modules:platform-kernel')
-    testImplementation platform(libs.junit.bom)
+    testImplementation enforcedPlatform(libs.junit.bom)
+    testImplementation enforcedPlatform(libs.jackson.bom)
+    testImplementation enforcedPlatform(libs.slf4j.bom)
     testImplementation libs.junit.jupiter
     testImplementation libs.assertj.core
     testImplementation libs.jqwik
@@ -516,6 +600,10 @@ Create the root `package.json`:
   "scripts": {
     "check": "pnpm -r --if-present test && pnpm -r --if-present typecheck",
     "contracts:lint": "redocly lint contracts/openapi/accord-control-api.yaml"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"],
+    "ignoredBuiltDependencies": ["core-js", "protobufjs"]
   },
   "devDependencies": {
     "@redocly/cli": "1.34.3",
@@ -600,7 +688,11 @@ Create `apps/agent-runtime/pyproject.toml`:
 name = "accord-agent-runtime"
 version = "0.1.0"
 requires-python = "==3.12.11"
-dependencies = ["pydantic==2.11.7", "temporalio==1.14.1"]
+dependencies = [
+  "nexus-rpc==1.1.0",
+  "pydantic==2.11.7",
+  "temporalio==1.14.1",
+]
 
 [dependency-groups]
 dev = ["pytest==8.4.1", "mypy==1.16.1", "ruff==0.12.1"]
@@ -657,6 +749,16 @@ application {
     mainClass = 'com.inforvans.accord.cli.AccordCtl'
 }
 
+tasks.named('compileJava', JavaCompile) {
+    options.compilerArgs += ['-Xlint:-processing']
+}
+
+tasks.configureEach { task ->
+    if (task.class.name.startsWith('org.beryx.jlink.')) {
+        task.notCompatibleWithConfigurationCache('Beryx jlink 3.2.1 requires uncached execution on Gradle 8.14.3.')
+    }
+}
+
 def normalizedOs = System.getProperty('os.name', 'unknown')
     .toLowerCase(java.util.Locale.ROOT)
 def archiveOs
@@ -671,7 +773,7 @@ if (normalizedOs.contains('windows')) {
 }
 
 jlink {
-    options = ['--strip-debug', '--no-header-files', '--no-man-pages', '--compress=2']
+    options = ['--strip-debug', '--no-header-files', '--no-man-pages', '--compress=zip-6']
     launcher { name = 'accordctl' }
     imageZip = layout.buildDirectory
         .file("distributions/accordctl-${archiveOs}.zip")
@@ -702,6 +804,9 @@ import picocli.CommandLine.Command;
 @Command(name = "accordctl", mixinStandardHelpOptions = true,
         description = "Accord developer and operator commands")
 public final class AccordCtl implements Callable<Integer> {
+    public AccordCtl() {
+    }
+
     @Override
     public Integer call() {
         return 0;
@@ -752,6 +857,15 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $launcher = if ($IsWindows) { Join-Path $repositoryRoot 'gradlew.bat' } else { Join-Path $repositoryRoot 'gradlew' }
+$requiresUncachedExecution = $GradleArgs | Where-Object {
+  $_ -eq 'resolveAndLockAll' -or $_ -match '(^|:)(?:jlink|jpackage)[A-Za-z]*$'
+}
+if ($requiresUncachedExecution -and $GradleArgs -contains '--configuration-cache') {
+  throw 'jlink, jpackage, and dependency-lock refresh tasks do not support --configuration-cache'
+}
+if ($requiresUncachedExecution -and $GradleArgs -notcontains '--no-configuration-cache') {
+  $GradleArgs = @('--no-configuration-cache') + $GradleArgs
+}
 & $launcher @GradleArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
@@ -779,11 +893,17 @@ indent_size = 4
 ```
 
 ```gitignore
+.worktrees/
 .gradle/
 build/
 **/build/
 node_modules/
 .venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.py[cod]
 dist/
 .idea/
 *.iml
@@ -828,7 +948,7 @@ uv run --package accord-agent-runtime pytest apps/agent-runtime/tests/test_boots
 $launcher = if ($IsWindows) { 'cmd/accordctl/build/image/bin/accordctl.bat' } else { 'cmd/accordctl/build/image/bin/accordctl' }
 & $launcher --help
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-git diff --exit-code -- gradle pnpm-lock.yaml uv.lock
+git diff --exit-code -- gradle.lockfile settings-gradle.lockfile ':(glob)**/gradle.lockfile' gradle pnpm-lock.yaml uv.lock
 ```
 
 Expected: `design-baseline: PASS` and `workspace-layout: PASS`; Gradle lists exactly sixteen included subprojects (ten Java runtime/library/CLI projects and six shared verification projects); every Java compilation uses an Adoptium Java 21 toolchain; pnpm and uv complete without lock drift; the Python smoke test rejects `source_code`; the Picocli public contract test passes; the generated self-contained launcher prints `Usage: accordctl`; and strict dependency verification accepts every resolved artifact.
@@ -836,7 +956,7 @@ Expected: `design-baseline: PASS` and `workspace-layout: PASS`; Gradle lists exa
 - [ ] **Step 6: Commit the locked workspace**
 
 ```bash
-git add .editorconfig .gitattributes .gitignore .tool-versions settings.gradle build.gradle gradle.properties gradle.lockfile gradle gradlew gradlew.bat apps security-services cmd/accordctl libs/java package.json tsconfig.base.json pnpm-workspace.yaml pnpm-lock.yaml pyproject.toml uv.lock scripts/run-gradle.ps1 tests/bootstrap/verify-design-baseline.ps1 tests/bootstrap/verify-workspace.ps1 tests/contract/build.gradle tests/integration/build.gradle tests/api/build.gradle tests/security-negative/build.gradle tests/state-machine/build.gradle tests/fault-injection/build.gradle
+git add .editorconfig .gitattributes .gitignore .tool-versions settings.gradle settings-gradle.lockfile build.gradle gradle.properties gradle.lockfile gradle gradlew gradlew.bat apps security-services cmd/accordctl libs/java package.json tsconfig.base.json pnpm-workspace.yaml pnpm-lock.yaml pyproject.toml uv.lock scripts/run-gradle.ps1 tests/bootstrap/verify-design-baseline.ps1 tests/bootstrap/verify-workspace.ps1 tests/contract/build.gradle tests/integration/build.gradle tests/api/build.gradle tests/security-negative/build.gradle tests/state-machine/build.gradle tests/fault-injection/build.gradle
 git commit -m "build: bootstrap locked Accord monorepo"
 ```
 

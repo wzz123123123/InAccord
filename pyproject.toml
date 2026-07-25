@@ -1,0 +1,5 @@
+[tool.uv.workspace]
+members = ["apps/agent-runtime"]
+
+[tool.uv]
+required-version = "==0.7.13"
