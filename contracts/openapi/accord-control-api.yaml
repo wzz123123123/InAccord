@@ -1,0 +1,125 @@
+openapi: 3.1.0
+info:
+  title: Accord Control API
+  version: 0.1.0
+servers:
+  - url: https://api.accord.example
+security:
+  - browserSession: []
+  - oidc: []
+paths:
+  /actuator/health/liveness:
+    get:
+      summary: Report whether the control API process is live
+      operationId: getLiveness
+      security: []
+      responses:
+        '200':
+          description: Process is live
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                required: [status]
+                properties:
+                  status: { const: UP }
+  /actuator/health/readiness:
+    get:
+      summary: Report whether the control API is ready to serve traffic
+      operationId: getReadiness
+      security: []
+      responses:
+        '200':
+          description: Process and required dependencies are ready
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                required: [status]
+                properties:
+                  status: { const: UP }
+  /v1/contract-validations/{validationId}:
+    post:
+      summary: Validate a structured contract document
+      operationId: validateContract
+      parameters:
+        - name: validationId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/ExpectedVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContractValidationRequest'
+      responses:
+        '201':
+          description: Validation result persisted
+          headers:
+            ETag:
+              required: true
+              schema: { type: string, pattern: '^"[0-9]+"$' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContractValidationResponse'
+        default:
+          $ref: '#/components/responses/ProblemResponse'
+components:
+  securitySchemes:
+    browserSession:
+      type: apiKey
+      in: cookie
+      name: __Host-accord-session
+    oidc:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >-
+        Reuse is valid only for the same canonical request fingerprint. The fingerprint binds the
+        uppercase HTTP method, normalized path and sorted query pairs, route resource identifier,
+        RFC 8785 body digest, normalized If-Match value, request and response media types, API
+        contract version, authenticated tenant, and actor. Reuse with any changed bound field is 409.
+      schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$' }
+    ExpectedVersion:
+      name: If-Match
+      in: header
+      required: true
+      description: Quoted aggregate sequence, for example "7".
+      schema: { type: string, pattern: '^"[0-9]+"$' }
+  schemas:
+    ContractValidationRequest:
+      type: object
+      additionalProperties: false
+      required: [schema_id, document]
+      properties:
+        schema_id: { type: string, format: uri }
+        document: { type: object }
+    ContractValidationResponse:
+      type: object
+      additionalProperties: false
+      required: [validation_id, valid, document_digest, version]
+      properties:
+        validation_id: { type: string, format: uuid }
+        valid: { type: boolean }
+        document_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        version: { type: integer, minimum: 1 }
+    Problem:
+      $ref: '../json-schema/problem-details.schema.json'
+  responses:
+    ProblemResponse:
+      description: RFC 7807 error
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
