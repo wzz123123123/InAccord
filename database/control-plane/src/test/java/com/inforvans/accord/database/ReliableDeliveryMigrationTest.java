@@ -320,35 +320,37 @@ class ReliableDeliveryMigrationTest {
                 'load_external_intent_snapshot',
                 'record_external_intent'
                 """)).containsExactly(
-                    "create_external_intent_successor:result_tenant_id",
-                    "create_external_intent_successor:result_intent_id",
-                    "create_external_intent_successor:result_root_intent_id",
-                    "create_external_intent_successor:result_attempt_ordinal",
-                    "create_external_intent_successor:result_global_idempotency_key",
-                    "create_external_intent_successor:result_state",
-                    "load_external_intent_snapshot:tenant_id",
-                    "load_external_intent_snapshot:intent_id",
-                    "load_external_intent_snapshot:root_intent_id",
-                    "load_external_intent_snapshot:predecessor_intent_id",
-                    "load_external_intent_snapshot:attempt_ordinal",
-                    "load_external_intent_snapshot:logical_action_key",
-                    "load_external_intent_snapshot:global_idempotency_key",
-                    "load_external_intent_snapshot:state",
-                    "load_external_intent_snapshot:execution_generation",
-                    "load_external_intent_snapshot:reconciliation_generation",
-                    "load_external_intent_snapshot:provider_request_id",
-                    "load_external_intent_snapshot:outcome_digest",
-                    "load_external_intent_snapshot:last_error_code",
-                    "load_external_intent_snapshot:created_at",
-                    "load_external_intent_snapshot:updated_at",
-                    "load_external_intent_snapshot:terminal_at",
-                    "record_external_intent:disposition",
-                    "record_external_intent:result_tenant_id",
-                    "record_external_intent:result_intent_id",
-                    "record_external_intent:result_root_intent_id",
-                    "record_external_intent:result_attempt_ordinal",
-                    "record_external_intent:result_global_idempotency_key",
-                    "record_external_intent:result_state");
+                    "create_external_intent_successor:result_tenant_id:uuid",
+                    "create_external_intent_successor:result_intent_id:uuid",
+                    "create_external_intent_successor:result_root_intent_id:uuid",
+                    "create_external_intent_successor:result_attempt_ordinal:integer",
+                    "create_external_intent_successor:result_global_idempotency_key:"
+                        + "character varying",
+                    "create_external_intent_successor:result_state:character varying",
+                    "load_external_intent_snapshot:tenant_id:uuid",
+                    "load_external_intent_snapshot:intent_id:uuid",
+                    "load_external_intent_snapshot:root_intent_id:uuid",
+                    "load_external_intent_snapshot:predecessor_intent_id:uuid",
+                    "load_external_intent_snapshot:attempt_ordinal:integer",
+                    "load_external_intent_snapshot:logical_action_key:character varying",
+                    "load_external_intent_snapshot:global_idempotency_key:"
+                        + "character varying",
+                    "load_external_intent_snapshot:state:character varying",
+                    "load_external_intent_snapshot:execution_generation:bigint",
+                    "load_external_intent_snapshot:reconciliation_generation:bigint",
+                    "load_external_intent_snapshot:provider_request_id:character varying",
+                    "load_external_intent_snapshot:outcome_digest:character",
+                    "load_external_intent_snapshot:last_error_code:character varying",
+                    "load_external_intent_snapshot:created_at:timestamp with time zone",
+                    "load_external_intent_snapshot:updated_at:timestamp with time zone",
+                    "load_external_intent_snapshot:terminal_at:timestamp with time zone",
+                    "record_external_intent:disposition:text",
+                    "record_external_intent:result_tenant_id:uuid",
+                    "record_external_intent:result_intent_id:uuid",
+                    "record_external_intent:result_root_intent_id:uuid",
+                    "record_external_intent:result_attempt_ordinal:integer",
+                    "record_external_intent:result_global_idempotency_key:character varying",
+                    "record_external_intent:result_state:character varying");
 
             assertThat(functionOutputColumns(statement, """
                 'claim_external_intent_execution',
@@ -356,43 +358,59 @@ class ReliableDeliveryMigrationTest {
                 'renew_external_intent_execution',
                 'renew_external_intent_reconciliation'
                 """)).containsExactly(
-                    "claim_external_intent_execution:disposition",
-                    "claim_external_intent_execution:state",
-                    "claim_external_intent_execution:tenant_id",
-                    "claim_external_intent_execution:intent_id",
-                    "claim_external_intent_execution:execution_owner",
-                    "claim_external_intent_execution:execution_generation",
-                    "claim_external_intent_execution:execution_token",
-                    "claim_external_intent_execution:execution_lease_until",
-                    "claim_external_intent_execution:global_idempotency_key",
-                    "claim_external_intent_execution:provider",
-                    "claim_external_intent_execution:provider_installation_id",
-                    "claim_external_intent_execution:provider_repository_id",
-                    "claim_external_intent_execution:operation",
-                    "claim_external_intent_execution:request_reference_type",
-                    "claim_external_intent_execution:request_reference_id",
-                    "claim_external_intent_execution:request_reference_version",
-                    "claim_external_intent_execution:request_digest",
-                    "claim_external_intent_reconciliation:disposition",
-                    "claim_external_intent_reconciliation:state",
-                    "claim_external_intent_reconciliation:tenant_id",
-                    "claim_external_intent_reconciliation:intent_id",
-                    "claim_external_intent_reconciliation:reconciliation_owner",
-                    "claim_external_intent_reconciliation:reconciliation_generation",
-                    "claim_external_intent_reconciliation:reconciliation_token",
-                    "claim_external_intent_reconciliation:reconciliation_lease_until",
-                    "claim_external_intent_reconciliation:global_idempotency_key",
-                    "claim_external_intent_reconciliation:provider",
-                    "claim_external_intent_reconciliation:provider_installation_id",
-                    "claim_external_intent_reconciliation:provider_repository_id",
-                    "claim_external_intent_reconciliation:operation",
-                    "claim_external_intent_reconciliation:request_reference_type",
-                    "claim_external_intent_reconciliation:request_reference_id",
-                    "claim_external_intent_reconciliation:request_reference_version",
-                    "claim_external_intent_reconciliation:request_digest",
-                    "claim_external_intent_reconciliation:provider_request_id",
-                    "renew_external_intent_execution:execution_lease_until",
-                    "renew_external_intent_reconciliation:reconciliation_lease_until");
+                    "claim_external_intent_execution:disposition:text",
+                    "claim_external_intent_execution:state:character varying",
+                    "claim_external_intent_execution:tenant_id:uuid",
+                    "claim_external_intent_execution:intent_id:uuid",
+                    "claim_external_intent_execution:execution_owner:character varying",
+                    "claim_external_intent_execution:execution_generation:bigint",
+                    "claim_external_intent_execution:execution_token:uuid",
+                    "claim_external_intent_execution:execution_lease_until:"
+                        + "timestamp with time zone",
+                    "claim_external_intent_execution:global_idempotency_key:"
+                        + "character varying",
+                    "claim_external_intent_execution:provider:character varying",
+                    "claim_external_intent_execution:provider_installation_id:"
+                        + "character varying",
+                    "claim_external_intent_execution:provider_repository_id:"
+                        + "character varying",
+                    "claim_external_intent_execution:operation:character varying",
+                    "claim_external_intent_execution:request_reference_type:"
+                        + "character varying",
+                    "claim_external_intent_execution:request_reference_id:"
+                        + "character varying",
+                    "claim_external_intent_execution:request_reference_version:bigint",
+                    "claim_external_intent_execution:request_digest:character",
+                    "claim_external_intent_reconciliation:disposition:text",
+                    "claim_external_intent_reconciliation:state:character varying",
+                    "claim_external_intent_reconciliation:tenant_id:uuid",
+                    "claim_external_intent_reconciliation:intent_id:uuid",
+                    "claim_external_intent_reconciliation:reconciliation_owner:"
+                        + "character varying",
+                    "claim_external_intent_reconciliation:reconciliation_generation:bigint",
+                    "claim_external_intent_reconciliation:reconciliation_token:uuid",
+                    "claim_external_intent_reconciliation:reconciliation_lease_until:"
+                        + "timestamp with time zone",
+                    "claim_external_intent_reconciliation:global_idempotency_key:"
+                        + "character varying",
+                    "claim_external_intent_reconciliation:provider:character varying",
+                    "claim_external_intent_reconciliation:provider_installation_id:"
+                        + "character varying",
+                    "claim_external_intent_reconciliation:provider_repository_id:"
+                        + "character varying",
+                    "claim_external_intent_reconciliation:operation:character varying",
+                    "claim_external_intent_reconciliation:request_reference_type:"
+                        + "character varying",
+                    "claim_external_intent_reconciliation:request_reference_id:"
+                        + "character varying",
+                    "claim_external_intent_reconciliation:request_reference_version:bigint",
+                    "claim_external_intent_reconciliation:request_digest:character",
+                    "claim_external_intent_reconciliation:provider_request_id:"
+                        + "character varying",
+                    "renew_external_intent_execution:execution_lease_until:"
+                        + "timestamp with time zone",
+                    "renew_external_intent_reconciliation:reconciliation_lease_until:"
+                        + "timestamp with time zone");
         }
     }
 
@@ -727,11 +745,13 @@ class ReliableDeliveryMigrationTest {
             Statement statement, String functionNames) throws Exception {
         return strings(statement, """
             SELECT procedure.proname || ':' || procedure.proargnames[argument.ordinal]
+                   || ':' || pg_catalog.format_type(
+                     procedure.proallargtypes[argument.ordinal],NULL)
             FROM pg_catalog.pg_proc procedure
             JOIN pg_catalog.pg_namespace namespace
               ON namespace.oid=procedure.pronamespace
             CROSS JOIN LATERAL pg_catalog.generate_subscripts(
-              procedure.proargnames,1) argument(ordinal)
+              procedure.proallargtypes,1) argument(ordinal)
             WHERE namespace.nspname='accord_security'
               AND procedure.proname IN (%s)
               AND procedure.proargmodes[argument.ordinal] IN ('o','t')
