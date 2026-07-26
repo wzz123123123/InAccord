@@ -176,10 +176,7 @@ public final class JooqCommandGate {
             UUID aggregateId,
             long aggregateVersion,
             Duration resultTtl) {
-        Objects.requireNonNull(tx, "tx");
-        Objects.requireNonNull(key, "key");
-        Objects.requireNonNull(lease, "lease");
-        Objects.requireNonNull(result, "result");
+        requireCompletionInputs(tx, key, lease, result);
         aggregateType = CommandKey.requireBounded(aggregateType, "aggregateType", 64);
         Objects.requireNonNull(aggregateId, "aggregateId");
         if (aggregateVersion < 1) {
@@ -240,6 +237,63 @@ public final class JooqCommandGate {
         }
     }
 
+    public void completeRejection(
+            DSLContext tx,
+            CommandKey key,
+            ClaimLease lease,
+            StoredHttpResult result,
+            Duration resultTtl) {
+        requireCompletionInputs(tx, key, lease, result);
+        if (result.status() != 404 && result.status() != 412 && result.status() != 422) {
+            throw new IllegalArgumentException(
+                "persistent rejection status must be 404, 412, or 422");
+        }
+        long ttlMicros = requireDurationMicros(resultTtl, "resultTtl");
+        JSONB encodedHeaders = encodeHeaders(result.headers());
+
+        if (lockCommand(tx, key) == null) {
+            throw new IllegalStateException("idempotency lease is absent");
+        }
+        OffsetDateTime databaseNow = databaseNow(tx);
+        Record completed = tx.fetchOne("""
+            WITH completion AS MATERIALIZED (
+              SELECT CAST(? AS timestamptz) AS completed_at,
+                     CAST(? AS timestamptz)
+                       + (? * INTERVAL '1 microsecond') AS expires_at
+            )
+            UPDATE idempotency_result AS stored
+            SET state='COMPLETED',
+                claim_owner=NULL,
+                claim_token=NULL,
+                lease_until=NULL,
+                response_status=?,
+                response_headers=CAST(? AS jsonb),
+                response_body=?,
+                aggregate_type=NULL,
+                aggregate_id=NULL,
+                aggregate_version=NULL,
+                completed_at=completion.completed_at,
+                expires_at=completion.expires_at
+            FROM completion
+            WHERE stored.tenant_id=? AND stored.actor_id=?
+              AND stored.route_key=? AND stored.idempotency_key=?
+              AND stored.state='STARTED'
+              AND stored.claim_owner=? AND stored.claim_generation=?
+              AND stored.claim_token=?
+              AND stored.lease_until=CAST(? AS timestamptz)
+              AND stored.lease_until>completion.completed_at
+            RETURNING stored.completed_at
+            """,
+            databaseNow, databaseNow, ttlMicros,
+            result.status(), encodedHeaders, result.body(),
+            key.tenantId(), key.actorId(), key.routeKey(), key.idempotencyKey(),
+            lease.owner(), lease.generation(), lease.token(), lease.leaseUntil());
+        if (completed == null) {
+            throw new IllegalStateException(
+                "idempotency lease is stale, expired, lost, or completed");
+        }
+    }
+
     public long advance(
             DSLContext tx,
             UUID tenantId,
@@ -252,7 +306,9 @@ public final class JooqCommandGate {
         Objects.requireNonNull(aggregateId, "aggregateId");
         Objects.requireNonNull(expected, "expected");
         if (expected.value() == Long.MAX_VALUE) {
-            throw new IllegalArgumentException("expected version cannot be incremented");
+            Long actual = currentVersion(
+                tx, tenantId, aggregateType, aggregateId);
+            throw new VersionConflict(expected.value(), actual);
         }
         long nextVersion = expected.value() + 1;
 
@@ -278,12 +334,17 @@ public final class JooqCommandGate {
             return required(changed, "version", Long.class);
         }
 
+        Long actual = currentVersion(tx, tenantId, aggregateType, aggregateId);
+        throw new VersionConflict(expected.value(), actual);
+    }
+
+    private static Long currentVersion(
+            DSLContext tx, UUID tenantId, String aggregateType, UUID aggregateId) {
         Record current = tx.fetchOne("""
             SELECT version FROM aggregate_head
             WHERE tenant_id=? AND aggregate_type=? AND aggregate_id=?
             """, tenantId, aggregateType, aggregateId);
-        Long actual = current == null ? null : current.get("version", Long.class);
-        throw new VersionConflict(expected.value(), actual);
+        return current == null ? null : current.get("version", Long.class);
     }
 
     private OffsetDateTime setInitialDeadline(
@@ -411,6 +472,17 @@ public final class JooqCommandGate {
         } catch (JsonProcessingException error) {
             throw new IllegalArgumentException("response headers are not serializable", error);
         }
+    }
+
+    private static void requireCompletionInputs(
+            DSLContext tx,
+            CommandKey key,
+            ClaimLease lease,
+            StoredHttpResult result) {
+        Objects.requireNonNull(tx, "tx");
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(lease, "lease");
+        Objects.requireNonNull(result, "result");
     }
 
     private static void requireFingerprint(String value) {

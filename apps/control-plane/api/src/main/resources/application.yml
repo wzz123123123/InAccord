@@ -1,3 +1,37 @@
 spring:
+  application:
+    name: accord-control-api
   modulith:
     detection-strategy: explicitly-annotated
+  datasource:
+    url: ${ACCORD_DB_URL:jdbc:postgresql://localhost:5432/accord}
+    username: ${ACCORD_API_DB_USER:accord_api_login}
+    password: ${ACCORD_API_DB_PASSWORD:local-api-only}
+    hikari:
+      connection-init-sql: SET ROLE ${ACCORD_DB_SESSION_ROLE:accord_api}
+  flyway:
+    enabled: false
+server:
+  port: 8080
+  error:
+    include-message: never
+    include-binding-errors: never
+    include-stacktrace: never
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+accord:
+  process:
+    role: control-api
+    instance-id: ${ACCORD_PROCESS_INSTANCE_ID:${random.uuid}}
+  http:
+    api-contract-version: 0.1.0
+    command-result-ttl: PT24H
+  security:
+    allowed-origin: ${ACCORD_BROWSER_ORIGIN:https://app.accord.example}

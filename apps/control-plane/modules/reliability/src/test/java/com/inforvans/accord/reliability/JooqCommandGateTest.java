@@ -100,7 +100,8 @@ class JooqCommandGateTest {
     void clearRuntimeRows() throws SQLException {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
-            statement.execute("TRUNCATE TABLE aggregate_head, idempotency_result");
+            statement.execute(
+                "TRUNCATE TABLE contract_validation, aggregate_head, idempotency_result");
         }
     }
 
@@ -449,6 +450,61 @@ class JooqCommandGateTest {
     }
 
     @Test
+    void maximumExpectedVersionAgainstMissingAggregateReportsMissingWithoutOverflow()
+            throws Exception {
+        VersionConflict conflict = assertThrows(
+            VersionConflict.class,
+            () -> inApiTenant(tx -> gate.advance(
+                tx,
+                TENANT_ID,
+                "requirement",
+                AGGREGATE_ID,
+                new ExpectedVersion(Long.MAX_VALUE))));
+
+        assertEquals(Long.MAX_VALUE, conflict.expected());
+        assertNull(conflict.actual());
+        assertEquals(0, aggregateCount("requirement", AGGREGATE_ID));
+    }
+
+    @Test
+    void maximumExpectedVersionAgainstSmallerAggregateReportsStaleWithoutOverflow()
+            throws Exception {
+        insertAggregateHead("requirement", AGGREGATE_ID, 7);
+
+        VersionConflict conflict = assertThrows(
+            VersionConflict.class,
+            () -> inApiTenant(tx -> gate.advance(
+                tx,
+                TENANT_ID,
+                "requirement",
+                AGGREGATE_ID,
+                new ExpectedVersion(Long.MAX_VALUE))));
+
+        assertEquals(Long.MAX_VALUE, conflict.expected());
+        assertEquals(7L, conflict.actual());
+        assertEquals(7L, aggregateVersion("requirement", AGGREGATE_ID));
+    }
+
+    @Test
+    void exhaustedMaximumAggregateReportsVersionLimitWithoutOverflow()
+            throws Exception {
+        insertAggregateHead("requirement", AGGREGATE_ID, Long.MAX_VALUE);
+
+        VersionConflict conflict = assertThrows(
+            VersionConflict.class,
+            () -> inApiTenant(tx -> gate.advance(
+                tx,
+                TENANT_ID,
+                "requirement",
+                AGGREGATE_ID,
+                new ExpectedVersion(Long.MAX_VALUE))));
+
+        assertEquals(Long.MAX_VALUE, conflict.expected());
+        assertEquals(Long.MAX_VALUE, conflict.actual());
+        assertEquals(Long.MAX_VALUE, aggregateVersion("requirement", AGGREGATE_ID));
+    }
+
+    @Test
     void staleCompletionEscapesTransactionAndRollsBackPrecedingAggregateWrite()
             throws Exception {
         CommandKey key = key("requirements.update", "idem-000000000007");
@@ -493,6 +549,177 @@ class JooqCommandGateTest {
 
         assertEquals(0, aggregateCount("requirement", AGGREGATE_ID));
         assertEquals(expired, persistedLease(key));
+    }
+
+    @Test
+    void persistentRejectionStatusesReplayExactlyWithoutAggregateBinding() throws Exception {
+        int[] statuses = {404, 412, 422};
+        char[] fingerprints = {'4', 'c', 'e'};
+        for (int index = 0; index < statuses.length; index++) {
+            int status = statuses[index];
+            char fingerprint = fingerprints[index];
+            CommandKey key = key(
+                "validations.create", "idem-rejection-" + status);
+            ClaimLease lease = acquire(
+                key, digest(fingerprint), "worker-" + status, LEASE);
+            StoredHttpResult response = new StoredHttpResult(
+                status,
+                Map.of(
+                    "Content-Type", "application/problem+json",
+                    "X-Correlation-ID", "30000000-0000-0000-0000-000000000001"),
+                "{\n  \"status\": " + status + ", \"code\": \"REJECTED\"\n}");
+
+            inApiTenant(tx -> {
+                gate.completeRejection(tx, key, lease, response, Duration.ofHours(24));
+                return null;
+            });
+
+            Claim.Replay replay = assertInstanceOf(
+                Claim.Replay.class,
+                inApiTenant(tx -> gate.claim(
+                    tx, key, digest(fingerprint), "api-replay", LEASE)));
+            assertEquals(response, replay.result());
+            assertDetachedAggregateBinding(key);
+        }
+    }
+
+    @Test
+    void persistentRejectionRejectsEveryUnapprovedStatusBeforeSql() {
+        DSLContext disconnected = DSL.using(SQLDialect.POSTGRES);
+        CommandKey key = key("validations.create", "idem-rejection-status");
+        ClaimLease lease = new ClaimLease(
+            "worker", 1, UUID.randomUUID(),
+            OffsetDateTime.parse("2026-07-26T00:00:00Z"));
+
+        for (int status : List.of(201, 400, 401, 403, 406, 409, 415, 500)) {
+            assertThrows(
+                IllegalArgumentException.class,
+                () -> gate.completeRejection(
+                    disconnected,
+                    key,
+                    lease,
+                    new StoredHttpResult(status, Map.of(), "{}"),
+                    Duration.ofHours(1)),
+                "status " + status + " must fail before disconnected SQL is used");
+        }
+    }
+
+    @Test
+    void rawSqlCannotPersistPartialAggregateBindingForRejection() throws Exception {
+        CommandKey key = key("validations.create", "idem-rejection-partial");
+        ClaimLease lease = acquire(key, digest('9'), "worker-partial", LEASE);
+
+        DataAccessException violation = assertThrows(
+            DataAccessException.class,
+            () -> inApiTenant(tx -> {
+                tx.execute("""
+                    UPDATE idempotency_result
+                    SET state='COMPLETED',
+                        claim_owner=NULL,
+                        claim_token=NULL,
+                        lease_until=NULL,
+                        response_status=404,
+                        response_headers='{}'::jsonb,
+                        response_body='{}',
+                        aggregate_type='contract-validation',
+                        aggregate_id=NULL,
+                        aggregate_version=NULL,
+                        completed_at=clock_timestamp(),
+                        expires_at=clock_timestamp() + INTERVAL '1 hour'
+                    WHERE tenant_id=? AND actor_id=?
+                      AND route_key=? AND idempotency_key=?
+                    """,
+                    key.tenantId(), key.actorId(), key.routeKey(), key.idempotencyKey());
+                return null;
+            }));
+
+        assertTrue(
+            violation.getMessage().contains(
+                "idempotency_result_aggregate_binding_consistent"),
+            violation.getMessage());
+        assertEquals(lease, persistedLease(key));
+    }
+
+    @Test
+    void naturallyExpiredPersistentRejectionFailsWithoutTakeover() throws Exception {
+        CommandKey key = key("validations.create", "idem-rejection-expired");
+        ClaimLease expired = acquire(
+            key, digest('a'), "worker-expired", Duration.ofMillis(100));
+        serverSleep(Duration.ofMillis(250));
+
+        assertThrows(IllegalStateException.class, () -> inApiTenant(tx -> {
+            gate.completeRejection(
+                tx, key, expired,
+                new StoredHttpResult(404, Map.of(), "{}"),
+                Duration.ofHours(1));
+            return null;
+        }));
+
+        assertEquals(expired, persistedLease(key));
+    }
+
+    @Test
+    void takenOverPersistentRejectionRollsBackPrecedingTransactionWrite() throws Exception {
+        CommandKey key = key("validations.create", "idem-rejection-taken");
+        ClaimLease stale = acquire(
+            key, digest('b'), "worker-stale", Duration.ofMillis(100));
+        serverSleep(Duration.ofMillis(250));
+        ClaimLease current = assertInstanceOf(
+            Claim.Acquired.class,
+            inApiTenant(tx -> gate.claim(tx, key, digest('b'), "worker-current", LEASE)))
+            .lease();
+        UUID markerId = UUID.fromString("20000000-0000-0000-0000-000000000099");
+
+        assertThrows(IllegalStateException.class, () -> inApiTenant(tx -> {
+            gate.advance(
+                tx, TENANT_ID, "transaction-marker", markerId, new ExpectedVersion(0));
+            gate.completeRejection(
+                tx, key, stale,
+                new StoredHttpResult(412, Map.of(), "{}"),
+                Duration.ofHours(1));
+            return null;
+        }));
+
+        assertEquals(0, aggregateCount("transaction-marker", markerId));
+        assertEquals(current, persistedLease(key));
+    }
+
+    @Test
+    void sameLeasePersistentRejectionRaceAllowsExactlyOneCommit() throws Exception {
+        CommandKey key = key("validations.create", "idem-rejection-race");
+        ClaimLease lease = acquire(key, digest('d'), "worker-race", LEASE);
+        StoredHttpResult response = new StoredHttpResult(
+            422, Map.of("Content-Type", "application/problem+json"), "{\"status\":422}");
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<Outcome<Void>> first = racedApi(executor, ready, start, tx -> {
+                gate.completeRejection(tx, key, lease, response, Duration.ofHours(1));
+                return null;
+            });
+            Future<Outcome<Void>> second = racedApi(executor, ready, start, tx -> {
+                gate.completeRejection(tx, key, lease, response, Duration.ofHours(1));
+                return null;
+            });
+            assertTrue(ready.await(5, SECONDS));
+            start.countDown();
+
+            List<Outcome<Void>> outcomes = List.of(
+                first.get(10, SECONDS), second.get(10, SECONDS));
+            assertEquals(1, outcomes.stream().filter(outcome -> !outcome.failed()).count());
+            assertEquals(1, outcomes.stream()
+                .map(Outcome::error)
+                .filter(IllegalStateException.class::isInstance)
+                .count());
+            Claim.Replay replay = assertInstanceOf(
+                Claim.Replay.class,
+                inApiTenant(tx -> gate.claim(tx, key, digest('d'), "api-replay", LEASE)));
+            assertEquals(response, replay.result());
+        } finally {
+            start.countDown();
+            executor.shutdownNow();
+        }
     }
 
     @Test
@@ -1121,6 +1348,22 @@ class JooqCommandGateTest {
             .get("value", Integer.class));
     }
 
+    private void assertDetachedAggregateBinding(CommandKey key) throws Exception {
+        inApiTenant(tx -> {
+            Record row = tx.fetchOne("""
+                SELECT aggregate_type, aggregate_id, aggregate_version
+                FROM idempotency_result
+                WHERE tenant_id=? AND actor_id=? AND route_key=? AND idempotency_key=?
+                """, key.tenantId(), key.actorId(), key.routeKey(), key.idempotencyKey());
+            assertNotNull(row);
+            assertAll(
+                () -> assertNull(row.get("aggregate_type")),
+                () -> assertNull(row.get("aggregate_id")),
+                () -> assertNull(row.get("aggregate_version")));
+            return null;
+        });
+    }
+
     private String persistedFingerprint(CommandKey key) throws Exception {
         return inApiTenant(tx -> required(tx.fetchOne("""
             SELECT request_fingerprint FROM idempotency_result
@@ -1164,6 +1407,18 @@ class JooqCommandGateTest {
             SELECT version FROM aggregate_head
             WHERE tenant_id=? AND aggregate_type=? AND aggregate_id=?
             """, TENANT_ID, aggregateType, aggregateId), "version", Long.class));
+    }
+
+    private void insertAggregateHead(String aggregateType, UUID aggregateId, long version)
+            throws Exception {
+        inApiTenant(tx -> {
+            assertEquals(1, tx.execute("""
+                INSERT INTO aggregate_head (
+                  tenant_id, aggregate_type, aggregate_id, version
+                ) VALUES (?, ?, ?, ?)
+                """, TENANT_ID, aggregateType, aggregateId, version));
+            return null;
+        });
     }
 
     private OffsetDateTime aggregateUpdatedAt(String aggregateType, UUID aggregateId)

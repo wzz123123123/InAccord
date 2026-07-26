@@ -44,6 +44,21 @@ paths:
     post:
       summary: Validate a structured contract document
       operationId: validateContract
+      security:
+        - browserSession: []
+        - oidc: []
+      x-browser-csrf-required: conditional
+      x-accept-policy: application/json-or-wildcard
+      x-problem-codes-by-status:
+        '400': [REQUEST_INVALID, JSON_INVALID]
+        '401': [AUTHENTICATION_REQUIRED]
+        '403': [AUTHORIZATION_DENIED, CSRF_VALIDATION_FAILED]
+        '404': [SCHEMA_NOT_FOUND, CONTRACT_VALIDATION_NOT_FOUND]
+        '406': [NOT_ACCEPTABLE]
+        '409': [IDEMPOTENCY_KEY_REUSED, COMMAND_IN_PROGRESS]
+        '412': [VERSION_CONFLICT]
+        '415': [UNSUPPORTED_MEDIA_TYPE]
+        '422': [DOCUMENT_SCHEMA_INVALID, VERSION_LIMIT_REACHED]
       parameters:
         - name: validationId
           in: path
@@ -51,6 +66,7 @@ paths:
           schema: { type: string, format: uuid }
         - $ref: '#/components/parameters/IdempotencyKey'
         - $ref: '#/components/parameters/ExpectedVersion'
+        - $ref: '#/components/parameters/BrowserCsrfToken'
       requestBody:
         required: true
         content:
@@ -63,11 +79,29 @@ paths:
           headers:
             ETag:
               required: true
-              schema: { type: string, pattern: '^"[0-9]+"$' }
+              schema: { type: string, pattern: '^"(0|[1-9][0-9]*)"$' }
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ContractValidationResponse'
+        '400':
+          $ref: '#/components/responses/ProblemResponse'
+        '401':
+          $ref: '#/components/responses/ProblemResponse'
+        '403':
+          $ref: '#/components/responses/ProblemResponse'
+        '404':
+          $ref: '#/components/responses/ProblemResponse'
+        '406':
+          $ref: '#/components/responses/ProblemResponse'
+        '409':
+          $ref: '#/components/responses/ProblemResponse'
+        '412':
+          $ref: '#/components/responses/ProblemResponse'
+        '415':
+          $ref: '#/components/responses/ProblemResponse'
+        '422':
+          $ref: '#/components/responses/ProblemResponse'
         default:
           $ref: '#/components/responses/ProblemResponse'
 components:
@@ -95,8 +129,18 @@ components:
       name: If-Match
       in: header
       required: true
-      description: Quoted aggregate sequence, for example "7".
-      schema: { type: string, pattern: '^"[0-9]+"$' }
+      description: One canonical quoted non-negative aggregate sequence.
+      schema: { type: string, pattern: '^"(0|[1-9][0-9]*)"$' }
+    BrowserCsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: false
+      description: Required only for unsafe requests authenticated by browserSession.
+      schema:
+        type: string
+        minLength: 32
+        maxLength: 256
+        pattern: '^[A-Za-z0-9._~-]+$'
   schemas:
     ContractValidationRequest:
       type: object

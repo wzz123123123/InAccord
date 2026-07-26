@@ -28,8 +28,10 @@ spring-modulith-test = { module = "org.springframework.modulith:spring-modulith-
 spring-boot-web = { module = "org.springframework.boot:spring-boot-starter-web" }
 spring-boot-actuator = { module = "org.springframework.boot:spring-boot-starter-actuator" }
 spring-boot-jooq = { module = "org.springframework.boot:spring-boot-starter-jooq" }
+spring-boot-security = { module = "org.springframework.boot:spring-boot-starter-security" }
 spring-boot-validation = { module = "org.springframework.boot:spring-boot-starter-validation" }
 spring-boot-test = { module = "org.springframework.boot:spring-boot-starter-test" }
+spring-security-test = { module = "org.springframework.security:spring-security-test" }
 flyway-core = { module = "org.flywaydb:flyway-core", version.ref = "flyway" }
 flyway-postgresql = { module = "org.flywaydb:flyway-database-postgresql", version.ref = "flyway" }
 postgresql = { module = "org.postgresql:postgresql", version = "42.7.7" }

@@ -3669,10 +3669,17 @@ full-fence rollback without performing any external Provider I/O in a database t
 - Create: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ProblemAdvice.java`
 - Create: `apps/control-plane/api/src/test/java/com/inforvans/accord/controlplane/http/HttpIdempotencyFingerprintTest.java`
 - Create: `apps/control-plane/api/src/test/java/com/inforvans/accord/controlplane/http/ContractValidationApiTest.java`
+- Create: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/ReliabilityValuesTest.java`
 - Modify: `contracts/openapi/accord-control-api.yaml`
 - Modify: `contracts/json-schema/problem-details.schema.json`
 - Modify: `tests/contracts/openapi-contract.test.mjs`
 - Modify: `database/control-plane/src/test/java/com/inforvans/accord/database/PlatformMigrationTest.java`
+- Modify: `apps/control-plane/modules/platform-kernel/src/main/java/com/inforvans/accord/platformkernel/CanonicalJson.java`
+- Modify: `apps/control-plane/modules/platform-kernel/src/test/java/com/inforvans/accord/platformkernel/CanonicalJsonTest.java`
+- Modify: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReliabilityValues.java`
+- Modify: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/DomainEvent.java`
+- Modify: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/OutboxMessage.java`
+- Modify: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/InboxMessage.java`
 - Modify: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/JooqCommandGate.java`
 - Modify: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/JooqCommandGateTest.java`
 - Modify: `gradle/libs.versions.toml`
@@ -3748,6 +3755,7 @@ Every endpoint Problem body has exactly base keys `type`, `title`, `status`, `co
 | `COMMAND_IN_PROGRESS` | `https://problems.accord.inforvans.com/command-in-progress` | `Command is already in progress` | 409 | `retry_after` |
 | `VERSION_CONFLICT` | `https://problems.accord.inforvans.com/version-conflict` | `Expected version does not match` | 412 | `expected_version`, `actual_version` |
 | `UNSUPPORTED_MEDIA_TYPE` | `https://problems.accord.inforvans.com/unsupported-media-type` | `Content type is not supported` | 415 | none |
+| `VERSION_LIMIT_REACHED` | `https://problems.accord.inforvans.com/version-limit-reached` | `Aggregate version limit was reached` | 422 | none |
 | `DOCUMENT_SCHEMA_INVALID` | `https://problems.accord.inforvans.com/document-schema-invalid` | `Document does not satisfy the schema` | 422 | `errors` |
 
 `expected_version` is a JSON integer in `0..9223372036854775807`; `actual_version` is either null or
@@ -3775,6 +3783,17 @@ test('foundation mutation publishes the complete HTTP reliability policy', async
   assert.deepEqual(operation.security, [{ browserSession: [] }, { oidc: [] }]);
   assert.equal(operation['x-browser-csrf-required'], 'conditional');
   assert.equal(operation['x-accept-policy'], 'application/json-or-wildcard');
+  assert.deepEqual(operation['x-problem-codes-by-status'], {
+    '400': ['REQUEST_INVALID', 'JSON_INVALID'],
+    '401': ['AUTHENTICATION_REQUIRED'],
+    '403': ['AUTHORIZATION_DENIED', 'CSRF_VALIDATION_FAILED'],
+    '404': ['SCHEMA_NOT_FOUND', 'CONTRACT_VALIDATION_NOT_FOUND'],
+    '406': ['NOT_ACCEPTABLE'],
+    '409': ['IDEMPOTENCY_KEY_REUSED', 'COMMAND_IN_PROGRESS'],
+    '412': ['VERSION_CONFLICT'],
+    '415': ['UNSUPPORTED_MEDIA_TYPE'],
+    '422': ['DOCUMENT_SCHEMA_INVALID', 'VERSION_LIMIT_REACHED'],
+  });
   assert.deepEqual(
     Object.keys(operation.responses).sort(),
     ['201', '400', '401', '403', '404', '406', '409', '412', '415', '422', 'default'],
@@ -3802,6 +3821,16 @@ fields and responses:
         - oidc: []
       x-browser-csrf-required: conditional
       x-accept-policy: application/json-or-wildcard
+      x-problem-codes-by-status:
+        '400': [REQUEST_INVALID, JSON_INVALID]
+        '401': [AUTHENTICATION_REQUIRED]
+        '403': [AUTHORIZATION_DENIED, CSRF_VALIDATION_FAILED]
+        '404': [SCHEMA_NOT_FOUND, CONTRACT_VALIDATION_NOT_FOUND]
+        '406': [NOT_ACCEPTABLE]
+        '409': [IDEMPOTENCY_KEY_REUSED, COMMAND_IN_PROGRESS]
+        '412': [VERSION_CONFLICT]
+        '415': [UNSUPPORTED_MEDIA_TYPE]
+        '422': [DOCUMENT_SCHEMA_INVALID, VERSION_LIMIT_REACHED]
       parameters:
         - name: validationId
           in: path
@@ -3864,6 +3893,18 @@ UUID `correlation_id`, and `instance`; forbid `detail` explicitly. Retain docume
 `additionalProperties: true` only because the shared RFC 7807 schema permits extensions. Contract
 tests enumerate every table row and prove the endpoint factory emits exactly the six base keys plus
 that row's extensions, with byte-equal type/title/status/code for stored and unstored Problems.
+Parse the same JSON Schema source a second time with the YAML parser's BigInt mode and assert both
+64-bit maxima independently; JavaScript `Number` equality and a first-match source regex are not
+precise enough to distinguish neighboring values at this magnitude:
+
+```javascript
+const exactSchema = YAML.parse(source, { intAsBigInt: true });
+assert.equal(exactSchema.properties.expected_version.maximum, 9223372036854775807n);
+assert.equal(
+  exactSchema.properties.actual_version.anyOf[1].maximum,
+  9223372036854775807n,
+);
+```
 
 Run:
 
@@ -4285,10 +4326,17 @@ record ContractValidationResponse(
    transaction. Build the final 404 or 422 Problem body before transaction 2.
 4. Run transaction 2. For schema 404 or document 422 call `completeRejection` and return the stored
    Problem. No aggregate version changes.
-5. For a valid document call `gate.advance` with aggregate type `contract-validation`. If
-   `VersionConflict.actual()` is null, build and persist 404; otherwise build and persist 412 with
-   `expected_version` and `actual_version`. Catch only this domain exception inside transaction 2;
-   SQL, serialization, fence, and invariant failures escape and roll back.
+5. For a valid document call `gate.advance` with aggregate type `contract-validation`. The gate
+   reads the actual version before handling `expected == Long.MAX_VALUE`; a missing row
+   therefore still yields `VersionConflict(Long.MAX_VALUE, null)`, a smaller actual version yields
+   the ordinary stale conflict, and an actual version equal to `Long.MAX_VALUE` yields the closed
+   exhausted-version sentinel without evaluating `actual + 1`. In the transaction-2 catch, map
+   `actual == null` to stored `CONTRACT_VALIDATION_NOT_FOUND` 404, then map
+   `expected == actual == Long.MAX_VALUE` to stored `VERSION_LIMIT_REACHED` 422, and map every other
+   conflict to stored `VERSION_CONFLICT` 412 with `expected_version` and `actual_version`. Catch only
+   this domain exception; SQL, serialization, fence, and invariant failures escape and roll back.
+   Every maximum-version branch completes or replays under the fence, never overflows, and never
+   leaves the command in `STARTED`.
 6. After successful CAS, insert version 1 or update exactly the prior expected validation version.
    Store only tenant, ID, canonical schema ID, document JCS digest, and new version; require exactly
    one affected row.
@@ -4299,6 +4347,17 @@ record ContractValidationResponse(
 8. Serialize `ContractValidationResponse(validation_id, true, document_digest, version)` once.
    Complete with status 201 and replay-safe headers `Content-Type: application/json` and quoted
    numeric `ETag`; return those same bytes only after transaction 2 commits.
+
+`contract-validation.completed/1.0.0` is an explicit, versioned exact-integer payload policy.
+`CanonicalJson.canonicalizePreservingExactIntegers` preserves `Long.MAX_VALUE` in the success
+response, and `ReliabilityValues` selects that exact helper only when `DomainEvent` derives this
+exact `eventType/schemaVersion` or an outbox/inbox message declares this exact `payloadSchema`.
+The ordinary `CanonicalJson.canonicalize` and `sha256` APIs remain RFC 8785, every other reliability
+payload schema remains RFC 8785, and `contract-validation.completed/1.0.1` returns to RFC 8785.
+Tests prove the success response, domain event, and outbox payload retain the same exact long value,
+while ordinary DomainEvent/OutboxMessage/InboxMessage payloads use standard number normalization;
+the exact helper also retains the ordinary duplicate-key, single-root, and I-JSON Unicode rejection
+rules.
 
 Add the remaining integration and concurrency tests:
 
@@ -4312,6 +4371,13 @@ Add the remaining integration and concurrency tests:
 - unknown local schema, missing positive-version target, stale target, and invalid document produce
   stored 404/404/412/422 respectively; after unrelated state advances, the original key still
   replays the original exact Problem bytes;
+- maximum expected version has a closed three-state matrix: a missing target stores/replays 404, a
+  smaller actual version stores/replays 412 with exact long extensions, and an actual version equal
+  to `Long.MAX_VALUE` stores/replays `VERSION_LIMIT_REACHED` 422. Every result has null idempotency
+  aggregate type/ID/version, and its stored status, canonical headers, and raw body are byte-equal
+  to both the first response and replay. Missing rows remain absent; stale and exhausted aggregate
+  heads and validations retain both their original version and `updated_at`; none emits an event or
+  outbox row, overflows a long, or leaves a `STARTED` command;
 - invalid document never advances an aggregate or emits an event;
 - 32 distinct keys racing on the same expected version yield one 201 and 31 stored 412 results, one
   aggregate increment, one validation mutation, and one event/outbox pair;
@@ -4335,9 +4401,10 @@ corepack pnpm contracts:test
 corepack pnpm contracts:lint
 ```
 
-Expected GREEN: every protocol/security failure is pre-claim, all four acquired business outcomes
-are durable and replayable as specified, only success changes aggregate/business/event state, CAS
-races have one winner, and a lost fence rolls the full transaction back.
+Expected GREEN: every protocol/security failure is pre-claim, every acquired deterministic
+business outcome in the integration matrix is durable and replayable as specified, only success
+changes aggregate/business/event state, CAS races have one winner, and a lost fence rolls the full
+transaction back.
 
 - [ ] **Step 7: Configure production defaults and verify locked dependencies**
 
@@ -4424,14 +4491,17 @@ only the files listed by this task:
 
 ```powershell
 git diff --check
+git add docs/superpowers/plans/2026-07-24-accord-platform-foundation-plan.md apps/control-plane/modules/platform-kernel/src/main/java/com/inforvans/accord/platformkernel/CanonicalJson.java apps/control-plane/modules/platform-kernel/src/test/java/com/inforvans/accord/platformkernel/CanonicalJsonTest.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReliabilityValues.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/DomainEvent.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/OutboxMessage.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/InboxMessage.java apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/ReliabilityValuesTest.java
 git add contracts/openapi/accord-control-api.yaml contracts/json-schema/problem-details.schema.json tests/contracts/openapi-contract.test.mjs database/control-plane/migrations/V003__foundation_http_reliability.sql database/control-plane/src/test/java/com/inforvans/accord/database/FoundationHttpReliabilityMigrationTest.java database/control-plane/src/test/java/com/inforvans/accord/database/PlatformMigrationTest.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/JooqCommandGate.java apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/JooqCommandGateTest.java gradle/libs.versions.toml apps/control-plane/api/build.gradle apps/control-plane/api/gradle.lockfile gradle/verification-metadata.xml apps/control-plane/api/src/main/resources/application.yml apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationVerifiedPrincipal.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationTenantTransactions.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationHttpRequestPolicy.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ContractValidationJson.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/HttpIdempotencyFingerprint.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationHttpConfiguration.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ContractValidationCommandService.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ContractValidationController.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationHttpSecurity.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ProblemAdvice.java apps/control-plane/api/src/test/java/com/inforvans/accord/controlplane/http/HttpIdempotencyFingerprintTest.java apps/control-plane/api/src/test/java/com/inforvans/accord/controlplane/http/ContractValidationApiTest.java
 git diff --cached --name-only
 git commit -m "feat: prove enterprise HTTP command reliability"
 ```
 
-Expected: the staged manifest contains only the exact Task 9 files; already committed Task 8 files
-remain absent from the staged diff; the branch contains one reviewable HTTP reliability slice; and
-Task 10 begins immediately after this section without modification.
+Expected: the staged manifest contains only the exact Task 9 files; previously Task 8-owned shared
+files appear only where this review requires a Task 9 modification, and unrelated Task 8 files
+remain absent; the Task 9 plan file is present as this review-driven authoritative-plan
+synchronization; the branch contains one reviewable HTTP reliability slice; and Task 10 begins
+immediately after this section without modification.
 
 ### Task 10: Prove Durable Temporal Orchestration Over Production mTLS
 

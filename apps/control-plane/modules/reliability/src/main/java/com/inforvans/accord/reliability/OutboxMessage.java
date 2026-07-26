@@ -8,6 +8,6 @@ public record OutboxMessage(
     public OutboxMessage {
         destination = CommandKey.requireBounded(destination, "destination", 128);
         payloadSchema = CommandKey.requireBounded(payloadSchema, "payloadSchema", 255);
-        payload = ReliabilityValues.canonicalJson(payload, "payload");
+        payload = ReliabilityValues.canonicalJson(payload, "payload", payloadSchema);
     }
 }

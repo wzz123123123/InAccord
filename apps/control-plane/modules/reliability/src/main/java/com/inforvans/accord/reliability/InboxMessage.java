@@ -20,6 +20,6 @@ public record InboxMessage(
         requestDigest = ReliabilityValues.digest(requestDigest, "requestDigest");
         handlerKey = CommandKey.requireBounded(handlerKey, "handlerKey", 128);
         payloadSchema = CommandKey.requireBounded(payloadSchema, "payloadSchema", 255);
-        payload = ReliabilityValues.canonicalJson(payload, "payload");
+        payload = ReliabilityValues.canonicalJson(payload, "payload", payloadSchema);
     }
 }

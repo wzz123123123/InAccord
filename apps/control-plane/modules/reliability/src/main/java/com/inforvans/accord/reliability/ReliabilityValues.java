@@ -8,6 +8,7 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.time.Duration;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -25,16 +26,25 @@ final class ReliabilityValues {
         Pattern.compile("^[a-z][a-z0-9_.-]+$");
     private static final Pattern ERROR_CODE =
         Pattern.compile("^[A-Z][A-Z0-9_]{0,127}$");
+    private static final Set<String> EXACT_INTEGER_PAYLOAD_SCHEMAS =
+        Set.of("contract-validation.completed/1.0.0");
 
     private ReliabilityValues() {}
 
-    static String canonicalJson(String value, String name) {
+    static String canonicalJson(String value, String name, String payloadSchema) {
         Objects.requireNonNull(value, name);
-        byte[] canonical = CanonicalJson.canonicalize(encodeUtf8(value, name));
+        byte[] encoded = encodeUtf8(value, name);
+        byte[] canonical = preservesExactIntegers(payloadSchema)
+            ? CanonicalJson.canonicalizePreservingExactIntegers(encoded)
+            : CanonicalJson.canonicalize(encoded);
         if (canonical.length > MAX_JSON_BYTES) {
             throw new IllegalArgumentException(name + " exceeds 1 MiB");
         }
         return new String(canonical, StandardCharsets.UTF_8);
+    }
+
+    private static boolean preservesExactIntegers(String payloadSchema) {
+        return EXACT_INTEGER_PAYLOAD_SCHEMAS.contains(payloadSchema);
     }
 
     static String digest(String value, String name) {

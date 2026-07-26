@@ -39,7 +39,8 @@ public record DomainEvent(
         Objects.requireNonNull(causationId, "causationId");
         Objects.requireNonNull(correlationId, "correlationId");
         actorId = CommandKey.requireBounded(actorId, "actorId", 255);
-        payload = ReliabilityValues.canonicalJson(payload, "payload");
+        payload = ReliabilityValues.canonicalJson(
+            payload, "payload", eventType + "/" + schemaVersion);
         Objects.requireNonNull(occurredAt, "occurredAt");
     }
 }

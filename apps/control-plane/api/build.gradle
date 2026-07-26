@@ -11,9 +11,19 @@ dependencies {
     implementation libs.spring.modulith.starter.core
     implementation libs.spring.boot.web
     implementation libs.spring.boot.actuator
+    implementation libs.spring.boot.jooq
+    implementation libs.spring.boot.security
+    implementation libs.json.schema.validator
+    runtimeOnly libs.postgresql
     testImplementation libs.spring.boot.test
+    testImplementation libs.spring.security.test
     testImplementation libs.spring.modulith.test
     testImplementation libs.archunit.junit
+    testImplementation testFixtures(project(':database:control-plane'))
+    testImplementation libs.flyway.core
+    testImplementation libs.flyway.postgresql
+    testImplementation libs.testcontainers.junit
+    testImplementation libs.testcontainers.postgresql
 }
 
 sourceSets {
@@ -23,6 +33,17 @@ sourceSets {
 }
 
 tasks.withType(Test).configureEach { useJUnitPlatform() }
+
+// Task 9 deliberately keeps its package-private auxiliary types in ProblemAdvice.java.
+tasks.named('compileJava') {
+    options.compilerArgs += ['-Xlint:-auxiliaryclass']
+}
+
+tasks.named('processResources') {
+    from(rootProject.file('contracts/json-schema/domain-event.schema.json')) {
+        into 'accord/contracts'
+    }
+}
 
 ext.controlPlaneBoundary = [
     expectedStartClass: 'com.inforvans.accord.ControlApiApplication',

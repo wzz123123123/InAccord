@@ -546,7 +546,11 @@ class PlatformMigrationTest {
                   ('idempotency_result', 'idempotency_result_response_body_bounded', 'c',
                     'CHECK (response_body IS NULL OR octet_length(response_body) <= 1048576)'),
                   ('idempotency_result', 'idempotency_result_lifecycle_consistent', 'c',
-                    'CHECK (state::text = ''STARTED''::text AND claim_owner IS NOT NULL AND claim_token IS NOT NULL AND lease_until IS NOT NULL AND response_status IS NULL AND completed_at IS NULL OR state::text = ''COMPLETED''::text AND claim_owner IS NULL AND claim_token IS NULL AND lease_until IS NULL AND response_status IS NOT NULL AND response_headers IS NOT NULL AND response_body IS NOT NULL AND completed_at IS NOT NULL)')
+                    'CHECK (state::text = ''STARTED''::text AND claim_owner IS NOT NULL AND claim_token IS NOT NULL AND lease_until IS NOT NULL AND response_status IS NULL AND completed_at IS NULL OR state::text = ''COMPLETED''::text AND claim_owner IS NULL AND claim_token IS NULL AND lease_until IS NULL AND response_status IS NOT NULL AND response_headers IS NOT NULL AND response_body IS NOT NULL AND completed_at IS NOT NULL)'),
+                  ('idempotency_result', 'idempotency_result_aggregate_binding_consistent', 'c',
+                    'CHECK (aggregate_type IS NULL AND aggregate_id IS NULL AND aggregate_version IS NULL OR aggregate_type IS NOT NULL AND aggregate_id IS NOT NULL AND aggregate_version IS NOT NULL)'),
+                  ('idempotency_result', 'idempotency_result_detached_status_known', 'c',
+                    'CHECK (state::text <> ''COMPLETED''::text OR aggregate_type IS NOT NULL OR (response_status = ANY (ARRAY[404, 412, 422])))')
                 ), actual AS (
                   SELECT relation.relname::text, catalog_constraint.conname::text,
                          catalog_constraint.contype::text,
@@ -830,7 +834,9 @@ class PlatformMigrationTest {
     void idempotencyInsertRejectsInvalidResponseStatus() throws Exception {
         assertInvalidIdempotencyInsert(
             UUID.randomUUID(),
-            IdempotencyInsert.validCompleted().withResponseStatus(99),
+            IdempotencyInsert.validCompleted()
+                .withAggregateVersion(1L)
+                .withResponseStatus(99),
             "idempotency_result_response_status_valid");
     }
 
@@ -840,6 +846,22 @@ class PlatformMigrationTest {
             UUID.randomUUID(),
             IdempotencyInsert.validCompleted().withAggregateVersion(0L),
             "idempotency_result_aggregate_version_positive");
+    }
+
+    @Test
+    void idempotencyInsertRejectsPartialAggregateBinding() throws Exception {
+        assertInvalidIdempotencyInsert(
+            UUID.randomUUID(),
+            IdempotencyInsert.validCompleted().withPartialAggregateVersion(1L),
+            "idempotency_result_aggregate_binding_consistent");
+    }
+
+    @Test
+    void idempotencyInsertRejectsDetachedCompletionOutsideTheAllowlist() throws Exception {
+        assertInvalidIdempotencyInsert(
+            UUID.randomUUID(),
+            IdempotencyInsert.validCompleted().withResponseStatus(201),
+            "idempotency_result_detached_status_known");
     }
 
     @Test
@@ -1089,12 +1111,13 @@ class PlatformMigrationTest {
                   tenant_id, actor_id, route_key, idempotency_key,
                   request_fingerprint, state, claim_owner, claim_generation,
                   claim_token, lease_until, response_status, response_headers,
-                  response_body, aggregate_version, completed_at, expires_at)
+                  response_body, aggregate_version, completed_at, expires_at,
+                  aggregate_type, aggregate_id)
                 VALUES (?, 'actor', 'POST:/requirements', ?, ?, ?, ?, ?, ?,
                   CASE WHEN ? THEN transaction_timestamp() + interval '5 minutes' END,
                   ?, CAST(? AS jsonb), ?, ?,
                   CASE WHEN ? THEN transaction_timestamp() END,
-                  transaction_timestamp() + interval '1 day')
+                  transaction_timestamp() + interval '1 day', ?, ?)
                 """)) {
             insert.setObject(1, tenantId);
             insert.setString(2, UUID.randomUUID().toString());
@@ -1109,6 +1132,8 @@ class PlatformMigrationTest {
             insert.setString(11, row.responseBody());
             insert.setObject(12, row.aggregateVersion());
             insert.setBoolean(13, row.completed());
+            insert.setString(14, row.aggregateType());
+            insert.setObject(15, row.aggregateId());
             insert.executeUpdate();
         }
     }
@@ -1319,65 +1344,82 @@ class PlatformMigrationTest {
             String responseHeaders,
             String responseBody,
             Long aggregateVersion,
-            boolean completed) {
+            boolean completed,
+            String aggregateType,
+            UUID aggregateId) {
         private static IdempotencyInsert validStarted() {
             return new IdempotencyInsert(
                 FINGERPRINT, "STARTED", "worker", 1, UUID.randomUUID(), true,
-                null, null, null, null, false);
+                null, null, null, null, false, null, null);
         }
 
         private static IdempotencyInsert validCompleted() {
             return new IdempotencyInsert(
                 FINGERPRINT, "COMPLETED", null, 1, null, false,
-                200, "{}", "", null, true);
+                422, "{}", "", null, true, null, null);
         }
 
         private IdempotencyInsert withFingerprint(String value) {
             return new IdempotencyInsert(
                 value, state, claimOwner, claimGeneration, claimToken, leased,
-                responseStatus, responseHeaders, responseBody, aggregateVersion, completed);
+                responseStatus, responseHeaders, responseBody, aggregateVersion, completed,
+                aggregateType, aggregateId);
         }
 
         private IdempotencyInsert withState(String value) {
             return new IdempotencyInsert(
                 fingerprint, value, claimOwner, claimGeneration, claimToken, leased,
-                responseStatus, responseHeaders, responseBody, aggregateVersion, completed);
+                responseStatus, responseHeaders, responseBody, aggregateVersion, completed,
+                aggregateType, aggregateId);
         }
 
         private IdempotencyInsert withClaimOwner(String value) {
             return new IdempotencyInsert(
                 fingerprint, state, value, claimGeneration, claimToken, leased,
-                responseStatus, responseHeaders, responseBody, aggregateVersion, completed);
+                responseStatus, responseHeaders, responseBody, aggregateVersion, completed,
+                aggregateType, aggregateId);
         }
 
         private IdempotencyInsert withClaimGeneration(long value) {
             return new IdempotencyInsert(
                 fingerprint, state, claimOwner, value, claimToken, leased,
-                responseStatus, responseHeaders, responseBody, aggregateVersion, completed);
+                responseStatus, responseHeaders, responseBody, aggregateVersion, completed,
+                aggregateType, aggregateId);
         }
 
         private IdempotencyInsert withResponseStatus(int value) {
             return new IdempotencyInsert(
                 fingerprint, state, claimOwner, claimGeneration, claimToken, leased,
-                value, responseHeaders, responseBody, aggregateVersion, completed);
+                value, responseHeaders, responseBody, aggregateVersion, completed,
+                aggregateType, aggregateId);
         }
 
         private IdempotencyInsert withResponseHeaders(String value) {
             return new IdempotencyInsert(
                 fingerprint, state, claimOwner, claimGeneration, claimToken, leased,
-                responseStatus, value, responseBody, aggregateVersion, completed);
+                responseStatus, value, responseBody, aggregateVersion, completed,
+                aggregateType, aggregateId);
         }
 
         private IdempotencyInsert withResponseBody(String value) {
             return new IdempotencyInsert(
                 fingerprint, state, claimOwner, claimGeneration, claimToken, leased,
-                responseStatus, responseHeaders, value, aggregateVersion, completed);
+                responseStatus, responseHeaders, value, aggregateVersion, completed,
+                aggregateType, aggregateId);
         }
 
         private IdempotencyInsert withAggregateVersion(Long value) {
             return new IdempotencyInsert(
                 fingerprint, state, claimOwner, claimGeneration, claimToken, leased,
-                responseStatus, responseHeaders, responseBody, value, completed);
+                responseStatus, responseHeaders, responseBody, value, completed,
+                value == null ? null : "requirement",
+                value == null ? null : UUID.randomUUID());
+        }
+
+        private IdempotencyInsert withPartialAggregateVersion(Long value) {
+            return new IdempotencyInsert(
+                fingerprint, state, claimOwner, claimGeneration, claimToken, leased,
+                responseStatus, responseHeaders, responseBody, value, completed, null, null);
         }
     }
 }

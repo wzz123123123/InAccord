@@ -55,6 +55,61 @@ final class CanonicalJsonTest {
     }
 
     @Test
+    void exactIntegerCanonicalizationPreservesIntegersAndCanonicalizesOtherLeaves() {
+        String input = """
+            {"z":1.2300,"nested":{"version":9223372036854775807,"a":2},"a":true}
+            """;
+
+        assertThat(new String(
+                CanonicalJson.canonicalizePreservingExactIntegers(input.getBytes(UTF_8)),
+                UTF_8))
+            .isEqualTo(
+                "{\"a\":true,\"nested\":{\"a\":2,\"version\":9223372036854775807},\"z\":1.23}");
+        assertThat(new String(CanonicalJson.canonicalize(input.getBytes(UTF_8)), UTF_8))
+            .isEqualTo(
+                "{\"a\":true,\"nested\":{\"a\":2,\"version\":9223372036854776000},\"z\":1.23}");
+    }
+
+    @Test
+    void exactIntegerCanonicalizationSortsObjectNamesByUtf16CodeUnits() {
+        String supplementary = new String(Character.toChars(0x10000));
+        String input = "{\"\\ue000\":1,\"" + supplementary + "\":2}";
+
+        assertThat(new String(
+                CanonicalJson.canonicalizePreservingExactIntegers(input.getBytes(UTF_8)),
+                UTF_8))
+            .isEqualTo("{\"" + supplementary + "\":2,\"\ue000\":1}");
+    }
+
+    @Test
+    void exactIntegerCanonicalizationRejectsDuplicateObjectNames() {
+        String input = "{\"value\":1,\"value\":2}";
+
+        assertThatThrownBy(() ->
+                CanonicalJson.canonicalizePreservingExactIntegers(input.getBytes(UTF_8)))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessage("input must be valid I-JSON");
+    }
+
+    @Test
+    void exactIntegerCanonicalizationRejectsUnpairedUnicodeSurrogates() {
+        String input = "{\"value\":\"\\ud800\"}";
+
+        assertThatThrownBy(() ->
+                CanonicalJson.canonicalizePreservingExactIntegers(input.getBytes(UTF_8)))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessage("input must be valid I-JSON");
+    }
+
+    @Test
+    void exactIntegerCanonicalizationRejectsMultipleRootValues() {
+        assertThatThrownBy(() ->
+                CanonicalJson.canonicalizePreservingExactIntegers("1 2".getBytes(UTF_8)))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessage("input must be valid I-JSON");
+    }
+
+    @Test
     void unpairedUnicodeSurrogatesAreRejected() {
         for (String json : new String[] {"{\"value\":\"\\ud800\"}", "{\"value\":\"\\udc00\"}"}) {
             assertThatThrownBy(() -> CanonicalJson.canonicalize(json.getBytes(UTF_8)))
