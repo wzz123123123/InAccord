@@ -165,12 +165,21 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
             store.load(tx, TENANT_ID, intent.intentId()).orElseThrow());
         assertEquals(apiSnapshot, workerSnapshot);
         assertEquals(ExternalIntentState.EXECUTING, apiSnapshot.state());
-        assertEquals(Set.of(
+        assertEquals(java.util.List.of(
             "tenantId", "intentId", "rootIntentId", "predecessorIntentId",
-            "attemptOrdinal", "logicalActionKey", "globalIdempotencyKey", "state",
-            "executionGeneration", "reconciliationGeneration", "providerRequestId",
-            "outcomeDigest", "lastErrorCode", "createdAt", "updatedAt", "terminalAt"),
-            recordComponentNames(ExternalIntentSnapshot.class));
+            "attemptOrdinal", "scopeType", "scopeId", "logicalActionKey",
+            "globalIdempotencyKey", "state", "executionGeneration",
+            "reconciliationGeneration", "providerRequestId", "outcomeDigest",
+            "lastErrorCode", "createdAt", "updatedAt", "terminalAt"),
+            orderedRecordComponentNames(ExternalIntentSnapshot.class));
+        assertEquals("repository", apiSnapshot.scopeType());
+        assertEquals("repository-1", apiSnapshot.scopeId());
+
+        assertTrue(inApi(OTHER_TENANT_ID, tx ->
+            store.load(tx, OTHER_TENANT_ID, intent.intentId())).isEmpty());
+        assertThrows(org.jooq.exception.DataAccessException.class, () ->
+            inApi(OTHER_TENANT_ID, tx ->
+                store.load(tx, TENANT_ID, intent.intentId())));
     }
 
     @Test
@@ -460,6 +469,12 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
         assertEquals(intent.rootIntentId(), successor.rootIntentId());
         assertEquals(intent.attemptOrdinal() + 1, successor.attemptOrdinal());
         assertNotEquals(intent.globalIdempotencyKey(), successor.globalIdempotencyKey());
+        ExternalIntentSnapshot predecessorSnapshot = inWorker(TENANT_ID, tx ->
+            store.load(tx, TENANT_ID, intent.intentId()).orElseThrow());
+        ExternalIntentSnapshot successorSnapshot = inWorker(TENANT_ID, tx ->
+            store.load(tx, TENANT_ID, successor.intentId()).orElseThrow());
+        assertEquals(predecessorSnapshot.scopeType(), successorSnapshot.scopeType());
+        assertEquals(predecessorSnapshot.scopeId(), successorSnapshot.scopeId());
         assertEquals(2, count("external_call_intent"));
     }
 
@@ -1063,6 +1078,12 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
         return java.util.Arrays.stream(recordType.getRecordComponents())
             .map(java.lang.reflect.RecordComponent::getName)
             .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
+
+    private static java.util.List<String> orderedRecordComponentNames(Class<?> recordType) {
+        return java.util.Arrays.stream(recordType.getRecordComponents())
+            .map(java.lang.reflect.RecordComponent::getName)
+            .toList();
     }
 
     private static void assertNullFields(Record row, String... names) {

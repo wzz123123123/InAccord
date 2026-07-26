@@ -332,6 +332,8 @@ class ReliableDeliveryMigrationTest {
                     "load_external_intent_snapshot:root_intent_id:uuid",
                     "load_external_intent_snapshot:predecessor_intent_id:uuid",
                     "load_external_intent_snapshot:attempt_ordinal:integer",
+                    "load_external_intent_snapshot:scope_type:character varying",
+                    "load_external_intent_snapshot:scope_id:character varying",
                     "load_external_intent_snapshot:logical_action_key:character varying",
                     "load_external_intent_snapshot:global_idempotency_key:"
                         + "character varying",

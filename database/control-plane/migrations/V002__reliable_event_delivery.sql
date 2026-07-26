@@ -747,6 +747,8 @@ RETURNS TABLE(
     root_intent_id uuid,
     predecessor_intent_id uuid,
     attempt_ordinal integer,
+    scope_type varchar,
+    scope_id varchar,
     logical_action_key varchar,
     global_idempotency_key varchar,
     state varchar,
@@ -772,10 +774,11 @@ BEGIN
     RETURN QUERY
     SELECT intent.tenant_id,intent.intent_id,intent.root_intent_id,
            intent.predecessor_intent_id,intent.attempt_ordinal,
-           intent.logical_action_key,intent.global_idempotency_key,intent.state,
-           intent.execution_generation,intent.reconciliation_generation,
-           intent.provider_request_id,intent.outcome_digest,intent.last_error_code,
-           intent.created_at,intent.updated_at,intent.terminal_at
+           intent.scope_type,intent.scope_id,intent.logical_action_key,
+           intent.global_idempotency_key,intent.state,intent.execution_generation,
+           intent.reconciliation_generation,intent.provider_request_id,
+           intent.outcome_digest,intent.last_error_code,intent.created_at,
+           intent.updated_at,intent.terminal_at
     FROM public.external_call_intent AS intent
     WHERE intent.tenant_id=p_tenant_id AND intent.intent_id=p_intent_id;
 END

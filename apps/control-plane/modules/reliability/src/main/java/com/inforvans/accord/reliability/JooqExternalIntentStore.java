@@ -472,6 +472,8 @@ public final class JooqExternalIntentStore {
             required(row, "root_intent_id", UUID.class),
             row.get("predecessor_intent_id", UUID.class),
             required(row, "attempt_ordinal", Integer.class),
+            required(row, "scope_type", String.class),
+            required(row, "scope_id", String.class),
             required(row, "logical_action_key", String.class),
             required(row, "global_idempotency_key", String.class),
             state(row),

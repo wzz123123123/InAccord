@@ -10,6 +10,8 @@ public record ExternalIntentSnapshot(
     UUID rootIntentId,
     UUID predecessorIntentId,
     int attemptOrdinal,
+    String scopeType,
+    String scopeId,
     String logicalActionKey,
     String globalIdempotencyKey,
     ExternalIntentState state,
@@ -30,6 +32,10 @@ public record ExternalIntentSnapshot(
             throw new IllegalArgumentException("persisted intent counters are invalid");
         }
         ReliabilityValues.logicalKey(logicalActionKey);
+        if (!java.util.Set.of("tenant", "project", "repository").contains(scopeType)) {
+            throw new IllegalArgumentException("scopeType is unknown");
+        }
+        scopeId = ReliabilityValues.safeIdentifier(scopeId, "scopeId");
         ReliabilityValues.globalIdempotencyKey(tenantId, intentId, globalIdempotencyKey);
         Objects.requireNonNull(state, "state");
         providerRequestId = ReliabilityValues.optionalSafeIdentifier(
