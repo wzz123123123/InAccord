@@ -18,9 +18,9 @@ final class ReliabilityValues {
     private static final Pattern SAFE_IDENTIFIER =
         Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$");
     private static final Pattern LOGICAL_KEY =
-        Pattern.compile("^[\\x20-\\x7e]{16,128}$");
+        Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$");
     private static final Pattern URI_PREFIX =
-        Pattern.compile("^[A-Za-z][A-Za-z0-9+.-]*://");
+        Pattern.compile("^(?:https?|ssh|git|file|ftp):", Pattern.CASE_INSENSITIVE);
     private static final Pattern SYMBOL =
         Pattern.compile("^[a-z][a-z0-9_.-]+$");
     private static final Pattern ERROR_CODE =

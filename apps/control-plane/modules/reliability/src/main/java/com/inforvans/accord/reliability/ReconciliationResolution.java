@@ -1,12 +1,13 @@
 package com.inforvans.accord.reliability;
 
 public sealed interface ReconciliationResolution
-        permits ReconciliationResolution.Succeeded,
-                ReconciliationResolution.ConfirmedNoEffect,
-                ReconciliationResolution.Diverged,
+        permits ReconciliationResolution.Terminal,
                 ReconciliationResolution.StillUnknown {
+    sealed interface Terminal extends ReconciliationResolution
+            permits Succeeded, ConfirmedNoEffect, Diverged {}
+
     record Succeeded(String outcomeDigest, String providerRequestId)
-            implements ReconciliationResolution {
+            implements Terminal {
         public Succeeded {
             outcomeDigest = ReliabilityValues.digest(outcomeDigest, "outcomeDigest");
             providerRequestId = ReliabilityValues.optionalSafeIdentifier(
@@ -15,7 +16,7 @@ public sealed interface ReconciliationResolution
     }
 
     record ConfirmedNoEffect(String evidenceDigest, String providerRequestId)
-            implements ReconciliationResolution {
+            implements Terminal {
         public ConfirmedNoEffect {
             evidenceDigest = ReliabilityValues.digest(evidenceDigest, "evidenceDigest");
             providerRequestId = ReliabilityValues.optionalSafeIdentifier(
@@ -24,7 +25,7 @@ public sealed interface ReconciliationResolution
     }
 
     record Diverged(String evidenceDigest, String errorCode, String providerRequestId)
-            implements ReconciliationResolution {
+            implements Terminal {
         public Diverged {
             evidenceDigest = ReliabilityValues.digest(evidenceDigest, "evidenceDigest");
             errorCode = ReliabilityValues.errorCode(errorCode);

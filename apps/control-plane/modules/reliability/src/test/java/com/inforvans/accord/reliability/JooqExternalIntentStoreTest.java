@@ -73,6 +73,105 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
     }
 
     @Test
+    void workerCannotFinishActiveExecutionByPrimaryKeyWithoutCapability() throws Exception {
+        ExternalIntentRef intent = record("action-raw-finish-0001");
+        acquire(intent, "worker-capability-owner", LEASE);
+
+        assertThrows(org.jooq.exception.DataAccessException.class, () ->
+            inWorker(TENANT_ID, tx -> {
+                tx.execute("""
+                    UPDATE external_call_intent
+                    SET state='SUCCEEDED',outcome_digest=?,terminal_at=clock_timestamp()
+                    WHERE tenant_id=? AND intent_id=?
+                    """, digest('6'), TENANT_ID, intent.intentId());
+                return null;
+            }));
+        assertEquals(
+            ExternalIntentState.EXECUTING,
+            inWorker(TENANT_ID, tx ->
+                store.load(tx, TENANT_ID, intent.intentId()).orElseThrow().state()));
+    }
+
+    @Test
+    void workerCannotRenewActiveExecutionByPrimaryKeyWithoutCapability() throws Exception {
+        ExternalIntentRef intent = record("action-raw-renew-00001");
+        ExternalWritePermit permit = acquire(intent, "worker-capability-owner", LEASE);
+
+        assertThrows(org.jooq.exception.DataAccessException.class, () ->
+            inWorker(TENANT_ID, tx -> {
+                tx.execute("""
+                    UPDATE external_call_intent
+                    SET execution_lease_until=execution_lease_until+interval '1 second'
+                    WHERE tenant_id=? AND intent_id=?
+                    """, TENANT_ID, intent.intentId());
+                return null;
+            }));
+        assertEquals(
+            permit.leaseUntil(),
+            inWorker(TENANT_ID, tx -> tx.fetchOne("""
+                SELECT execution_lease_until FROM external_call_intent
+                WHERE tenant_id=? AND intent_id=?
+                """, TENANT_ID, intent.intentId())
+                .get("execution_lease_until", OffsetDateTime.class)));
+    }
+
+    @Test
+    void runtimeRolesCannotInsertCompletedMessagesOrExternalRoots() {
+        assertThrows(org.jooq.exception.DataAccessException.class, () ->
+            inApi(TENANT_ID, tx -> {
+                DomainEvent direct = event(91);
+                tx.execute("""
+                    INSERT INTO domain_event (
+                      tenant_id,event_id,scope_type,scope_id,aggregate_type,aggregate_id,
+                      sequence,event_type,schema_version,causation_id,correlation_id,
+                      actor_id,payload,occurred_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CAST(? AS jsonb),?)
+                    """,
+                    direct.tenantId(), direct.eventId(), direct.scopeType(), direct.scopeId(),
+                    direct.aggregateType(), direct.aggregateId(), direct.sequence(),
+                    direct.eventType(), direct.schemaVersion(), direct.causationId(),
+                    direct.correlationId(), direct.actorId(), direct.payload(),
+                    direct.occurredAt());
+                tx.execute("""
+                    INSERT INTO outbox_event (
+                      tenant_id,event_id,destination,payload_schema,payload,
+                      state,delivered_at)
+                    VALUES (?,?,'raw','raw/1.0','{}'::jsonb,'DELIVERED',clock_timestamp())
+                    """, TENANT_ID, direct.eventId());
+                return null;
+            }));
+
+        assertThrows(org.jooq.exception.DataAccessException.class, () ->
+            inWorker(TENANT_ID, tx -> {
+                tx.execute("""
+                    INSERT INTO inbox_message (
+                      tenant_id,source,source_message_id,request_digest,handler_key,
+                      payload_schema,payload,state,completed_at)
+                    VALUES (?,'raw','raw-message',?,'raw.handle','raw/1.0',
+                      '{}'::jsonb,'COMPLETED',clock_timestamp())
+                    """, TENANT_ID, digest('7'));
+                return null;
+            }));
+
+        assertThrows(org.jooq.exception.DataAccessException.class, () ->
+            inWorker(TENANT_ID, tx -> {
+                UUID intentId = UUID.randomUUID();
+                tx.execute("""
+                    INSERT INTO external_call_intent (
+                      tenant_id,intent_id,root_intent_id,attempt_ordinal,
+                      logical_action_key,scope_type,scope_id,provider,
+                      provider_installation_id,provider_repository_id,operation,
+                      request_reference_type,request_reference_id,
+                      request_reference_version,request_digest,state)
+                    VALUES (?,?,?,1,'action-worker-root-0001','repository',
+                      'repository-1','gitlab','installation-1','repository-immutable-1',
+                      'git.branch.create','delivery-work-item','work-item-1',1,?,'RECORDED')
+                    """, TENANT_ID, intentId, intentId, digest('8'));
+                return null;
+            }));
+    }
+
+    @Test
     void rolledBackExecutionClaimDoesNotConsumeTheOnlyWritePermit() throws Exception {
         ExternalIntentRef intent = record("action-claim-rollback-0001");
         try (Connection connection = openWorker(TENANT_ID)) {
@@ -97,7 +196,7 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
         ExternalWritePermit permit = acquire(intent, "worker-1", Duration.ofMillis(50));
         awaitDatabaseAfter(permit.leaseUntil());
         assertThrows(LostExternalIntentFence.class, () -> inWorker(TENANT_ID, tx -> {
-            store.finishExecution(
+            store.markExecutionOutcomeUnknown(
                 tx, permit,
                 new ExecutionResolution.OutcomeUnknown("PROVIDER_TIMEOUT", null));
             return null;
@@ -112,8 +211,9 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
         assertThrows(LostExternalIntentFence.class, () -> inWorker(TENANT_ID, tx -> {
             tx.execute("INSERT INTO aggregate_head VALUES (?, 'test', ?, 1)",
                 TENANT_ID, UUID.randomUUID());
-            store.finishExecution(
-                tx, permit, new ExecutionResolution.Succeeded(digest('b'), "request-1"));
+            store.completeExecution(
+                tx, permit, new ExecutionResolution.Succeeded(digest('b'), "request-1"),
+                terminalEvent(intent, 1), outbox());
             return null;
         }));
         assertEquals(0, count("aggregate_head"));
@@ -124,14 +224,14 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
         ExternalIntentRef intent = record("action-000000000004");
         ExternalWritePermit permit = acquire(intent, "worker-1", LEASE);
         inWorker(TENANT_ID, tx -> {
-            store.finishExecution(
+            store.markExecutionOutcomeUnknown(
                 tx, permit,
                 new ExecutionResolution.OutcomeUnknown("PROVIDER_TIMEOUT", null));
             return null;
         });
         ReconciliationLease first = reconcile(intent, "reconciler-1");
         inWorker(TENANT_ID, tx -> {
-            store.finishReconciliation(
+            store.markReconciliationOutcomeUnknown(
                 tx, first,
                 new ReconciliationResolution.StillUnknown("OBSERVATION_INCOMPLETE", null));
             return null;
@@ -140,9 +240,10 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
         assertEquals(first.generation() + 1, second.generation());
         assertNotEquals(first.token(), second.token());
         assertThrows(LostExternalIntentFence.class, () -> inWorker(TENANT_ID, tx -> {
-            store.finishReconciliation(
+            store.completeReconciliation(
                 tx, first,
-                new ReconciliationResolution.ConfirmedNoEffect(digest('c'), null));
+                new ReconciliationResolution.ConfirmedNoEffect(digest('c'), null),
+                terminalEvent(intent, 1), outbox());
             return null;
         }));
     }
@@ -152,14 +253,15 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
         ExternalIntentRef intent = record("action-000000000005");
         ExternalWritePermit permit = acquire(intent, "worker-1", LEASE);
         inWorker(TENANT_ID, tx -> {
-            store.finishExecution(
+            store.completeExecution(
                 tx, permit,
-                new ExecutionResolution.ConfirmedNoEffect(digest('d'), "request-2"));
+                new ExecutionResolution.ConfirmedNoEffect(digest('d'), "request-2"),
+                terminalEvent(intent, 1), outbox());
             return null;
         });
-        ExternalIntentRef successor = inApi(TENANT_ID, tx ->
+        ExternalIntentRef successor = inWorker(TENANT_ID, tx ->
             store.createSuccessor(tx, TENANT_ID, intent.intentId()));
-        ExternalIntentRef duplicate = inApi(TENANT_ID, tx ->
+        ExternalIntentRef duplicate = inWorker(TENANT_ID, tx ->
             store.createSuccessor(tx, TENANT_ID, intent.intentId()));
         assertEquals(successor, duplicate);
         assertEquals(intent.rootIntentId(), successor.rootIntentId());
@@ -173,9 +275,10 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
         ExternalIntentRef intent = record("action-successor-race-01");
         ExternalWritePermit permit = acquire(intent, "worker-1", LEASE);
         inWorker(TENANT_ID, tx -> {
-            store.finishExecution(
+            store.completeExecution(
                 tx, permit,
-                new ExecutionResolution.ConfirmedNoEffect(digest('d'), "request-race"));
+                new ExecutionResolution.ConfirmedNoEffect(digest('d'), "request-race"),
+                terminalEvent(intent, 1), outbox());
             return null;
         });
 
@@ -197,35 +300,71 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
     }
 
     @Test
+    void workerCannotInsertSuccessorWithRawSql() throws Exception {
+        ExternalIntentRef intent = record("action-raw-successor-001");
+        ExternalWritePermit permit = acquire(intent, "worker-1", LEASE);
+        inWorker(TENANT_ID, tx -> {
+            store.completeExecution(
+                tx, permit,
+                new ExecutionResolution.ConfirmedNoEffect(digest('9'), "request-successor"),
+                terminalEvent(intent, 1), outbox());
+            return null;
+        });
+
+        assertThrows(org.jooq.exception.DataAccessException.class, () ->
+            inWorker(TENANT_ID, tx -> {
+                tx.execute("""
+                    INSERT INTO external_call_intent (
+                      tenant_id,intent_id,root_intent_id,predecessor_intent_id,
+                      attempt_ordinal,logical_action_key,scope_type,scope_id,provider,
+                      provider_installation_id,provider_repository_id,operation,
+                      request_reference_type,request_reference_id,
+                      request_reference_version,request_digest,state)
+                    SELECT tenant_id,?,root_intent_id,intent_id,attempt_ordinal+1,
+                      logical_action_key,scope_type,scope_id,provider,
+                      provider_installation_id,provider_repository_id,operation,
+                      request_reference_type,request_reference_id,
+                      request_reference_version,request_digest,'RECORDED'
+                    FROM external_call_intent
+                    WHERE tenant_id=? AND intent_id=?
+                    """, UUID.randomUUID(), TENANT_ID, intent.intentId());
+                return null;
+            }));
+        assertEquals(1, count("external_call_intent"));
+    }
+
+    @Test
     void successAndDivergenceAreTerminalAndCannotCreateSuccessors() throws Exception {
         ExternalIntentRef success = record("action-000000000006");
         ExternalWritePermit successPermit = acquire(success, "worker-1", LEASE);
         inWorker(TENANT_ID, tx -> {
-            store.finishExecution(
+            store.completeExecution(
                 tx, successPermit,
-                new ExecutionResolution.Succeeded(digest('e'), "request-3"));
+                new ExecutionResolution.Succeeded(digest('e'), "request-3"),
+                terminalEvent(success, 1), outbox());
             return null;
         });
-        assertThrows(IllegalStateException.class, () -> inApi(TENANT_ID, tx ->
+        assertThrows(org.jooq.exception.DataAccessException.class, () -> inWorker(TENANT_ID, tx ->
             store.createSuccessor(tx, TENANT_ID, success.intentId())));
 
         ExternalIntentRef diverged = record("action-000000000007");
         ExternalWritePermit divergedPermit = acquire(diverged, "worker-2", LEASE);
         inWorker(TENANT_ID, tx -> {
-            store.finishExecution(
+            store.markExecutionOutcomeUnknown(
                 tx, divergedPermit,
                 new ExecutionResolution.OutcomeUnknown("PROVIDER_TIMEOUT", null));
             return null;
         });
         ReconciliationLease lease = reconcile(diverged, "reconciler-1");
         inWorker(TENANT_ID, tx -> {
-            store.finishReconciliation(
+            store.completeReconciliation(
                 tx, lease,
                 new ReconciliationResolution.Diverged(
-                    digest('f'), "REMOTE_STATE_DIVERGED", null));
+                    digest('f'), "REMOTE_STATE_DIVERGED", null),
+                terminalEvent(diverged, 1), outbox());
             return null;
         });
-        assertThrows(IllegalStateException.class, () -> inApi(TENANT_ID, tx ->
+        assertThrows(org.jooq.exception.DataAccessException.class, () -> inWorker(TENANT_ID, tx ->
             store.createSuccessor(tx, TENANT_ID, diverged.intentId())));
     }
 
@@ -242,7 +381,7 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
         ExternalIntentRef unknown = record("action-successor-unknown-01");
         ExternalWritePermit unknownPermit = acquire(unknown, "worker-unknown", LEASE);
         inWorker(TENANT_ID, tx -> {
-            store.finishExecution(
+            store.markExecutionOutcomeUnknown(
                 tx, unknownPermit,
                 new ExecutionResolution.OutcomeUnknown("PROVIDER_TIMEOUT", null));
             return null;
@@ -253,7 +392,7 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
         ExternalWritePermit reconciliationPermit = acquire(
             reconciling, "worker-reconcile", LEASE);
         inWorker(TENANT_ID, tx -> {
-            store.finishExecution(
+            store.markExecutionOutcomeUnknown(
                 tx, reconciliationPermit,
                 new ExecutionResolution.OutcomeUnknown("PROVIDER_TIMEOUT", null));
             return null;
@@ -287,8 +426,9 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
         assertThrows(LostExternalIntentFence.class, () -> inWorker(TENANT_ID, tx ->
             store.renewExecution(tx, tampered, Duration.ofSeconds(1))));
         assertThrows(LostExternalIntentFence.class, () -> inWorker(TENANT_ID, tx -> {
-            store.finishExecution(
-                tx, tampered, new ExecutionResolution.Succeeded(digest('9'), null));
+            store.completeExecution(
+                tx, tampered, new ExecutionResolution.Succeeded(digest('9'), null),
+                terminalEvent(intent, 1), outbox());
             return null;
         }));
     }
@@ -300,9 +440,10 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
         ExternalWritePermit permit = acquire(intent, "worker-1", LEASE);
         providerCalls.incrementAndGet();
         inWorker(TENANT_ID, tx -> {
-            store.finishExecution(
+            store.completeExecution(
                 tx, permit,
-                new ExecutionResolution.Succeeded(digest('1'), "request-4"));
+                new ExecutionResolution.Succeeded(digest('1'), "request-4"),
+                terminalEvent(intent, 1), outbox());
             return null;
         });
         assertEquals(1, providerCalls.get());
@@ -313,27 +454,212 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
     }
 
     @Test
-    void terminalTransitionAndEventOutboxShareCommitAndRollback() throws Exception {
-        ExternalIntentRef intent = record("action-terminal-event-001");
-        ExternalWritePermit permit = acquire(intent, "worker-1", LEASE);
-        ReliableEventStore events = new ReliableEventStore();
+    void executionTerminalAndEventOutboxShareCommitAndOuterRollback() throws Exception {
+        ExternalIntentRef committed = record("action-terminal-event-001");
+        ExternalWritePermit committedPermit = acquire(committed, "worker-1", LEASE);
         inWorker(TENANT_ID, tx -> {
-            events.append(tx, event(1), outbox());
-            store.finishExecution(
-                tx, permit, new ExecutionResolution.Succeeded(digest('2'), "request-atomic"));
+            store.completeExecution(
+                tx, committedPermit,
+                new ExecutionResolution.Succeeded(digest('2'), "request-atomic"),
+                terminalEvent(committed, 1), outbox());
             return null;
         });
+        assertEquals(
+            ExternalIntentState.SUCCEEDED,
+            inWorker(TENANT_ID, tx ->
+                store.load(tx, TENANT_ID, committed.intentId()).orElseThrow().state()));
         assertEquals(1, count("domain_event"));
         assertEquals(1, count("outbox_event"));
 
-        assertThrows(LostExternalIntentFence.class, () -> inWorker(TENANT_ID, tx -> {
-            events.append(tx, event(2), outbox());
-            store.finishExecution(
-                tx, permit, new ExecutionResolution.Succeeded(digest('3'), "request-atomic"));
-            return null;
+        ExternalIntentRef rolledBack = record("action-terminal-rollback-01");
+        ExternalWritePermit rolledBackPermit = acquire(
+            rolledBack, "worker-rollback", LEASE);
+        assertThrows(IllegalStateException.class, () -> inWorker(TENANT_ID, tx -> {
+            store.completeExecution(
+                tx, rolledBackPermit,
+                new ExecutionResolution.Succeeded(digest('3'), "request-rollback"),
+                terminalEvent(rolledBack, 1), outbox());
+            throw new IllegalStateException("force outer rollback");
         }));
+        assertEquals(
+            ExternalIntentState.EXECUTING,
+            inWorker(TENANT_ID, tx ->
+                store.load(tx, TENANT_ID, rolledBack.intentId()).orElseThrow().state()));
         assertEquals(1, count("domain_event"));
         assertEquals(1, count("outbox_event"));
+    }
+
+    @Test
+    void reconciliationTerminalAndEventOutboxShareCommitAndOuterRollback()
+            throws Exception {
+        ExternalIntentRef committed = record("action-reconcile-commit-01");
+        ReconciliationLease committedLease = beginReconciliation(
+            committed, "reconciler-commit", LEASE);
+        inWorker(TENANT_ID, tx -> {
+            store.completeReconciliation(
+                tx, committedLease,
+                new ReconciliationResolution.ConfirmedNoEffect(digest('4'), null),
+                terminalEvent(committed, 1), outbox());
+            return null;
+        });
+        assertEquals(
+            ExternalIntentState.CONFIRMED_NO_EFFECT,
+            inWorker(TENANT_ID, tx ->
+                store.load(tx, TENANT_ID, committed.intentId()).orElseThrow().state()));
+        assertEquals(1, count("domain_event"));
+        assertEquals(1, count("outbox_event"));
+
+        ExternalIntentRef rolledBack = record("action-reconcile-rollback1");
+        ReconciliationLease rolledBackLease = beginReconciliation(
+            rolledBack, "reconciler-rollback", LEASE);
+        assertThrows(IllegalStateException.class, () -> inWorker(TENANT_ID, tx -> {
+            store.completeReconciliation(
+                tx, rolledBackLease,
+                new ReconciliationResolution.ConfirmedNoEffect(digest('5'), null),
+                terminalEvent(rolledBack, 1), outbox());
+            throw new IllegalStateException("force outer rollback");
+        }));
+        assertEquals(
+            ExternalIntentState.RECONCILING,
+            inWorker(TENANT_ID, tx ->
+                store.load(tx, TENANT_ID, rolledBack.intentId()).orElseThrow().state()));
+        assertEquals(1, count("domain_event"));
+        assertEquals(1, count("outbox_event"));
+    }
+
+    @Test
+    void terminalApiHasNoEventlessCompletionMethod() {
+        java.util.Set<String> forbidden = java.util.Set.of(
+            "finishExecution", "finishReconciliation");
+        assertTrue(java.util.Arrays.stream(JooqExternalIntentStore.class.getMethods())
+            .noneMatch(method -> forbidden.contains(method.getName())));
+        java.util.List<java.lang.reflect.Method> completionMethods = java.util.Arrays.stream(
+                JooqExternalIntentStore.class.getMethods())
+            .filter(method -> method.getName().equals("completeExecution")
+                || method.getName().equals("completeReconciliation"))
+            .toList();
+        assertEquals(2, completionMethods.size());
+        assertEquals(
+            java.util.Set.of("completeExecution", "completeReconciliation"),
+            completionMethods.stream()
+                .map(java.lang.reflect.Method::getName)
+                .collect(java.util.stream.Collectors.toSet()));
+        assertTrue(completionMethods.stream()
+            .allMatch(method -> java.util.List.of(method.getParameterTypes())
+                .containsAll(java.util.List.of(DomainEvent.class, OutboxMessage.class))));
+    }
+
+    @Test
+    void eventConstraintFailureRollsBackTerminalTransition() throws Exception {
+        ExternalIntentRef intent = record("action-terminal-event-fail");
+        ExternalWritePermit permit = acquire(intent, "worker-1", LEASE);
+        DomainEvent duplicate = terminalEvent(intent, 1);
+        inWorker(TENANT_ID, tx -> {
+            new ReliableEventStore().append(tx, duplicate, outbox());
+            return null;
+        });
+
+        assertThrows(org.jooq.exception.DataAccessException.class, () ->
+            inWorker(TENANT_ID, tx -> {
+                store.completeExecution(
+                    tx, permit,
+                    new ExecutionResolution.Succeeded(digest('3'), "request-event-fail"),
+                    duplicate, outbox());
+                return null;
+            }));
+        assertEquals(
+            ExternalIntentState.EXECUTING,
+            inWorker(TENANT_ID, tx ->
+                store.load(tx, TENANT_ID, intent.intentId()).orElseThrow().state()));
+        assertEquals(1, count("domain_event"));
+        assertEquals(1, count("outbox_event"));
+    }
+
+    @Test
+    void reconciliationEventConstraintFailureRollsBackTerminalTransition()
+            throws Exception {
+        ExternalIntentRef intent = record("action-reconcile-event-fail");
+        ReconciliationLease lease = beginReconciliation(
+            intent, "reconciler-event-fail", LEASE);
+        DomainEvent duplicate = terminalEvent(intent, 1);
+        inWorker(TENANT_ID, tx -> {
+            new ReliableEventStore().append(tx, duplicate, outbox());
+            return null;
+        });
+
+        assertThrows(org.jooq.exception.DataAccessException.class, () ->
+            inWorker(TENANT_ID, tx -> {
+                store.completeReconciliation(
+                    tx, lease,
+                    new ReconciliationResolution.ConfirmedNoEffect(digest('6'), null),
+                    duplicate, outbox());
+                return null;
+            }));
+        assertEquals(
+            ExternalIntentState.RECONCILING,
+            inWorker(TENANT_ID, tx ->
+                store.load(tx, TENANT_ID, intent.intentId()).orElseThrow().state()));
+        assertEquals(1, count("domain_event"));
+        assertEquals(1, count("outbox_event"));
+    }
+
+    @Test
+    void caughtStaleCompletionCannotCommitEventOrTerminal() throws Exception {
+        ExternalIntentRef intent = record("action-stale-caught-0001");
+        ExternalWritePermit permit = acquire(intent, "worker-1", Duration.ofMillis(50));
+        awaitDatabaseAfter(permit.leaseUntil());
+
+        try {
+            inWorker(TENANT_ID, tx -> {
+                try {
+                    store.completeExecution(
+                        tx, permit,
+                        new ExecutionResolution.Succeeded(digest('4'), "request-stale"),
+                        terminalEvent(intent, 1), outbox());
+                } catch (LostExternalIntentFence expected) {
+                    // PostgreSQL has aborted the statement transaction; commit must not persist.
+                }
+                return null;
+            });
+        } catch (org.jooq.exception.DataAccessException abortedCommit) {
+            // JDBC drivers may surface the aborted transaction on commit.
+        }
+        assertEquals(0, count("domain_event"));
+        assertEquals(0, count("outbox_event"));
+        assertEquals(
+            ExternalIntentState.EXECUTING,
+            inWorker(TENANT_ID, tx ->
+                store.load(tx, TENANT_ID, intent.intentId()).orElseThrow().state()));
+    }
+
+    @Test
+    void caughtStaleReconciliationCannotCommitEventOrTerminal() throws Exception {
+        ExternalIntentRef intent = record("action-reconcile-stale-001");
+        ReconciliationLease lease = beginReconciliation(
+            intent, "reconciler-stale", Duration.ofMillis(50));
+        awaitDatabaseAfter(lease.leaseUntil());
+
+        try {
+            inWorker(TENANT_ID, tx -> {
+                try {
+                    store.completeReconciliation(
+                        tx, lease,
+                        new ReconciliationResolution.ConfirmedNoEffect(digest('7'), null),
+                        terminalEvent(intent, 1), outbox());
+                } catch (LostExternalIntentFence expected) {
+                    // PostgreSQL has aborted the statement transaction; commit must not persist.
+                }
+                return null;
+            });
+        } catch (org.jooq.exception.DataAccessException abortedCommit) {
+            // JDBC drivers may surface the aborted transaction on commit.
+        }
+        assertEquals(0, count("domain_event"));
+        assertEquals(0, count("outbox_event"));
+        assertEquals(
+            ExternalIntentState.RECONCILING,
+            inWorker(TENANT_ID, tx ->
+                store.load(tx, TENANT_ID, intent.intentId()).orElseThrow().state()));
     }
 
     @Test
@@ -362,7 +688,7 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
         ExternalIntentRef intent = record("action-expired-reconcile-1");
         ExternalWritePermit permit = acquire(intent, "worker-1", LEASE);
         inWorker(TENANT_ID, tx -> {
-            store.finishExecution(
+            store.markExecutionOutcomeUnknown(
                 tx, permit,
                 new ExecutionResolution.OutcomeUnknown("PROVIDER_TIMEOUT", "request-expired"));
             return null;
@@ -423,6 +749,26 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
                 "OBSERVATION_INCOMPLETE", "https://bad.example"));
     }
 
+    @Test
+    void logicalActionKeysAreOpaqueAndNeverFreeTextOrUris() {
+        assertThrows(IllegalArgumentException.class, () ->
+            definition("action key with spaces", digest('a')));
+        assertThrows(IllegalArgumentException.class, () ->
+            definition("action/path/segment", digest('a')));
+        assertThrows(IllegalArgumentException.class, () ->
+            definition("body={secret:value}", digest('a')));
+        assertThrows(IllegalArgumentException.class, () ->
+            definition("https:provider.example", digest('a')));
+        assertThrows(IllegalArgumentException.class, () ->
+            definition("action-unicode-\u4E2D\u6587", digest('a')));
+        assertThrows(IllegalArgumentException.class, () ->
+            definition("action-surrogate-\uD800", digest('a')));
+
+        ExternalIntentDefinition valid = definition(
+            "action:branch.create_0001", digest('a'));
+        assertEquals("action:branch.create_0001", valid.logicalActionKey());
+    }
+
     private ExecutionClaim claimRaced(
             ExternalIntentRef intent,
             String owner,
@@ -445,7 +791,7 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
             ExternalIntentRef intent,
             CountDownLatch ready,
             CountDownLatch start) throws Exception {
-        try (Connection connection = openApi(TENANT_ID)) {
+        try (Connection connection = openWorker(TENANT_ID)) {
             ready.countDown();
             if (!start.await(5, SECONDS)) {
                 throw new IllegalStateException("successor race start timed out");
@@ -462,7 +808,7 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
     }
 
     private void assertSuccessorRejected(UUID tenantId, ExternalIntentRef intent) {
-        assertThrows(IllegalStateException.class, () -> inApi(tenantId, tx ->
+        assertThrows(org.jooq.exception.DataAccessException.class, () -> inWorker(tenantId, tx ->
             store.createSuccessor(tx, tenantId, intent.intentId())));
     }
 
@@ -475,9 +821,26 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
 
     private ReconciliationLease reconcile(ExternalIntentRef intent, String owner)
             throws Exception {
+        return reconcile(intent, owner, LEASE);
+    }
+
+    private ReconciliationLease reconcile(
+            ExternalIntentRef intent, String owner, Duration lease) throws Exception {
         ReconciliationClaim claim = inWorker(TENANT_ID, tx -> store.claimReconciliation(
-            tx, TENANT_ID, intent.intentId(), owner, LEASE));
+            tx, TENANT_ID, intent.intentId(), owner, lease));
         return assertInstanceOf(ReconciliationClaim.Acquired.class, claim).lease();
+    }
+
+    private ReconciliationLease beginReconciliation(
+            ExternalIntentRef intent, String owner, Duration lease) throws Exception {
+        ExternalWritePermit permit = acquire(intent, "worker-for-" + owner, LEASE);
+        inWorker(TENANT_ID, tx -> {
+            store.markExecutionOutcomeUnknown(
+                tx, permit,
+                new ExecutionResolution.OutcomeUnknown("PROVIDER_TIMEOUT", null));
+            return null;
+        });
+        return reconcile(intent, owner, lease);
     }
 
     private static ExternalIntentDefinition definition(String logicalKey, String requestDigest) {
@@ -513,6 +876,27 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
             UUID.fromString("40000000-0000-0000-0000-000000000008"),
             "worker-1",
             "{\"sequence\":" + sequence + "}",
+            OffsetDateTime.parse("2026-07-26T00:00:00Z"));
+    }
+
+    private static DomainEvent terminalEvent(ExternalIntentRef intent, long sequence) {
+        byte[] identity = (intent.intentId() + ":" + sequence).getBytes(
+            java.nio.charset.StandardCharsets.UTF_8);
+        UUID eventId = UUID.nameUUIDFromBytes(identity);
+        return new DomainEvent(
+            TENANT_ID,
+            eventId,
+            "repository",
+            "repository-1",
+            "external_intent",
+            intent.intentId(),
+            sequence,
+            "external_intent.completed",
+            "1.0.0",
+            eventId,
+            intent.rootIntentId(),
+            "worker-1",
+            "{\"intentId\":\"" + intent.intentId() + "\"}",
             OffsetDateTime.parse("2026-07-26T00:00:00Z"));
     }
 

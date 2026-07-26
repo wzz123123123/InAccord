@@ -11,55 +11,38 @@ public final class ReliableEventStore {
         Objects.requireNonNull(event, "event");
         Objects.requireNonNull(outbox, "outbox");
         tx.execute("""
-            INSERT INTO domain_event (
-              tenant_id,event_id,scope_type,scope_id,aggregate_type,aggregate_id,
-              sequence,event_type,schema_version,causation_id,correlation_id,
-              actor_id,payload,occurred_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb),
-                      CAST(? AS timestamptz))
+            SELECT accord_security.append_reliable_event(
+              ?,?,?,?,?,?,?,?,?,?,?,?,CAST(? AS jsonb),CAST(? AS timestamptz),
+              ?,?,CAST(? AS jsonb))
             """,
             event.tenantId(), event.eventId(), event.scopeType(), event.scopeId(),
             event.aggregateType(), event.aggregateId(), event.sequence(), event.eventType(),
             event.schemaVersion(), event.causationId(), event.correlationId(),
-            event.actorId(), event.payload(), event.occurredAt());
-        tx.execute("""
-            INSERT INTO outbox_event (
-              tenant_id,event_id,destination,payload_schema,payload
-            ) VALUES (?, ?, ?, ?, CAST(? AS jsonb))
-            """,
-            event.tenantId(), event.eventId(), outbox.destination(),
+            event.actorId(), event.payload(), event.occurredAt(), outbox.destination(),
             outbox.payloadSchema(), outbox.payload());
     }
 
     public InboxAcceptance acceptInbox(DSLContext tx, InboxMessage message) {
         Objects.requireNonNull(tx, "tx");
         Objects.requireNonNull(message, "message");
-        int inserted = tx.execute("""
-            INSERT INTO inbox_message (
-              tenant_id,source,source_message_id,request_digest,handler_key,
-              payload_schema,payload
-            ) VALUES (?, ?, ?, ?, ?, ?, CAST(? AS jsonb))
-            ON CONFLICT DO NOTHING
+        Record result = tx.fetchOne("""
+            SELECT disposition,stored_state
+            FROM accord_security.accept_inbox_message(
+              ?,?,?,?,?,?,CAST(? AS jsonb))
             """,
             message.tenantId(), message.source(), message.sourceMessageId(),
             message.requestDigest(), message.handlerKey(), message.payloadSchema(),
             message.payload());
-        if (inserted == 1) {
-            return new InboxAcceptance.Accepted();
+        if (result == null) {
+            throw new IllegalStateException("inbox acceptance returned no result");
         }
-        Record existing = tx.fetchOne("""
-            SELECT request_digest,state
-            FROM inbox_message
-            WHERE tenant_id=? AND source=? AND source_message_id=?
-            """, message.tenantId(), message.source(), message.sourceMessageId());
-        if (existing == null) {
-            throw new IllegalStateException("inbox conflict row disappeared");
-        }
-        String storedDigest = existing.get("request_digest", String.class);
-        if (message.requestDigest().equals(storedDigest)) {
-            return new InboxAcceptance.Duplicate(
-                Objects.requireNonNull(existing.get("state", String.class), "state"));
-        }
-        return new InboxAcceptance.DigestConflict();
+        return switch (Objects.requireNonNull(
+            result.get("disposition", String.class), "disposition")) {
+            case "ACCEPTED" -> new InboxAcceptance.Accepted();
+            case "DUPLICATE" -> new InboxAcceptance.Duplicate(
+                Objects.requireNonNull(result.get("stored_state", String.class), "storedState"));
+            case "DIGEST_CONFLICT" -> new InboxAcceptance.DigestConflict();
+            default -> throw new IllegalStateException("unknown inbox acceptance result");
+        };
     }
 }

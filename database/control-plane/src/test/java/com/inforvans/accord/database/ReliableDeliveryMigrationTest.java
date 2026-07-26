@@ -2,11 +2,13 @@ package com.inforvans.accord.database;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.List;
 import java.util.UUID;
@@ -20,6 +22,24 @@ import org.testcontainers.containers.PostgreSQLContainer;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ReliableDeliveryMigrationTest {
     private static final String POSTGRES_IMAGE = "postgres:17.5";
+    private static final List<String> RELIABILITY_FUNCTIONS = List.of(
+        "accept_inbox_message",
+        "append_reliable_event",
+        "claim_external_intent_execution",
+        "claim_external_intent_reconciliation",
+        "complete_external_intent_execution",
+        "complete_external_intent_reconciliation",
+        "create_external_intent_successor",
+        "expire_external_intent_execution",
+        "expire_external_intent_reconciliation",
+        "guard_external_intent_successor",
+        "guard_external_intent_transition",
+        "mark_external_intent_execution_unknown",
+        "mark_external_intent_reconciliation_unknown",
+        "record_external_intent",
+        "reject_reliability_row_change",
+        "renew_external_intent_execution",
+        "renew_external_intent_reconciliation");
     private PostgreSQLContainer<?> postgres;
 
     @BeforeAll
@@ -130,7 +150,7 @@ class ReliableDeliveryMigrationTest {
     }
 
     @Test
-    void runtimePrivilegesAreExactAndApiCannotUpdateIntents() throws Exception {
+    void runtimeTablePrivilegesAreReadOnlyAndExact() throws Exception {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
             assertThat(strings(statement, """
@@ -142,30 +162,22 @@ class ReliableDeliveryMigrationTest {
                     'domain_event','outbox_event','inbox_message','external_call_intent')
                 ORDER BY 1
                 """)).containsExactly(
-                    "accord_api:domain_event:INSERT",
                     "accord_api:domain_event:SELECT",
-                    "accord_api:external_call_intent:INSERT",
                     "accord_api:external_call_intent:SELECT",
-                    "accord_api:outbox_event:INSERT",
                     "accord_api:outbox_event:SELECT",
-                    "accord_worker:domain_event:INSERT",
                     "accord_worker:domain_event:SELECT",
-                    "accord_worker:external_call_intent:INSERT",
                     "accord_worker:external_call_intent:SELECT",
-                    "accord_worker:inbox_message:INSERT",
                     "accord_worker:inbox_message:SELECT",
-                    "accord_worker:outbox_event:INSERT",
                     "accord_worker:outbox_event:SELECT");
             assertThat(number(statement, """
-                SELECT count(*) FROM information_schema.column_privileges
-                WHERE table_schema='public' AND table_name='external_call_intent'
-                  AND grantee='accord_api' AND privilege_type='UPDATE'
+                SELECT count(*)
+                FROM information_schema.column_privileges
+                WHERE table_schema='public'
+                  AND table_name IN (
+                    'domain_event','outbox_event','inbox_message','external_call_intent')
+                  AND grantee IN ('accord_api','accord_worker')
+                  AND privilege_type <> 'SELECT'
                 """)).isZero();
-            assertThat(number(statement, """
-                SELECT count(*) FROM information_schema.column_privileges
-                WHERE table_schema='public' AND table_name='external_call_intent'
-                  AND grantee='accord_worker' AND privilege_type='UPDATE'
-                """)).isEqualTo(15);
         }
     }
 
@@ -192,23 +204,46 @@ class ReliableDeliveryMigrationTest {
     }
 
     @Test
-    void successorGuardHasFixedDefinerAndNoRuntimeExecutePrivilege() throws Exception {
+    void reliabilityFunctionsHaveFixedDefinersAndExactRuntimeExecutePrivileges()
+            throws Exception {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
             assertThat(strings(statement, """
-                SELECT owner.rolname || ':' || procedure.prosecdef || ':'
+                SELECT procedure.proname || ':' || owner.rolname || ':'
+                       || procedure.prosecdef || ':'
                        || pg_catalog.array_to_string(procedure.proconfig, ',')
                 FROM pg_catalog.pg_proc procedure
                 JOIN pg_catalog.pg_namespace namespace
                   ON namespace.oid=procedure.pronamespace
                 JOIN pg_catalog.pg_roles owner ON owner.oid=procedure.proowner
                 WHERE namespace.nspname='accord_security'
-                  AND procedure.proname='guard_external_intent_successor'
-                  AND pg_catalog.pg_get_function_identity_arguments(procedure.oid)=''
-                """)).containsExactly(
-                    "accord_migrator:true:search_path=pg_catalog, pg_temp");
-            assertThat(number(statement, """
-                SELECT count(*)
+                  AND procedure.proname IN (
+                    'accept_inbox_message','append_reliable_event',
+                    'claim_external_intent_execution',
+                    'claim_external_intent_reconciliation',
+                    'complete_external_intent_execution',
+                    'complete_external_intent_reconciliation',
+                    'create_external_intent_successor',
+                    'expire_external_intent_execution',
+                    'expire_external_intent_reconciliation',
+                    'guard_external_intent_successor',
+                    'guard_external_intent_transition',
+                    'mark_external_intent_execution_unknown',
+                    'mark_external_intent_reconciliation_unknown',
+                    'record_external_intent','reject_reliability_row_change',
+                    'renew_external_intent_execution',
+                    'renew_external_intent_reconciliation')
+                ORDER BY procedure.proname
+                """)).containsExactlyElementsOf(RELIABILITY_FUNCTIONS.stream()
+                    .map(name -> name
+                        + ":accord_migrator:"
+                        + (!name.equals("guard_external_intent_transition")
+                            && !name.equals("reject_reliability_row_change"))
+                        + ":search_path=pg_catalog, pg_temp")
+                    .toList());
+            assertThat(strings(statement, """
+                SELECT COALESCE(grantee.rolname, 'PUBLIC') || ':'
+                       || procedure.proname
                 FROM pg_catalog.pg_proc procedure
                 JOIN pg_catalog.pg_namespace namespace
                   ON namespace.oid=procedure.pronamespace
@@ -218,11 +253,204 @@ class ReliableDeliveryMigrationTest {
                     pg_catalog.acldefault('f', procedure.proowner))) privilege
                 LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=privilege.grantee
                 WHERE namespace.nspname='accord_security'
-                  AND procedure.proname='guard_external_intent_successor'
+                  AND procedure.proname IN (
+                    'accept_inbox_message','append_reliable_event',
+                    'claim_external_intent_execution',
+                    'claim_external_intent_reconciliation',
+                    'complete_external_intent_execution',
+                    'complete_external_intent_reconciliation',
+                    'create_external_intent_successor',
+                    'expire_external_intent_execution',
+                    'expire_external_intent_reconciliation',
+                    'guard_external_intent_successor',
+                    'guard_external_intent_transition',
+                    'mark_external_intent_execution_unknown',
+                    'mark_external_intent_reconciliation_unknown',
+                    'record_external_intent','reject_reliability_row_change',
+                    'renew_external_intent_execution',
+                    'renew_external_intent_reconciliation')
                   AND privilege.privilege_type='EXECUTE'
-                  AND (privilege.grantee=0
-                    OR grantee.rolname IN ('accord_api','accord_worker'))
-                """)).isZero();
+                  AND (privilege.grantee=0 OR grantee.rolname IN (
+                    'accord_api','accord_worker'))
+                ORDER BY 1
+                """)).containsExactly(
+                    "accord_api:append_reliable_event",
+                    "accord_api:record_external_intent",
+                    "accord_worker:accept_inbox_message",
+                    "accord_worker:append_reliable_event",
+                    "accord_worker:claim_external_intent_execution",
+                    "accord_worker:claim_external_intent_reconciliation",
+                    "accord_worker:complete_external_intent_execution",
+                    "accord_worker:complete_external_intent_reconciliation",
+                    "accord_worker:create_external_intent_successor",
+                    "accord_worker:expire_external_intent_execution",
+                    "accord_worker:expire_external_intent_reconciliation",
+                    "accord_worker:mark_external_intent_execution_unknown",
+                    "accord_worker:mark_external_intent_reconciliation_unknown",
+                    "accord_worker:renew_external_intent_execution",
+                    "accord_worker:renew_external_intent_reconciliation");
+        }
+    }
+
+    @Test
+    void runtimeLoginsCannotBypassWriteFunctionsWithTableDml() throws Exception {
+        UUID tenantId = UUID.randomUUID();
+        assertRuntimeSqlState(
+            ControlPlaneTestRoles.API_LOGIN,
+            ControlPlaneTestRoles.API_PASSWORD,
+            "accord_api",
+            tenantId,
+            "INSERT INTO public.domain_event (tenant_id,event_id) VALUES ('%s','%s')"
+                .formatted(tenantId, UUID.randomUUID()),
+            "42501");
+        assertRuntimeSqlState(
+            ControlPlaneTestRoles.API_LOGIN,
+            ControlPlaneTestRoles.API_PASSWORD,
+            "accord_api",
+            tenantId,
+            "INSERT INTO public.external_call_intent (tenant_id,intent_id) "
+                + "VALUES ('%s','%s')".formatted(tenantId, UUID.randomUUID()),
+            "42501");
+        assertRuntimeSqlState(
+            ControlPlaneTestRoles.WORKER_LOGIN,
+            ControlPlaneTestRoles.WORKER_PASSWORD,
+            "accord_worker",
+            tenantId,
+            "INSERT INTO public.inbox_message (tenant_id,source,source_message_id) "
+                + "VALUES ('%s','gitlab','message-1')".formatted(tenantId),
+            "42501");
+        assertRuntimeSqlState(
+            ControlPlaneTestRoles.WORKER_LOGIN,
+            ControlPlaneTestRoles.WORKER_PASSWORD,
+            "accord_worker",
+            tenantId,
+            "INSERT INTO public.external_call_intent "
+                + "(tenant_id,intent_id,predecessor_intent_id) "
+                + "VALUES ('%s','%s','%s')".formatted(
+                    tenantId, UUID.randomUUID(), UUID.randomUUID()),
+            "42501");
+        assertRuntimeSqlState(
+            ControlPlaneTestRoles.WORKER_LOGIN,
+            ControlPlaneTestRoles.WORKER_PASSWORD,
+            "accord_worker",
+            tenantId,
+            "UPDATE public.external_call_intent SET state='SUCCEEDED' "
+                + "WHERE tenant_id='%s'".formatted(tenantId),
+            "42501");
+    }
+
+    @Test
+    void runtimeFunctionExecuteAllowlistBlocksCrossCapabilityCalls() throws Exception {
+        UUID tenantId = UUID.randomUUID();
+        assertRuntimeSqlState(
+            ControlPlaneTestRoles.API_LOGIN,
+            ControlPlaneTestRoles.API_PASSWORD,
+            "accord_api",
+            tenantId,
+            "SELECT * FROM accord_security.create_external_intent_successor("
+                + "'%s'::uuid,'%s'::uuid,'%s'::uuid)".formatted(
+                    tenantId, UUID.randomUUID(), UUID.randomUUID()),
+            "42501");
+        assertRuntimeSqlState(
+            ControlPlaneTestRoles.API_LOGIN,
+            ControlPlaneTestRoles.API_PASSWORD,
+            "accord_api",
+            tenantId,
+            ("SELECT * FROM accord_security.claim_external_intent_execution("
+                + "'%s'::uuid,'%s'::uuid,'api-owner'::varchar,"
+                + "1000000::bigint,'%s'::uuid)").formatted(
+                tenantId, UUID.randomUUID(), UUID.randomUUID()),
+            "42501");
+        assertRuntimeSqlState(
+            ControlPlaneTestRoles.WORKER_LOGIN,
+            ControlPlaneTestRoles.WORKER_PASSWORD,
+            "accord_worker",
+            tenantId,
+            ("SELECT * FROM accord_security.record_external_intent("
+                + "'%s'::uuid,'%s'::uuid,'worker-root-key-0001'::varchar,"
+                + "'repository'::varchar,'repository-1'::varchar,'gitlab'::varchar,"
+                + "'installation-1'::varchar,'repository-1'::varchar,"
+                + "'git.branch.create'::varchar,'delivery-work-item'::varchar,"
+                + "'work-item-1'::varchar,1::bigint,"
+                + "('sha256:' || repeat('a',64))::char(71))").formatted(
+                tenantId, UUID.randomUUID()),
+            "42501");
+        assertRuntimeSqlState(
+            ControlPlaneTestRoles.WORKER_LOGIN,
+            ControlPlaneTestRoles.WORKER_PASSWORD,
+            "accord_worker",
+            tenantId,
+            "SELECT accord_security.guard_external_intent_successor()",
+            "42501");
+        assertRuntimeSqlState(
+            ControlPlaneTestRoles.WORKER_LOGIN,
+            ControlPlaneTestRoles.WORKER_PASSWORD,
+            "accord_worker",
+            tenantId,
+            "SELECT accord_security.guard_external_intent_transition()",
+            "42501");
+    }
+
+    @Test
+    void apiRuntimeUsesTheAuthoritativeTenantContextForAllowedRootRecording()
+            throws Exception {
+        UUID tenantId = UUID.randomUUID();
+        UUID intentId = UUID.randomUUID();
+        try (Connection connection = runtimeConnection(
+                 ControlPlaneTestRoles.API_LOGIN,
+                 ControlPlaneTestRoles.API_PASSWORD,
+                 "accord_api",
+                 tenantId);
+             Statement identityStatement = connection.createStatement();
+             ResultSet identity = identityStatement.executeQuery("""
+                 SELECT session_user,current_user,
+                        current_setting('app.tenant_id', true)::uuid,
+                        accord_security.current_tenant_id()
+                 """)) {
+            assertThat(identity.next()).isTrue();
+            assertThat(identity.getString(1)).isEqualTo(ControlPlaneTestRoles.API_LOGIN);
+            assertThat(identity.getString(2)).isEqualTo("accord_api");
+            assertThat(identity.getObject(3, UUID.class)).isEqualTo(tenantId);
+            assertThat(identity.getObject(4, UUID.class)).isEqualTo(tenantId);
+
+            try (PreparedStatement record = connection.prepareStatement("""
+                SELECT disposition,result_tenant_id,result_intent_id
+                FROM accord_security.record_external_intent(
+                  CAST(? AS uuid),CAST(? AS uuid),CAST(? AS varchar),
+                  CAST(? AS varchar),CAST(? AS varchar),CAST(? AS varchar),
+                  CAST(? AS varchar),CAST(? AS varchar),CAST(? AS varchar),
+                  CAST(? AS varchar),CAST(? AS varchar),CAST(? AS bigint),
+                  CAST(? AS char(71)))
+                """)) {
+                record.setObject(1, tenantId);
+                record.setObject(2, intentId);
+                record.setString(3, "api-root-key-000001");
+                record.setString(4, "repository");
+                record.setString(5, "repository-1");
+                record.setString(6, "gitlab");
+                record.setString(7, "installation-1");
+                record.setString(8, "repository-1");
+                record.setString(9, "git.branch.create");
+                record.setString(10, "delivery-work-item");
+                record.setString(11, "work-item-1");
+                record.setLong(12, 1);
+                record.setString(13, "sha256:" + "a".repeat(64));
+                try (ResultSet result = record.executeQuery()) {
+                    assertThat(result.next()).isTrue();
+                    assertThat(result.getString(1)).isEqualTo("CREATED");
+                    assertThat(result.getObject(2, UUID.class)).isEqualTo(tenantId);
+                    assertThat(result.getObject(3, UUID.class)).isEqualTo(intentId);
+                    assertThat(result.next()).isFalse();
+                }
+            }
+            connection.commit();
+        }
+        try (Connection connection = adminConnection();
+             Statement statement = connection.createStatement()) {
+            assertThat(number(statement, """
+                SELECT count(*) FROM external_call_intent
+                WHERE tenant_id='%s' AND intent_id='%s'
+                """.formatted(tenantId, intentId))).isEqualTo(1);
         }
     }
 
@@ -295,20 +523,61 @@ class ReliableDeliveryMigrationTest {
     }
 
     @Test
-    void printableLogicalActionKeyMayContainSpaces() throws Exception {
+    void logicalActionKeyRejectsSpacesAndFreeText() throws Exception {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
-            UUID intentId = insertRoot(statement, "action key with spaces");
-            assertThat(number(statement, """
-                SELECT count(*) FROM external_call_intent
-                WHERE intent_id='%s'
-                """.formatted(intentId))).isEqualTo(1);
+            SQLException error = assertThrows(
+                SQLException.class,
+                () -> insertRoot(statement, "action key with spaces"));
+            assertThat(error.getSQLState()).isEqualTo("23514");
+            assertThat(error.getMessage())
+                .contains("external_call_intent_logical_action_key_format");
         }
     }
 
     private Connection adminConnection() throws Exception {
         return DriverManager.getConnection(
             postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+    }
+
+    private void assertRuntimeSqlState(
+            String login,
+            String password,
+            String role,
+            UUID tenantId,
+            String sql,
+            String expectedSqlState) throws Exception {
+        try (Connection connection = runtimeConnection(login, password, role, tenantId);
+             Statement statement = connection.createStatement()) {
+            try (ResultSet identity = statement.executeQuery(
+                    "SELECT session_user,current_user")) {
+                assertThat(identity.next()).isTrue();
+                assertThat(identity.getString(1)).isEqualTo(login);
+                assertThat(identity.getString(2)).isEqualTo(role);
+            }
+            SQLException error = assertThrows(
+                SQLException.class,
+                () -> statement.execute(sql));
+            assertThat(error.getSQLState()).isEqualTo(expectedSqlState);
+        }
+    }
+
+    private Connection runtimeConnection(
+            String login, String password, String role, UUID tenantId) throws Exception {
+        Connection connection = DriverManager.getConnection(
+            postgres.getJdbcUrl(), login, password);
+        connection.setAutoCommit(false);
+        try (Statement roleStatement = connection.createStatement();
+             PreparedStatement tenantStatement = connection.prepareStatement(
+                 "SELECT set_config('app.tenant_id', ?, true)")) {
+            roleStatement.execute("SET ROLE " + role);
+            tenantStatement.setString(1, tenantId.toString());
+            tenantStatement.executeQuery();
+        } catch (Exception error) {
+            connection.close();
+            throw error;
+        }
+        return connection;
     }
 
     private static UUID insertRoot(Statement statement, String logicalKey) throws Exception {

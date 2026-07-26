@@ -1,11 +1,13 @@
 package com.inforvans.accord.reliability;
 
 public sealed interface ExecutionResolution
-        permits ExecutionResolution.Succeeded,
-                ExecutionResolution.ConfirmedNoEffect,
+        permits ExecutionResolution.Terminal,
                 ExecutionResolution.OutcomeUnknown {
+    sealed interface Terminal extends ExecutionResolution
+            permits Succeeded, ConfirmedNoEffect {}
+
     record Succeeded(String outcomeDigest, String providerRequestId)
-            implements ExecutionResolution {
+            implements Terminal {
         public Succeeded {
             outcomeDigest = ReliabilityValues.digest(outcomeDigest, "outcomeDigest");
             providerRequestId = ReliabilityValues.optionalSafeIdentifier(
@@ -14,7 +16,7 @@ public sealed interface ExecutionResolution
     }
 
     record ConfirmedNoEffect(String evidenceDigest, String providerRequestId)
-            implements ExecutionResolution {
+            implements Terminal {
         public ConfirmedNoEffect {
             evidenceDigest = ReliabilityValues.digest(evidenceDigest, "evidenceDigest");
             providerRequestId = ReliabilityValues.optionalSafeIdentifier(

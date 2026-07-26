@@ -13,38 +13,32 @@ public final class JooqExternalIntentStore {
             DSLContext tx, ExternalIntentDefinition definition) {
         Objects.requireNonNull(tx, "tx");
         Objects.requireNonNull(definition, "definition");
-        int inserted = tx.execute("""
-            INSERT INTO external_call_intent (
-              tenant_id,intent_id,root_intent_id,predecessor_intent_id,
-              attempt_ordinal,logical_action_key,scope_type,scope_id,provider,
-              provider_installation_id,provider_repository_id,operation,
-              request_reference_type,request_reference_id,
-              request_reference_version,request_digest,state
-            ) VALUES (?, ?, ?, NULL, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RECORDED')
-            ON CONFLICT DO NOTHING
+        Record result = tx.fetchOne("""
+            SELECT disposition,
+                   result_tenant_id AS tenant_id,
+                   result_intent_id AS intent_id,
+                   result_root_intent_id AS root_intent_id,
+                   result_attempt_ordinal AS attempt_ordinal,
+                   result_global_idempotency_key AS global_idempotency_key,
+                   result_state AS state
+            FROM accord_security.record_external_intent(
+              ?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
-            definition.tenantId(), definition.intentId(), definition.intentId(),
+            definition.tenantId(), definition.intentId(),
             definition.logicalActionKey(), definition.scopeType(), definition.scopeId(),
             definition.provider(), definition.providerInstallationId(),
             definition.providerRepositoryId(), definition.operation(),
             definition.requestReferenceType(), definition.requestReferenceId(),
             definition.requestReferenceVersion(), definition.requestDigest());
-        if (inserted == 1) {
-            return new ExternalIntentRegistration.Created(requiredRef(
-                findById(tx, definition.tenantId(), definition.intentId())));
+        if (result == null) {
+            throw new IllegalStateException("external intent registration returned no result");
         }
-        Record existing = tx.fetchOne("""
-            SELECT * FROM external_call_intent
-            WHERE tenant_id=? AND logical_action_key=?
-              AND predecessor_intent_id IS NULL
-            """, definition.tenantId(), definition.logicalActionKey());
-        if (existing == null) {
-            throw new IllegalStateException("external intent conflict row disappeared");
-        }
-        if (sameDefinition(existing, definition)) {
-            return new ExternalIntentRegistration.Duplicate(requiredRef(existing));
-        }
-        return new ExternalIntentRegistration.Conflict();
+        return switch (required(result, "disposition", String.class)) {
+            case "CREATED" -> new ExternalIntentRegistration.Created(requiredRef(result));
+            case "DUPLICATE" -> new ExternalIntentRegistration.Duplicate(requiredRef(result));
+            case "CONFLICT" -> new ExternalIntentRegistration.Conflict();
+            default -> throw new IllegalStateException("unknown external intent registration");
+        };
     }
 
     public ExternalIntentRef createSuccessor(
@@ -52,52 +46,20 @@ public final class JooqExternalIntentStore {
         Objects.requireNonNull(tx, "tx");
         Objects.requireNonNull(tenantId, "tenantId");
         Objects.requireNonNull(predecessorIntentId, "predecessorIntentId");
-        Record predecessor = findById(tx, tenantId, predecessorIntentId);
-        if (predecessor == null) {
-            throw new IllegalStateException("predecessor is absent");
-        }
-        Record existing = tx.fetchOne("""
-            SELECT * FROM external_call_intent
-            WHERE tenant_id=? AND predecessor_intent_id=?
-            """, tenantId, predecessorIntentId);
-        if (existing != null) {
-            return requiredRef(existing);
-        }
-        if (state(predecessor) != ExternalIntentState.CONFIRMED_NO_EFFECT) {
-            throw new IllegalStateException("predecessor is not confirmed no effect");
-        }
         UUID successorId = UUID.randomUUID();
-        Record inserted = tx.fetchOne("""
-            INSERT INTO external_call_intent (
-              tenant_id,intent_id,root_intent_id,predecessor_intent_id,
-              attempt_ordinal,logical_action_key,scope_type,scope_id,provider,
-              provider_installation_id,provider_repository_id,operation,
-              request_reference_type,request_reference_id,
-              request_reference_version,request_digest,state
-            )
-            SELECT tenant_id,?,root_intent_id,intent_id,attempt_ordinal+1,
-                   logical_action_key,scope_type,scope_id,provider,
-                   provider_installation_id,provider_repository_id,operation,
-                   request_reference_type,request_reference_id,
-                   request_reference_version,request_digest,'RECORDED'
-            FROM external_call_intent
-            WHERE tenant_id=? AND intent_id=? AND state='CONFIRMED_NO_EFFECT'
-            ON CONFLICT (tenant_id, predecessor_intent_id)
-              WHERE predecessor_intent_id IS NOT NULL
-              DO NOTHING
-            RETURNING *
-            """, successorId, tenantId, predecessorIntentId);
-        if (inserted == null) {
-            Record winner = tx.fetchOne("""
-                SELECT * FROM external_call_intent
-                WHERE tenant_id=? AND predecessor_intent_id=?
-                """, tenantId, predecessorIntentId);
-            if (winner == null) {
-                throw new IllegalStateException("successor could not be created");
-            }
-            return requiredRef(winner);
+        Record result = tx.fetchOne("""
+            SELECT result_tenant_id AS tenant_id,
+                   result_intent_id AS intent_id,
+                   result_root_intent_id AS root_intent_id,
+                   result_attempt_ordinal AS attempt_ordinal,
+                   result_global_idempotency_key AS global_idempotency_key,
+                   result_state AS state
+            FROM accord_security.create_external_intent_successor(?,?,?)
+            """, tenantId, predecessorIntentId, successorId);
+        if (result == null) {
+            throw new IllegalStateException("successor creation returned no result");
         }
-        return requiredRef(inserted);
+        return requiredRef(result);
     }
 
     public ExecutionClaim claimExecution(
@@ -111,36 +73,20 @@ public final class JooqExternalIntentStore {
         Objects.requireNonNull(intentId, "intentId");
         owner = CommandKey.requireBounded(owner, "owner", 255);
         long leaseMicros = ReliabilityValues.leaseMicros(lease, "lease");
-        Record locked = lockById(tx, tenantId, intentId);
-        if (locked == null) {
+        UUID candidateToken = UUID.randomUUID();
+        Record result = tx.fetchOne("""
+            SELECT * FROM accord_security.claim_external_intent_execution(
+              ?,?,?,?,?)
+            """, tenantId, intentId, owner, leaseMicros, candidateToken);
+        if (result == null) {
             return new ExecutionClaim.Missing();
         }
-        ExternalIntentState current = state(locked);
-        if (current != ExternalIntentState.RECORDED) {
+        ExternalIntentState current = state(result);
+        if (current != ExternalIntentState.EXECUTING
+                || !candidateToken.equals(result.get("execution_token", UUID.class))) {
             return new ExecutionClaim.NotExecutable(current);
         }
-        OffsetDateTime databaseNow = databaseNow(tx);
-        UUID token = UUID.randomUUID();
-        Record acquired = tx.fetchOne("""
-            WITH lease AS MATERIALIZED (
-              SELECT CAST(? AS timestamptz) AS permitted_at,
-                     CAST(? AS timestamptz)
-                       + (? * INTERVAL '1 microsecond') AS deadline
-            )
-            UPDATE external_call_intent AS intent
-            SET state='EXECUTING',execution_owner=?,execution_generation=1,
-                execution_token=?,execution_permitted_at=lease.permitted_at,
-                execution_lease_until=lease.deadline
-            FROM lease
-            WHERE intent.tenant_id=? AND intent.intent_id=? AND intent.state='RECORDED'
-              AND intent.execution_generation=0
-            RETURNING intent.*
-            """,
-            databaseNow, databaseNow, leaseMicros, owner, token, tenantId, intentId);
-        if (acquired == null) {
-            throw new LostExternalIntentFence("execution permit was not acquired");
-        }
-        return new ExecutionClaim.Acquired(writePermit(acquired));
+        return new ExecutionClaim.Acquired(writePermit(result));
     }
 
     public ExternalWritePermit renewExecution(
@@ -148,121 +94,100 @@ public final class JooqExternalIntentStore {
         Objects.requireNonNull(tx, "tx");
         Objects.requireNonNull(permit, "permit");
         long extensionMicros = ReliabilityValues.leaseMicros(extension, "extension");
-        Record locked = lockById(tx, permit.tenantId(), permit.intentId());
-        if (locked == null || !matchesPermitContext(locked, permit)) {
-            throw new LostExternalIntentFence("execution intent is absent");
-        }
-        OffsetDateTime databaseNow = databaseNow(tx);
-        Record renewed = tx.fetchOne("""
-            WITH extension AS MATERIALIZED (
-              SELECT ? * INTERVAL '1 microsecond' AS amount
-            )
-            UPDATE external_call_intent AS intent
-            SET execution_lease_until=intent.execution_lease_until+extension.amount
-            FROM extension
-            WHERE intent.tenant_id=? AND intent.intent_id=?
-              AND intent.state='EXECUTING'
-              AND intent.execution_owner=? AND intent.execution_generation=?
-              AND intent.execution_token=?
-              AND intent.execution_lease_until=CAST(? AS timestamptz)
-              AND intent.execution_lease_until>CAST(? AS timestamptz)
-            RETURNING intent.execution_lease_until
-            """,
-            extensionMicros,
-            permit.tenantId(), permit.intentId(), permit.owner(), permit.generation(),
-            permit.token(), permit.leaseUntil(), databaseNow);
-        if (renewed == null) {
-            throw new LostExternalIntentFence("execution renewal fence was lost");
-        }
-        return copyPermit(
-            permit, required(renewed, "execution_lease_until", OffsetDateTime.class));
+        Record renewed = fetchFenced(
+            () -> tx.fetchOne("""
+                SELECT * FROM accord_security.renew_external_intent_execution(
+                  ?,?,?,?,?,CAST(? AS timestamptz),?,?,?,?,?,?,?,?,?,?)
+                """,
+                permit.tenantId(), permit.intentId(), permit.owner(), permit.generation(),
+                permit.token(), permit.leaseUntil(), permit.globalIdempotencyKey(),
+                permit.provider(), permit.providerInstallationId(),
+                permit.providerRepositoryId(), permit.operation(),
+                permit.requestReferenceType(), permit.requestReferenceId(),
+                permit.requestReferenceVersion(), permit.requestDigest(), extensionMicros),
+            "execution renewal fence was lost");
+        return writePermit(renewed);
     }
 
-    public void finishExecution(
-            DSLContext tx, ExternalWritePermit permit, ExecutionResolution resolution) {
+    public void markExecutionOutcomeUnknown(
+            DSLContext tx,
+            ExternalWritePermit permit,
+            ExecutionResolution.OutcomeUnknown resolution) {
         Objects.requireNonNull(tx, "tx");
         Objects.requireNonNull(permit, "permit");
         Objects.requireNonNull(resolution, "resolution");
-        Record locked = lockById(tx, permit.tenantId(), permit.intentId());
-        if (locked == null || !matchesPermitContext(locked, permit)) {
-            throw new LostExternalIntentFence("execution intent is absent");
-        }
-        OffsetDateTime databaseNow = databaseNow(tx);
+        runFenced(
+            () -> tx.execute("""
+                SELECT accord_security.mark_external_intent_execution_unknown(
+                  ?,?,?,?,?,CAST(? AS timestamptz),?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                permit.tenantId(), permit.intentId(), permit.owner(), permit.generation(),
+                permit.token(), permit.leaseUntil(), permit.globalIdempotencyKey(),
+                permit.provider(), permit.providerInstallationId(),
+                permit.providerRepositoryId(), permit.operation(),
+                permit.requestReferenceType(), permit.requestReferenceId(),
+                permit.requestReferenceVersion(), permit.requestDigest(),
+                resolution.errorCode(), resolution.providerRequestId()),
+            "execution completion fence was lost");
+    }
+
+    public void completeExecution(
+            DSLContext tx,
+            ExternalWritePermit permit,
+            ExecutionResolution.Terminal resolution,
+            DomainEvent event,
+            OutboxMessage outbox) {
+        Objects.requireNonNull(tx, "tx");
+        Objects.requireNonNull(permit, "permit");
+        Objects.requireNonNull(resolution, "resolution");
+        Objects.requireNonNull(event, "event");
+        Objects.requireNonNull(outbox, "outbox");
         String target;
         String outcomeDigest;
-        String errorCode;
         String providerRequestId;
-        OffsetDateTime terminalAt;
         if (resolution instanceof ExecutionResolution.Succeeded succeeded) {
             target = "SUCCEEDED";
             outcomeDigest = succeeded.outcomeDigest();
-            errorCode = null;
             providerRequestId = succeeded.providerRequestId();
-            terminalAt = databaseNow;
         } else if (resolution instanceof ExecutionResolution.ConfirmedNoEffect noEffect) {
             target = "CONFIRMED_NO_EFFECT";
             outcomeDigest = noEffect.evidenceDigest();
-            errorCode = null;
             providerRequestId = noEffect.providerRequestId();
-            terminalAt = databaseNow;
-        } else if (resolution instanceof ExecutionResolution.OutcomeUnknown unknown) {
-            target = "OUTCOME_UNKNOWN";
-            outcomeDigest = null;
-            errorCode = unknown.errorCode();
-            providerRequestId = unknown.providerRequestId();
-            terminalAt = null;
         } else {
-            throw new IllegalStateException("unsupported execution resolution");
+            throw new IllegalStateException("unsupported execution terminal resolution");
         }
-        int changed = tx.execute("""
-            UPDATE external_call_intent AS intent
-            SET state=?,provider_request_id=COALESCE(
-                  intent.provider_request_id,CAST(? AS varchar)),
-                outcome_digest=?,last_error_code=?,terminal_at=CAST(? AS timestamptz)
-            WHERE intent.tenant_id=? AND intent.intent_id=?
-              AND intent.state='EXECUTING'
-              AND intent.execution_owner=? AND intent.execution_generation=?
-              AND intent.execution_token=?
-              AND intent.execution_lease_until=CAST(? AS timestamptz)
-              AND (intent.provider_request_id IS NULL OR CAST(? AS varchar) IS NULL
-                   OR intent.provider_request_id=CAST(? AS varchar))
-              AND intent.execution_lease_until>CAST(? AS timestamptz)
-            """,
-            target, providerRequestId, outcomeDigest, errorCode, terminalAt,
-            permit.tenantId(), permit.intentId(), permit.owner(), permit.generation(),
-            permit.token(), permit.leaseUntil(), providerRequestId, providerRequestId,
-            databaseNow);
-        if (changed != 1) {
-            throw new LostExternalIntentFence("execution completion fence was lost");
-        }
+        runFenced(
+            () -> tx.execute("""
+                SELECT accord_security.complete_external_intent_execution(
+                  ?,?,?,?,?,CAST(? AS timestamptz),?,?,?,?,?,?,?,?,?,?,?,?,?,
+                  ?,?,?,?,?,?,?,?,?,?,?,CAST(? AS jsonb),CAST(? AS timestamptz),
+                  ?,?,CAST(? AS jsonb))
+                """,
+                permit.tenantId(), permit.intentId(), permit.owner(), permit.generation(),
+                permit.token(), permit.leaseUntil(), permit.globalIdempotencyKey(),
+                permit.provider(), permit.providerInstallationId(),
+                permit.providerRepositoryId(), permit.operation(),
+                permit.requestReferenceType(), permit.requestReferenceId(),
+                permit.requestReferenceVersion(), permit.requestDigest(),
+                target, outcomeDigest, providerRequestId,
+                event.tenantId(), event.eventId(), event.scopeType(), event.scopeId(),
+                event.aggregateType(), event.aggregateId(), event.sequence(),
+                event.eventType(), event.schemaVersion(), event.causationId(),
+                event.correlationId(), event.actorId(), event.payload(),
+                event.occurredAt(), outbox.destination(), outbox.payloadSchema(),
+                outbox.payload()),
+            "execution terminal fence was lost");
     }
 
     public boolean expireExecution(DSLContext tx, UUID tenantId, UUID intentId) {
         Objects.requireNonNull(tx, "tx");
-        Record locked = lockById(tx, tenantId, intentId);
-        if (locked == null || state(locked) != ExternalIntentState.EXECUTING) {
-            return false;
-        }
-        OffsetDateTime databaseNow = databaseNow(tx);
-        OffsetDateTime deadline = required(
-            locked, "execution_lease_until", OffsetDateTime.class);
-        if (deadline.isAfter(databaseNow)) {
-            return false;
-        }
-        int changed = tx.execute("""
-            UPDATE external_call_intent
-            SET state='OUTCOME_UNKNOWN',last_error_code='EXECUTION_LEASE_EXPIRED'
-            WHERE tenant_id=? AND intent_id=? AND state='EXECUTING'
-              AND execution_owner=? AND execution_generation=?
-              AND execution_token=? AND execution_lease_until=CAST(? AS timestamptz)
-            """,
-            tenantId, intentId,
-            required(locked, "execution_owner", String.class),
-            required(locked, "execution_generation", Long.class),
-            required(locked, "execution_token", UUID.class), deadline);
-        return changed == 1;
+        Objects.requireNonNull(tenantId, "tenantId");
+        Objects.requireNonNull(intentId, "intentId");
+        Record result = tx.fetchOne(
+            "SELECT accord_security.expire_external_intent_execution(?,?)",
+            tenantId, intentId);
+        return result != null && Boolean.TRUE.equals(result.get(0, Boolean.class));
     }
-
     public ReconciliationClaim claimReconciliation(
             DSLContext tx,
             UUID tenantId,
@@ -274,52 +199,20 @@ public final class JooqExternalIntentStore {
         Objects.requireNonNull(intentId, "intentId");
         owner = CommandKey.requireBounded(owner, "owner", 255);
         long leaseMicros = ReliabilityValues.leaseMicros(lease, "lease");
-        Record locked = lockById(tx, tenantId, intentId);
-        if (locked == null) {
+        UUID candidateToken = UUID.randomUUID();
+        Record result = tx.fetchOne("""
+            SELECT * FROM accord_security.claim_external_intent_reconciliation(
+              ?,?,?,?,?)
+            """, tenantId, intentId, owner, leaseMicros, candidateToken);
+        if (result == null) {
             return new ReconciliationClaim.Missing();
         }
-        OffsetDateTime databaseNow = databaseNow(tx);
-        if (state(locked) == ExternalIntentState.RECONCILING
-                && !required(locked, "reconciliation_lease_until", OffsetDateTime.class)
-                    .isAfter(databaseNow)) {
-            expireReconciliationLocked(tx, locked, databaseNow);
-            locked = lockById(tx, tenantId, intentId);
-        }
-        ExternalIntentState current = state(locked);
-        if (current != ExternalIntentState.OUTCOME_UNKNOWN) {
+        ExternalIntentState current = state(result);
+        if (current != ExternalIntentState.RECONCILING
+                || !candidateToken.equals(result.get("reconciliation_token", UUID.class))) {
             return new ReconciliationClaim.NotReconcilable(current);
         }
-        long generation;
-        try {
-            generation = Math.addExact(
-                required(locked, "reconciliation_generation", Long.class), 1L);
-        } catch (ArithmeticException error) {
-            throw new IllegalStateException("reconciliation generation exhausted", error);
-        }
-        UUID token = UUID.randomUUID();
-        Record acquired = tx.fetchOne("""
-            WITH lease AS MATERIALIZED (
-              SELECT CAST(? AS timestamptz) AS started_at,
-                     CAST(? AS timestamptz)
-                       + (? * INTERVAL '1 microsecond') AS deadline
-            )
-            UPDATE external_call_intent AS intent
-            SET state='RECONCILING',reconciliation_owner=?,
-                reconciliation_generation=?,reconciliation_token=?,
-                reconciliation_started_at=lease.started_at,
-                reconciliation_lease_until=lease.deadline,last_error_code=NULL
-            FROM lease
-            WHERE intent.tenant_id=? AND intent.intent_id=?
-              AND intent.state='OUTCOME_UNKNOWN'
-              AND intent.reconciliation_generation=?
-            RETURNING intent.*
-            """,
-            databaseNow, databaseNow, leaseMicros,
-            owner, generation, token, tenantId, intentId, generation - 1);
-        if (acquired == null) {
-            throw new LostExternalIntentFence("reconciliation permit was not acquired");
-        }
-        return new ReconciliationClaim.Acquired(reconciliationLease(acquired));
+        return new ReconciliationClaim.Acquired(reconciliationLease(result));
     }
 
     public ReconciliationLease renewReconciliation(
@@ -327,122 +220,111 @@ public final class JooqExternalIntentStore {
         Objects.requireNonNull(tx, "tx");
         Objects.requireNonNull(lease, "lease");
         long extensionMicros = ReliabilityValues.leaseMicros(extension, "extension");
-        Record locked = lockById(tx, lease.tenantId(), lease.intentId());
-        if (locked == null || !matchesReconciliationContext(locked, lease)) {
-            throw new LostExternalIntentFence("reconciliation intent is absent");
-        }
-        OffsetDateTime databaseNow = databaseNow(tx);
-        Record renewed = tx.fetchOne("""
-            WITH extension AS MATERIALIZED (
-              SELECT ? * INTERVAL '1 microsecond' AS amount
-            )
-            UPDATE external_call_intent AS intent
-            SET reconciliation_lease_until=
-                  intent.reconciliation_lease_until+extension.amount
-            FROM extension
-            WHERE intent.tenant_id=? AND intent.intent_id=?
-              AND intent.state='RECONCILING'
-              AND intent.reconciliation_owner=?
-              AND intent.reconciliation_generation=?
-              AND intent.reconciliation_token=?
-              AND intent.reconciliation_lease_until=CAST(? AS timestamptz)
-              AND intent.reconciliation_lease_until>CAST(? AS timestamptz)
-            RETURNING intent.reconciliation_lease_until
-            """,
-            extensionMicros,
-            lease.tenantId(), lease.intentId(), lease.owner(), lease.generation(),
-            lease.token(), lease.leaseUntil(), databaseNow);
-        if (renewed == null) {
-            throw new LostExternalIntentFence("reconciliation renewal fence was lost");
-        }
-        return copyReconciliationLease(
-            lease, required(renewed, "reconciliation_lease_until", OffsetDateTime.class));
+        Record renewed = fetchFenced(
+            () -> tx.fetchOne("""
+                SELECT * FROM accord_security.renew_external_intent_reconciliation(
+                  ?,?,?,?,?,CAST(? AS timestamptz),?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                lease.tenantId(), lease.intentId(), lease.owner(), lease.generation(),
+                lease.token(), lease.leaseUntil(), lease.globalIdempotencyKey(),
+                lease.provider(), lease.providerInstallationId(),
+                lease.providerRepositoryId(), lease.operation(),
+                lease.requestReferenceType(), lease.requestReferenceId(),
+                lease.requestReferenceVersion(), lease.requestDigest(),
+                lease.providerRequestId(), extensionMicros),
+            "reconciliation renewal fence was lost");
+        return reconciliationLease(renewed);
     }
 
-    public void finishReconciliation(
+    public void markReconciliationOutcomeUnknown(
             DSLContext tx,
             ReconciliationLease lease,
-            ReconciliationResolution resolution) {
+            ReconciliationResolution.StillUnknown resolution) {
         Objects.requireNonNull(tx, "tx");
         Objects.requireNonNull(lease, "lease");
         Objects.requireNonNull(resolution, "resolution");
-        Record locked = lockById(tx, lease.tenantId(), lease.intentId());
-        if (locked == null || !matchesReconciliationContext(locked, lease)) {
-            throw new LostExternalIntentFence("reconciliation intent is absent");
-        }
-        OffsetDateTime databaseNow = databaseNow(tx);
+        runFenced(
+            () -> tx.execute("""
+                SELECT accord_security.mark_external_intent_reconciliation_unknown(
+                  ?,?,?,?,?,CAST(? AS timestamptz),?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                lease.tenantId(), lease.intentId(), lease.owner(), lease.generation(),
+                lease.token(), lease.leaseUntil(), lease.globalIdempotencyKey(),
+                lease.provider(), lease.providerInstallationId(),
+                lease.providerRepositoryId(), lease.operation(),
+                lease.requestReferenceType(), lease.requestReferenceId(),
+                lease.requestReferenceVersion(), lease.requestDigest(),
+                lease.providerRequestId(), resolution.errorCode(),
+                resolution.providerRequestId()),
+            "reconciliation completion fence was lost");
+    }
+
+    public void completeReconciliation(
+            DSLContext tx,
+            ReconciliationLease lease,
+            ReconciliationResolution.Terminal resolution,
+            DomainEvent event,
+            OutboxMessage outbox) {
+        Objects.requireNonNull(tx, "tx");
+        Objects.requireNonNull(lease, "lease");
+        Objects.requireNonNull(resolution, "resolution");
+        Objects.requireNonNull(event, "event");
+        Objects.requireNonNull(outbox, "outbox");
         String target;
         String outcomeDigest;
         String errorCode;
-        String providerRequestId = null;
-        OffsetDateTime terminalAt;
+        String providerRequestId;
         if (resolution instanceof ReconciliationResolution.Succeeded succeeded) {
             target = "SUCCEEDED";
             outcomeDigest = succeeded.outcomeDigest();
             errorCode = null;
             providerRequestId = succeeded.providerRequestId();
-            terminalAt = databaseNow;
-        } else if (resolution instanceof ReconciliationResolution.ConfirmedNoEffect noEffect) {
+        } else if (resolution
+                instanceof ReconciliationResolution.ConfirmedNoEffect noEffect) {
             target = "CONFIRMED_NO_EFFECT";
             outcomeDigest = noEffect.evidenceDigest();
             errorCode = null;
             providerRequestId = noEffect.providerRequestId();
-            terminalAt = databaseNow;
         } else if (resolution instanceof ReconciliationResolution.Diverged diverged) {
             target = "DIVERGED";
             outcomeDigest = diverged.evidenceDigest();
             errorCode = diverged.errorCode();
             providerRequestId = diverged.providerRequestId();
-            terminalAt = databaseNow;
-        } else if (resolution instanceof ReconciliationResolution.StillUnknown unknown) {
-            target = "OUTCOME_UNKNOWN";
-            outcomeDigest = null;
-            errorCode = unknown.errorCode();
-            providerRequestId = unknown.providerRequestId();
-            terminalAt = null;
         } else {
-            throw new IllegalStateException("unsupported reconciliation resolution");
+            throw new IllegalStateException("unsupported reconciliation terminal resolution");
         }
-        int changed = tx.execute("""
-            UPDATE external_call_intent AS intent
-            SET state=?,reconciliation_owner=NULL,reconciliation_token=NULL,
-                reconciliation_started_at=NULL,reconciliation_lease_until=NULL,
-                provider_request_id=COALESCE(
-                  intent.provider_request_id,CAST(? AS varchar)),
-                outcome_digest=?,last_error_code=?,terminal_at=CAST(? AS timestamptz)
-            WHERE intent.tenant_id=? AND intent.intent_id=?
-              AND intent.state='RECONCILING'
-              AND intent.reconciliation_owner=?
-              AND intent.reconciliation_generation=?
-              AND intent.reconciliation_token=?
-              AND intent.reconciliation_lease_until=CAST(? AS timestamptz)
-              AND intent.reconciliation_lease_until>CAST(? AS timestamptz)
-              AND (intent.provider_request_id IS NULL OR CAST(? AS varchar) IS NULL
-                   OR intent.provider_request_id=CAST(? AS varchar))
-            """,
-            target, providerRequestId, outcomeDigest, errorCode, terminalAt,
-            lease.tenantId(), lease.intentId(), lease.owner(), lease.generation(),
-            lease.token(), lease.leaseUntil(), databaseNow,
-            providerRequestId, providerRequestId);
-        if (changed != 1) {
-            throw new LostExternalIntentFence("reconciliation completion fence was lost");
-        }
+        runFenced(
+            () -> tx.execute("""
+                SELECT accord_security.complete_external_intent_reconciliation(
+                  ?,?,?,?,?,CAST(? AS timestamptz),?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                  ?,?,?,?,?,?,?,?,?,?,?,?,CAST(? AS jsonb),CAST(? AS timestamptz),
+                  ?,?,CAST(? AS jsonb))
+                """,
+                lease.tenantId(), lease.intentId(), lease.owner(), lease.generation(),
+                lease.token(), lease.leaseUntil(), lease.globalIdempotencyKey(),
+                lease.provider(), lease.providerInstallationId(),
+                lease.providerRepositoryId(), lease.operation(),
+                lease.requestReferenceType(), lease.requestReferenceId(),
+                lease.requestReferenceVersion(), lease.requestDigest(),
+                lease.providerRequestId(), target, outcomeDigest, errorCode,
+                providerRequestId, event.tenantId(), event.eventId(), event.scopeType(),
+                event.scopeId(), event.aggregateType(), event.aggregateId(),
+                event.sequence(), event.eventType(), event.schemaVersion(),
+                event.causationId(), event.correlationId(), event.actorId(),
+                event.payload(), event.occurredAt(), outbox.destination(),
+                outbox.payloadSchema(), outbox.payload()),
+            "reconciliation terminal fence was lost");
     }
 
     public boolean expireReconciliation(DSLContext tx, UUID tenantId, UUID intentId) {
         Objects.requireNonNull(tx, "tx");
-        Record locked = lockById(tx, tenantId, intentId);
-        if (locked == null || state(locked) != ExternalIntentState.RECONCILING) {
-            return false;
-        }
-        OffsetDateTime databaseNow = databaseNow(tx);
-        if (required(locked, "reconciliation_lease_until", OffsetDateTime.class)
-                .isAfter(databaseNow)) {
-            return false;
-        }
-        return expireReconciliationLocked(tx, locked, databaseNow);
+        Objects.requireNonNull(tenantId, "tenantId");
+        Objects.requireNonNull(intentId, "intentId");
+        Record result = tx.fetchOne(
+            "SELECT accord_security.expire_external_intent_reconciliation(?,?)",
+            tenantId, intentId);
+        return result != null && Boolean.TRUE.equals(result.get(0, Boolean.class));
     }
-
     public Optional<ExternalIntentSnapshot> load(
             DSLContext tx, UUID tenantId, UUID intentId) {
         Objects.requireNonNull(tx, "tx");
@@ -455,113 +337,42 @@ public final class JooqExternalIntentStore {
         return Optional.ofNullable(row).map(JooqExternalIntentStore::snapshot);
     }
 
-    private boolean expireReconciliationLocked(
-            DSLContext tx, Record locked, OffsetDateTime databaseNow) {
-        OffsetDateTime deadline = required(
-            locked, "reconciliation_lease_until", OffsetDateTime.class);
-        if (deadline.isAfter(databaseNow)) {
-            return false;
+    private static Record fetchFenced(
+            java.util.function.Supplier<Record> operation, String message) {
+        try {
+            Record result = operation.get();
+            if (result == null) {
+                throw new LostExternalIntentFence(message);
+            }
+            return result;
+        } catch (org.jooq.exception.DataAccessException error) {
+            if (hasSqlState(error, "55000")) {
+                throw new LostExternalIntentFence(message);
+            }
+            throw error;
         }
-        int changed = tx.execute("""
-            UPDATE external_call_intent
-            SET state='OUTCOME_UNKNOWN',reconciliation_owner=NULL,
-                reconciliation_token=NULL,reconciliation_started_at=NULL,
-                reconciliation_lease_until=NULL,
-                last_error_code='RECONCILIATION_LEASE_EXPIRED'
-            WHERE tenant_id=? AND intent_id=? AND state='RECONCILING'
-              AND reconciliation_owner=? AND reconciliation_generation=?
-              AND reconciliation_token=?
-              AND reconciliation_lease_until=CAST(? AS timestamptz)
-            """,
-            required(locked, "tenant_id", UUID.class),
-            required(locked, "intent_id", UUID.class),
-            required(locked, "reconciliation_owner", String.class),
-            required(locked, "reconciliation_generation", Long.class),
-            required(locked, "reconciliation_token", UUID.class), deadline);
-        return changed == 1;
     }
 
-    private Record lockById(DSLContext tx, UUID tenantId, UUID intentId) {
-        return tx.fetchOne("""
-            SELECT * FROM external_call_intent
-            WHERE tenant_id=? AND intent_id=?
-            FOR UPDATE
-            """, tenantId, intentId);
+    private static void runFenced(Runnable operation, String message) {
+        try {
+            operation.run();
+        } catch (org.jooq.exception.DataAccessException error) {
+            if (hasSqlState(error, "55000")) {
+                throw new LostExternalIntentFence(message);
+            }
+            throw error;
+        }
     }
 
-    private Record findById(DSLContext tx, UUID tenantId, UUID intentId) {
-        return tx.fetchOne("""
-            SELECT * FROM external_call_intent
-            WHERE tenant_id=? AND intent_id=?
-            """, tenantId, intentId);
+    private static boolean hasSqlState(Throwable error, String expected) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (current instanceof java.sql.SQLException sql
+                    && expected.equals(sql.getSQLState())) {
+                return true;
+            }
+        }
+        return false;
     }
-
-    private static OffsetDateTime databaseNow(DSLContext tx) {
-        return required(
-            tx.fetchOne("SELECT clock_timestamp() AS database_now"),
-            "database_now", OffsetDateTime.class);
-    }
-
-    private static boolean sameDefinition(Record row, ExternalIntentDefinition definition) {
-        return Objects.equals(row.get("logical_action_key", String.class),
-                    definition.logicalActionKey())
-            && Objects.equals(row.get("scope_type", String.class), definition.scopeType())
-            && Objects.equals(row.get("scope_id", String.class), definition.scopeId())
-            && Objects.equals(row.get("provider", String.class), definition.provider())
-            && Objects.equals(row.get("provider_installation_id", String.class),
-                    definition.providerInstallationId())
-            && Objects.equals(row.get("provider_repository_id", String.class),
-                    definition.providerRepositoryId())
-            && Objects.equals(row.get("operation", String.class), definition.operation())
-            && Objects.equals(row.get("request_reference_type", String.class),
-                    definition.requestReferenceType())
-            && Objects.equals(row.get("request_reference_id", String.class),
-                    definition.requestReferenceId())
-            && Objects.equals(row.get("request_reference_version", Long.class),
-                    definition.requestReferenceVersion())
-            && Objects.equals(row.get("request_digest", String.class),
-                    definition.requestDigest());
-    }
-
-    private static boolean matchesPermitContext(Record row, ExternalWritePermit permit) {
-        return Objects.equals(row.get("global_idempotency_key", String.class),
-                    permit.globalIdempotencyKey())
-            && Objects.equals(row.get("provider", String.class), permit.provider())
-            && Objects.equals(row.get("provider_installation_id", String.class),
-                    permit.providerInstallationId())
-            && Objects.equals(row.get("provider_repository_id", String.class),
-                    permit.providerRepositoryId())
-            && Objects.equals(row.get("operation", String.class), permit.operation())
-            && Objects.equals(row.get("request_reference_type", String.class),
-                    permit.requestReferenceType())
-            && Objects.equals(row.get("request_reference_id", String.class),
-                    permit.requestReferenceId())
-            && Objects.equals(row.get("request_reference_version", Long.class),
-                    permit.requestReferenceVersion())
-            && Objects.equals(row.get("request_digest", String.class), permit.requestDigest());
-    }
-
-    private static boolean matchesReconciliationContext(
-            Record row, ReconciliationLease lease) {
-        return Objects.equals(row.get("global_idempotency_key", String.class),
-                    lease.globalIdempotencyKey())
-            && Objects.equals(row.get("provider", String.class), lease.provider())
-            && Objects.equals(row.get("provider_installation_id", String.class),
-                    lease.providerInstallationId())
-            && Objects.equals(row.get("provider_repository_id", String.class),
-                    lease.providerRepositoryId())
-            && Objects.equals(row.get("operation", String.class), lease.operation())
-            && Objects.equals(row.get("request_reference_type", String.class),
-                    lease.requestReferenceType())
-            && Objects.equals(row.get("request_reference_id", String.class),
-                    lease.requestReferenceId())
-            && Objects.equals(row.get("request_reference_version", Long.class),
-                    lease.requestReferenceVersion())
-            && Objects.equals(row.get("request_digest", String.class), lease.requestDigest())
-            && Objects.equals(row.get("provider_request_id", String.class),
-                    lease.providerRequestId());
-    }
-
     private static ExternalIntentRef requiredRef(Record row) {
         return new ExternalIntentRef(
             required(row, "tenant_id", UUID.class),
@@ -609,27 +420,6 @@ public final class JooqExternalIntentStore {
             required(row, "request_reference_version", Long.class),
             required(row, "request_digest", String.class),
             row.get("provider_request_id", String.class));
-    }
-
-    private static ExternalWritePermit copyPermit(
-            ExternalWritePermit source, OffsetDateTime deadline) {
-        return new ExternalWritePermit(
-            source.tenantId(), source.intentId(), source.owner(), source.generation(),
-            source.token(), deadline, source.globalIdempotencyKey(), source.provider(),
-            source.providerInstallationId(), source.providerRepositoryId(), source.operation(),
-            source.requestReferenceType(), source.requestReferenceId(),
-            source.requestReferenceVersion(), source.requestDigest());
-    }
-
-    private static ReconciliationLease copyReconciliationLease(
-            ReconciliationLease source, OffsetDateTime deadline) {
-        return new ReconciliationLease(
-            source.tenantId(), source.intentId(), source.owner(), source.generation(),
-            source.token(), deadline, source.globalIdempotencyKey(), source.provider(),
-            source.providerInstallationId(), source.providerRepositoryId(), source.operation(),
-            source.requestReferenceType(), source.requestReferenceId(),
-            source.requestReferenceVersion(), source.requestDigest(),
-            source.providerRequestId());
     }
 
     private static ExternalIntentSnapshot snapshot(Record row) {
