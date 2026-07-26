@@ -737,6 +737,50 @@ BEGIN
 END
 $body$;
 
+CREATE FUNCTION accord_security.load_external_intent_snapshot(
+    p_tenant_id uuid,
+    p_intent_id uuid
+)
+RETURNS TABLE(
+    tenant_id uuid,
+    intent_id uuid,
+    root_intent_id uuid,
+    predecessor_intent_id uuid,
+    attempt_ordinal integer,
+    logical_action_key varchar,
+    global_idempotency_key varchar,
+    state varchar,
+    execution_generation bigint,
+    reconciliation_generation bigint,
+    provider_request_id varchar,
+    outcome_digest char(71),
+    last_error_code varchar,
+    created_at timestamptz,
+    updated_at timestamptz,
+    terminal_at timestamptz
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $body$
+BEGIN
+    IF p_tenant_id IS DISTINCT FROM accord_security.current_tenant_id() THEN
+        RAISE EXCEPTION 'external intent snapshot tenant context mismatch'
+            USING ERRCODE = '42501';
+    END IF;
+    RETURN QUERY
+    SELECT intent.tenant_id,intent.intent_id,intent.root_intent_id,
+           intent.predecessor_intent_id,intent.attempt_ordinal,
+           intent.logical_action_key,intent.global_idempotency_key,intent.state,
+           intent.execution_generation,intent.reconciliation_generation,
+           intent.provider_request_id,intent.outcome_digest,intent.last_error_code,
+           intent.created_at,intent.updated_at,intent.terminal_at
+    FROM public.external_call_intent AS intent
+    WHERE intent.tenant_id=p_tenant_id AND intent.intent_id=p_intent_id;
+END
+$body$;
+
 CREATE FUNCTION accord_security.create_external_intent_successor(
     p_tenant_id uuid,
     p_predecessor_intent_id uuid,
@@ -809,7 +853,25 @@ CREATE FUNCTION accord_security.claim_external_intent_execution(
     p_lease_micros bigint,
     p_token uuid
 )
-RETURNS SETOF public.external_call_intent
+RETURNS TABLE(
+    disposition text,
+    state varchar,
+    tenant_id uuid,
+    intent_id uuid,
+    execution_owner varchar,
+    execution_generation bigint,
+    execution_token uuid,
+    execution_lease_until timestamptz,
+    global_idempotency_key varchar,
+    provider varchar,
+    provider_installation_id varchar,
+    provider_repository_id varchar,
+    operation varchar,
+    request_reference_type varchar,
+    request_reference_id varchar,
+    request_reference_version bigint,
+    request_digest char(71)
+)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
@@ -834,7 +896,12 @@ BEGIN
         RETURN;
     END IF;
     IF current_intent.state <> 'RECORDED' THEN
-        RETURN NEXT current_intent;
+        RETURN QUERY VALUES (
+            'NOT_EXECUTABLE'::text,current_intent.state::varchar,
+            NULL::uuid,NULL::uuid,NULL::varchar,NULL::bigint,NULL::uuid,
+            NULL::timestamptz,NULL::varchar,NULL::varchar,NULL::varchar,
+            NULL::varchar,NULL::varchar,NULL::varchar,NULL::varchar,
+            NULL::bigint,NULL::char(71));
         RETURN;
     END IF;
     decision_time := pg_catalog.clock_timestamp();
@@ -850,7 +917,16 @@ BEGIN
         RAISE EXCEPTION 'execution permit was not acquired'
             USING ERRCODE = '55000';
     END IF;
-    RETURN NEXT current_intent;
+    RETURN QUERY VALUES (
+        'ACQUIRED'::text,current_intent.state::varchar,
+        current_intent.tenant_id,current_intent.intent_id,
+        current_intent.execution_owner,current_intent.execution_generation,
+        current_intent.execution_token,current_intent.execution_lease_until,
+        current_intent.global_idempotency_key,current_intent.provider,
+        current_intent.provider_installation_id,
+        current_intent.provider_repository_id,current_intent.operation,
+        current_intent.request_reference_type,current_intent.request_reference_id,
+        current_intent.request_reference_version,current_intent.request_digest);
 END
 $body$;
 
@@ -872,7 +948,7 @@ CREATE FUNCTION accord_security.renew_external_intent_execution(
     p_request_digest char(71),
     p_extension_micros bigint
 )
-RETURNS SETOF public.external_call_intent
+RETURNS TABLE(execution_lease_until timestamptz)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
@@ -927,7 +1003,7 @@ BEGIN
         RAISE EXCEPTION 'execution renewal fence changed'
             USING ERRCODE = '55000';
     END IF;
-    RETURN NEXT current_intent;
+    RETURN QUERY VALUES (current_intent.execution_lease_until);
 END
 $body$;
 
@@ -1182,7 +1258,26 @@ CREATE FUNCTION accord_security.claim_external_intent_reconciliation(
     p_lease_micros bigint,
     p_token uuid
 )
-RETURNS SETOF public.external_call_intent
+RETURNS TABLE(
+    disposition text,
+    state varchar,
+    tenant_id uuid,
+    intent_id uuid,
+    reconciliation_owner varchar,
+    reconciliation_generation bigint,
+    reconciliation_token uuid,
+    reconciliation_lease_until timestamptz,
+    global_idempotency_key varchar,
+    provider varchar,
+    provider_installation_id varchar,
+    provider_repository_id varchar,
+    operation varchar,
+    request_reference_type varchar,
+    request_reference_id varchar,
+    request_reference_version bigint,
+    request_digest char(71),
+    provider_request_id varchar
+)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
@@ -1228,7 +1323,12 @@ BEGIN
         END IF;
     END IF;
     IF current_intent.state <> 'OUTCOME_UNKNOWN' THEN
-        RETURN NEXT current_intent;
+        RETURN QUERY VALUES (
+            'NOT_RECONCILABLE'::text,current_intent.state::varchar,
+            NULL::uuid,NULL::uuid,NULL::varchar,NULL::bigint,NULL::uuid,
+            NULL::timestamptz,NULL::varchar,NULL::varchar,NULL::varchar,
+            NULL::varchar,NULL::varchar,NULL::varchar,NULL::varchar,
+            NULL::bigint,NULL::char(71),NULL::varchar);
         RETURN;
     END IF;
     next_generation := current_intent.reconciliation_generation + 1;
@@ -1248,7 +1348,19 @@ BEGIN
         RAISE EXCEPTION 'reconciliation permit was not acquired'
             USING ERRCODE = '55000';
     END IF;
-    RETURN NEXT current_intent;
+    RETURN QUERY VALUES (
+        'ACQUIRED'::text,current_intent.state::varchar,
+        current_intent.tenant_id,current_intent.intent_id,
+        current_intent.reconciliation_owner,
+        current_intent.reconciliation_generation,
+        current_intent.reconciliation_token,
+        current_intent.reconciliation_lease_until,
+        current_intent.global_idempotency_key,current_intent.provider,
+        current_intent.provider_installation_id,
+        current_intent.provider_repository_id,current_intent.operation,
+        current_intent.request_reference_type,current_intent.request_reference_id,
+        current_intent.request_reference_version,current_intent.request_digest,
+        current_intent.provider_request_id);
 END
 $body$;
 
@@ -1271,7 +1383,7 @@ CREATE FUNCTION accord_security.renew_external_intent_reconciliation(
     p_provider_request_id varchar,
     p_extension_micros bigint
 )
-RETURNS SETOF public.external_call_intent
+RETURNS TABLE(reconciliation_lease_until timestamptz)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
@@ -1327,7 +1439,7 @@ BEGIN
         RAISE EXCEPTION 'reconciliation renewal fence changed'
             USING ERRCODE = '55000';
     END IF;
-    RETURN NEXT current_intent;
+    RETURN QUERY VALUES (current_intent.reconciliation_lease_until);
 END
 $body$;
 
@@ -1594,13 +1706,14 @@ REVOKE ALL ON public.domain_event, public.outbox_event,
 GRANT SELECT ON public.domain_event, public.outbox_event
     TO accord_api, accord_worker;
 GRANT SELECT ON public.inbox_message TO accord_worker;
-GRANT SELECT ON public.external_call_intent TO accord_api, accord_worker;
 
 REVOKE ALL ON FUNCTION accord_security.append_reliable_event
     FROM PUBLIC, accord_api, accord_worker;
 REVOKE ALL ON FUNCTION accord_security.accept_inbox_message
     FROM PUBLIC, accord_api, accord_worker;
 REVOKE ALL ON FUNCTION accord_security.record_external_intent
+    FROM PUBLIC, accord_api, accord_worker;
+REVOKE ALL ON FUNCTION accord_security.load_external_intent_snapshot
     FROM PUBLIC, accord_api, accord_worker;
 REVOKE ALL ON FUNCTION accord_security.create_external_intent_successor
     FROM PUBLIC, accord_api, accord_worker;
@@ -1630,6 +1743,8 @@ GRANT EXECUTE ON FUNCTION accord_security.accept_inbox_message
     TO accord_worker;
 GRANT EXECUTE ON FUNCTION accord_security.record_external_intent
     TO accord_api;
+GRANT EXECUTE ON FUNCTION accord_security.load_external_intent_snapshot
+    TO accord_api, accord_worker;
 GRANT EXECUTE ON FUNCTION accord_security.create_external_intent_successor
     TO accord_worker;
 GRANT EXECUTE ON FUNCTION accord_security.claim_external_intent_execution,

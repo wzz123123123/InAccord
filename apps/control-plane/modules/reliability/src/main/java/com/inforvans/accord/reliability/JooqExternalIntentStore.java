@@ -81,12 +81,21 @@ public final class JooqExternalIntentStore {
         if (result == null) {
             return new ExecutionClaim.Missing();
         }
-        ExternalIntentState current = state(result);
-        if (current != ExternalIntentState.EXECUTING
-                || !candidateToken.equals(result.get("execution_token", UUID.class))) {
-            return new ExecutionClaim.NotExecutable(current);
-        }
-        return new ExecutionClaim.Acquired(writePermit(result));
+        return switch (required(result, "disposition", String.class)) {
+            case "NOT_EXECUTABLE" -> new ExecutionClaim.NotExecutable(state(result));
+            case "ACQUIRED" -> {
+                if (!candidateToken.equals(required(
+                        result, "execution_token", UUID.class))
+                        || !owner.equals(required(
+                            result, "execution_owner", String.class))) {
+                    throw new IllegalStateException(
+                        "execution claim returned a mismatched capability");
+                }
+                yield new ExecutionClaim.Acquired(writePermit(result));
+            }
+            default -> throw new IllegalStateException(
+                "unknown execution claim disposition");
+        };
     }
 
     public ExternalWritePermit renewExecution(
@@ -106,7 +115,9 @@ public final class JooqExternalIntentStore {
                 permit.requestReferenceType(), permit.requestReferenceId(),
                 permit.requestReferenceVersion(), permit.requestDigest(), extensionMicros),
             "execution renewal fence was lost");
-        return writePermit(renewed);
+        return renewedExecutionPermit(
+            permit, required(
+                renewed, "execution_lease_until", OffsetDateTime.class));
     }
 
     public void markExecutionOutcomeUnknown(
@@ -207,12 +218,22 @@ public final class JooqExternalIntentStore {
         if (result == null) {
             return new ReconciliationClaim.Missing();
         }
-        ExternalIntentState current = state(result);
-        if (current != ExternalIntentState.RECONCILING
-                || !candidateToken.equals(result.get("reconciliation_token", UUID.class))) {
-            return new ReconciliationClaim.NotReconcilable(current);
-        }
-        return new ReconciliationClaim.Acquired(reconciliationLease(result));
+        return switch (required(result, "disposition", String.class)) {
+            case "NOT_RECONCILABLE" ->
+                new ReconciliationClaim.NotReconcilable(state(result));
+            case "ACQUIRED" -> {
+                if (!candidateToken.equals(required(
+                        result, "reconciliation_token", UUID.class))
+                        || !owner.equals(required(
+                            result, "reconciliation_owner", String.class))) {
+                    throw new IllegalStateException(
+                        "reconciliation claim returned a mismatched capability");
+                }
+                yield new ReconciliationClaim.Acquired(reconciliationLease(result));
+            }
+            default -> throw new IllegalStateException(
+                "unknown reconciliation claim disposition");
+        };
     }
 
     public ReconciliationLease renewReconciliation(
@@ -233,7 +254,9 @@ public final class JooqExternalIntentStore {
                 lease.requestReferenceVersion(), lease.requestDigest(),
                 lease.providerRequestId(), extensionMicros),
             "reconciliation renewal fence was lost");
-        return reconciliationLease(renewed);
+        return renewedReconciliationLease(
+            lease, required(
+                renewed, "reconciliation_lease_until", OffsetDateTime.class));
     }
 
     public void markReconciliationOutcomeUnknown(
@@ -331,8 +354,7 @@ public final class JooqExternalIntentStore {
         Objects.requireNonNull(tenantId, "tenantId");
         Objects.requireNonNull(intentId, "intentId");
         Record row = tx.fetchOne("""
-            SELECT * FROM external_call_intent
-            WHERE tenant_id=? AND intent_id=?
+            SELECT * FROM accord_security.load_external_intent_snapshot(?,?)
             """, tenantId, intentId);
         return Optional.ofNullable(row).map(JooqExternalIntentStore::snapshot);
     }
@@ -420,6 +442,27 @@ public final class JooqExternalIntentStore {
             required(row, "request_reference_version", Long.class),
             required(row, "request_digest", String.class),
             row.get("provider_request_id", String.class));
+    }
+
+    private static ExternalWritePermit renewedExecutionPermit(
+            ExternalWritePermit permit, OffsetDateTime leaseUntil) {
+        return new ExternalWritePermit(
+            permit.tenantId(), permit.intentId(), permit.owner(), permit.generation(),
+            permit.token(), leaseUntil, permit.globalIdempotencyKey(), permit.provider(),
+            permit.providerInstallationId(), permit.providerRepositoryId(),
+            permit.operation(), permit.requestReferenceType(), permit.requestReferenceId(),
+            permit.requestReferenceVersion(), permit.requestDigest());
+    }
+
+    private static ReconciliationLease renewedReconciliationLease(
+            ReconciliationLease lease, OffsetDateTime leaseUntil) {
+        return new ReconciliationLease(
+            lease.tenantId(), lease.intentId(), lease.owner(), lease.generation(),
+            lease.token(), leaseUntil, lease.globalIdempotencyKey(), lease.provider(),
+            lease.providerInstallationId(), lease.providerRepositoryId(), lease.operation(),
+            lease.requestReferenceType(), lease.requestReferenceId(),
+            lease.requestReferenceVersion(), lease.requestDigest(),
+            lease.providerRequestId());
     }
 
     private static ExternalIntentSnapshot snapshot(Record row) {

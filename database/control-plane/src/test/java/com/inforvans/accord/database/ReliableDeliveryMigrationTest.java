@@ -34,6 +34,7 @@ class ReliableDeliveryMigrationTest {
         "expire_external_intent_reconciliation",
         "guard_external_intent_successor",
         "guard_external_intent_transition",
+        "load_external_intent_snapshot",
         "mark_external_intent_execution_unknown",
         "mark_external_intent_reconciliation_unknown",
         "record_external_intent",
@@ -163,12 +164,17 @@ class ReliableDeliveryMigrationTest {
                 ORDER BY 1
                 """)).containsExactly(
                     "accord_api:domain_event:SELECT",
-                    "accord_api:external_call_intent:SELECT",
                     "accord_api:outbox_event:SELECT",
                     "accord_worker:domain_event:SELECT",
-                    "accord_worker:external_call_intent:SELECT",
                     "accord_worker:inbox_message:SELECT",
                     "accord_worker:outbox_event:SELECT");
+            assertThat(number(statement, """
+                SELECT count(*)
+                FROM information_schema.column_privileges
+                WHERE table_schema='public'
+                  AND table_name='external_call_intent'
+                  AND grantee IN ('accord_api','accord_worker')
+                """)).isZero();
             assertThat(number(statement, """
                 SELECT count(*)
                 FROM information_schema.column_privileges
@@ -228,6 +234,7 @@ class ReliableDeliveryMigrationTest {
                     'expire_external_intent_reconciliation',
                     'guard_external_intent_successor',
                     'guard_external_intent_transition',
+                    'load_external_intent_snapshot',
                     'mark_external_intent_execution_unknown',
                     'mark_external_intent_reconciliation_unknown',
                     'record_external_intent','reject_reliability_row_change',
@@ -264,6 +271,7 @@ class ReliableDeliveryMigrationTest {
                     'expire_external_intent_reconciliation',
                     'guard_external_intent_successor',
                     'guard_external_intent_transition',
+                    'load_external_intent_snapshot',
                     'mark_external_intent_execution_unknown',
                     'mark_external_intent_reconciliation_unknown',
                     'record_external_intent','reject_reliability_row_change',
@@ -275,6 +283,7 @@ class ReliableDeliveryMigrationTest {
                 ORDER BY 1
                 """)).containsExactly(
                     "accord_api:append_reliable_event",
+                    "accord_api:load_external_intent_snapshot",
                     "accord_api:record_external_intent",
                     "accord_worker:accept_inbox_message",
                     "accord_worker:append_reliable_event",
@@ -285,10 +294,105 @@ class ReliableDeliveryMigrationTest {
                     "accord_worker:create_external_intent_successor",
                     "accord_worker:expire_external_intent_execution",
                     "accord_worker:expire_external_intent_reconciliation",
+                    "accord_worker:load_external_intent_snapshot",
                     "accord_worker:mark_external_intent_execution_unknown",
                     "accord_worker:mark_external_intent_reconciliation_unknown",
                     "accord_worker:renew_external_intent_execution",
                     "accord_worker:renew_external_intent_reconciliation");
+
+            assertThat(number(statement, """
+                SELECT count(*)
+                FROM pg_catalog.pg_proc procedure
+                JOIN pg_catalog.pg_namespace namespace
+                  ON namespace.oid=procedure.pronamespace
+                WHERE namespace.nspname='accord_security'
+                  AND procedure.proname IN (
+                    'claim_external_intent_execution',
+                    'claim_external_intent_reconciliation',
+                    'renew_external_intent_execution',
+                    'renew_external_intent_reconciliation')
+                  AND pg_catalog.pg_get_function_result(procedure.oid)
+                    LIKE 'SETOF %external_call_intent%'
+                """)).isZero();
+
+            assertThat(functionOutputColumns(statement, """
+                'create_external_intent_successor',
+                'load_external_intent_snapshot',
+                'record_external_intent'
+                """)).containsExactly(
+                    "create_external_intent_successor:result_tenant_id",
+                    "create_external_intent_successor:result_intent_id",
+                    "create_external_intent_successor:result_root_intent_id",
+                    "create_external_intent_successor:result_attempt_ordinal",
+                    "create_external_intent_successor:result_global_idempotency_key",
+                    "create_external_intent_successor:result_state",
+                    "load_external_intent_snapshot:tenant_id",
+                    "load_external_intent_snapshot:intent_id",
+                    "load_external_intent_snapshot:root_intent_id",
+                    "load_external_intent_snapshot:predecessor_intent_id",
+                    "load_external_intent_snapshot:attempt_ordinal",
+                    "load_external_intent_snapshot:logical_action_key",
+                    "load_external_intent_snapshot:global_idempotency_key",
+                    "load_external_intent_snapshot:state",
+                    "load_external_intent_snapshot:execution_generation",
+                    "load_external_intent_snapshot:reconciliation_generation",
+                    "load_external_intent_snapshot:provider_request_id",
+                    "load_external_intent_snapshot:outcome_digest",
+                    "load_external_intent_snapshot:last_error_code",
+                    "load_external_intent_snapshot:created_at",
+                    "load_external_intent_snapshot:updated_at",
+                    "load_external_intent_snapshot:terminal_at",
+                    "record_external_intent:disposition",
+                    "record_external_intent:result_tenant_id",
+                    "record_external_intent:result_intent_id",
+                    "record_external_intent:result_root_intent_id",
+                    "record_external_intent:result_attempt_ordinal",
+                    "record_external_intent:result_global_idempotency_key",
+                    "record_external_intent:result_state");
+
+            assertThat(functionOutputColumns(statement, """
+                'claim_external_intent_execution',
+                'claim_external_intent_reconciliation',
+                'renew_external_intent_execution',
+                'renew_external_intent_reconciliation'
+                """)).containsExactly(
+                    "claim_external_intent_execution:disposition",
+                    "claim_external_intent_execution:state",
+                    "claim_external_intent_execution:tenant_id",
+                    "claim_external_intent_execution:intent_id",
+                    "claim_external_intent_execution:execution_owner",
+                    "claim_external_intent_execution:execution_generation",
+                    "claim_external_intent_execution:execution_token",
+                    "claim_external_intent_execution:execution_lease_until",
+                    "claim_external_intent_execution:global_idempotency_key",
+                    "claim_external_intent_execution:provider",
+                    "claim_external_intent_execution:provider_installation_id",
+                    "claim_external_intent_execution:provider_repository_id",
+                    "claim_external_intent_execution:operation",
+                    "claim_external_intent_execution:request_reference_type",
+                    "claim_external_intent_execution:request_reference_id",
+                    "claim_external_intent_execution:request_reference_version",
+                    "claim_external_intent_execution:request_digest",
+                    "claim_external_intent_reconciliation:disposition",
+                    "claim_external_intent_reconciliation:state",
+                    "claim_external_intent_reconciliation:tenant_id",
+                    "claim_external_intent_reconciliation:intent_id",
+                    "claim_external_intent_reconciliation:reconciliation_owner",
+                    "claim_external_intent_reconciliation:reconciliation_generation",
+                    "claim_external_intent_reconciliation:reconciliation_token",
+                    "claim_external_intent_reconciliation:reconciliation_lease_until",
+                    "claim_external_intent_reconciliation:global_idempotency_key",
+                    "claim_external_intent_reconciliation:provider",
+                    "claim_external_intent_reconciliation:provider_installation_id",
+                    "claim_external_intent_reconciliation:provider_repository_id",
+                    "claim_external_intent_reconciliation:operation",
+                    "claim_external_intent_reconciliation:request_reference_type",
+                    "claim_external_intent_reconciliation:request_reference_id",
+                    "claim_external_intent_reconciliation:request_reference_version",
+                    "claim_external_intent_reconciliation:request_digest",
+                    "claim_external_intent_reconciliation:provider_request_id",
+                    "renew_external_intent_execution:execution_lease_until",
+                    "renew_external_intent_reconciliation:reconciliation_lease_until");
         }
     }
 
@@ -336,6 +440,21 @@ class ReliableDeliveryMigrationTest {
             tenantId,
             "UPDATE public.external_call_intent SET state='SUCCEEDED' "
                 + "WHERE tenant_id='%s'".formatted(tenantId),
+            "42501");
+        assertRuntimeSqlState(
+            ControlPlaneTestRoles.API_LOGIN,
+            ControlPlaneTestRoles.API_PASSWORD,
+            "accord_api",
+            tenantId,
+            "SELECT intent_id FROM public.external_call_intent",
+            "42501");
+        assertRuntimeSqlState(
+            ControlPlaneTestRoles.WORKER_LOGIN,
+            ControlPlaneTestRoles.WORKER_PASSWORD,
+            "accord_worker",
+            tenantId,
+            "SELECT execution_owner,execution_token,execution_lease_until "
+                + "FROM public.external_call_intent",
             "42501");
     }
 
@@ -602,6 +721,22 @@ class ReliableDeliveryMigrationTest {
         try (ResultSet rows = statement.executeQuery(sql)) {
             return readStrings(rows);
         }
+    }
+
+    private static List<String> functionOutputColumns(
+            Statement statement, String functionNames) throws Exception {
+        return strings(statement, """
+            SELECT procedure.proname || ':' || procedure.proargnames[argument.ordinal]
+            FROM pg_catalog.pg_proc procedure
+            JOIN pg_catalog.pg_namespace namespace
+              ON namespace.oid=procedure.pronamespace
+            CROSS JOIN LATERAL pg_catalog.generate_subscripts(
+              procedure.proargnames,1) argument(ordinal)
+            WHERE namespace.nspname='accord_security'
+              AND procedure.proname IN (%s)
+              AND procedure.proargmodes[argument.ordinal] IN ('o','t')
+            ORDER BY procedure.proname,argument.ordinal
+            """.formatted(functionNames));
     }
 
     private static List<String> readStrings(ResultSet rows) throws Exception {

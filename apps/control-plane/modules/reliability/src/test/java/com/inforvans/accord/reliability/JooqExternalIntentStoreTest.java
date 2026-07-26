@@ -4,12 +4,14 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.sql.Connection;
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -17,6 +19,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.jooq.DSLContext;
+import org.jooq.Record;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
@@ -73,6 +76,194 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
     }
 
     @Test
+    void losingExecutionClaimReturnsNoExistingCapabilityOrProviderBinding()
+            throws Exception {
+        ExternalIntentRef intent = record("action-execution-loser-001");
+        acquire(intent, "execution-holder", LEASE);
+        Record rawLoser = inWorker(TENANT_ID, tx -> tx.fetchOne("""
+            SELECT * FROM accord_security.claim_external_intent_execution(
+              ?,?,?,?,?)
+            """, TENANT_ID, intent.intentId(), "execution-loser",
+            1_000_000L, UUID.randomUUID()));
+        assertEquals(Set.of(
+            "disposition", "state", "tenant_id", "intent_id",
+            "execution_owner", "execution_generation", "execution_token",
+            "execution_lease_until", "global_idempotency_key", "provider",
+            "provider_installation_id", "provider_repository_id", "operation",
+            "request_reference_type", "request_reference_id",
+            "request_reference_version", "request_digest"), fieldNames(rawLoser));
+        assertEquals("NOT_EXECUTABLE", rawLoser.get("disposition", String.class));
+        assertEquals("EXECUTING", rawLoser.get("state", String.class));
+        assertNullFields(rawLoser,
+            "tenant_id", "intent_id", "execution_owner", "execution_generation",
+            "execution_token", "execution_lease_until", "global_idempotency_key",
+            "provider", "provider_installation_id", "provider_repository_id",
+            "operation", "request_reference_type", "request_reference_id",
+            "request_reference_version", "request_digest");
+
+        ExecutionClaim javaLoser = inWorker(TENANT_ID, tx -> store.claimExecution(
+            tx, TENANT_ID, intent.intentId(), "execution-java-loser", LEASE));
+        assertEquals(
+            ExternalIntentState.EXECUTING,
+            assertInstanceOf(ExecutionClaim.NotExecutable.class, javaLoser).state());
+    }
+
+    @Test
+    void losingReconciliationClaimReturnsNoExistingCapabilityOrProviderBinding()
+            throws Exception {
+        ExternalIntentRef intent = record("action-reconcile-loser-001");
+        beginReconciliation(intent, "reconciliation-holder", LEASE);
+        Record rawLoser = inWorker(TENANT_ID, tx -> tx.fetchOne("""
+            SELECT * FROM accord_security.claim_external_intent_reconciliation(
+              ?,?,?,?,?)
+            """, TENANT_ID, intent.intentId(), "reconciliation-loser",
+            1_000_000L, UUID.randomUUID()));
+        assertEquals(Set.of(
+            "disposition", "state", "tenant_id", "intent_id",
+            "reconciliation_owner", "reconciliation_generation",
+            "reconciliation_token", "reconciliation_lease_until",
+            "global_idempotency_key", "provider", "provider_installation_id",
+            "provider_repository_id", "operation", "request_reference_type",
+            "request_reference_id", "request_reference_version", "request_digest",
+            "provider_request_id"), fieldNames(rawLoser));
+        assertEquals("NOT_RECONCILABLE", rawLoser.get("disposition", String.class));
+        assertEquals("RECONCILING", rawLoser.get("state", String.class));
+        assertNullFields(rawLoser,
+            "tenant_id", "intent_id", "reconciliation_owner",
+            "reconciliation_generation", "reconciliation_token",
+            "reconciliation_lease_until", "global_idempotency_key", "provider",
+            "provider_installation_id", "provider_repository_id", "operation",
+            "request_reference_type", "request_reference_id",
+            "request_reference_version", "request_digest", "provider_request_id");
+
+        ReconciliationClaim javaLoser = inWorker(TENANT_ID, tx ->
+            store.claimReconciliation(
+                tx, TENANT_ID, intent.intentId(), "reconciliation-java-loser", LEASE));
+        assertEquals(
+            ExternalIntentState.RECONCILING,
+            assertInstanceOf(
+                ReconciliationClaim.NotReconcilable.class, javaLoser).state());
+    }
+
+    @Test
+    void runtimeRolesCannotSelectIntentRowsAndLoadOnlySafeSnapshots() throws Exception {
+        ExternalIntentRef intent = record("action-safe-snapshot-0001");
+        acquire(intent, "snapshot-holder", LEASE);
+        assertThrows(org.jooq.exception.DataAccessException.class, () ->
+            inApi(TENANT_ID, tx -> tx.fetchOne("""
+                SELECT intent_id FROM external_call_intent WHERE intent_id=?
+                """, intent.intentId())));
+        assertThrows(org.jooq.exception.DataAccessException.class, () ->
+            inWorker(TENANT_ID, tx -> tx.fetchOne("""
+                SELECT execution_owner,execution_token,execution_lease_until
+                FROM external_call_intent WHERE intent_id=?
+                """, intent.intentId())));
+
+        ExternalIntentSnapshot apiSnapshot = inApi(TENANT_ID, tx ->
+            store.load(tx, TENANT_ID, intent.intentId()).orElseThrow());
+        ExternalIntentSnapshot workerSnapshot = inWorker(TENANT_ID, tx ->
+            store.load(tx, TENANT_ID, intent.intentId()).orElseThrow());
+        assertEquals(apiSnapshot, workerSnapshot);
+        assertEquals(ExternalIntentState.EXECUTING, apiSnapshot.state());
+        assertEquals(Set.of(
+            "tenantId", "intentId", "rootIntentId", "predecessorIntentId",
+            "attemptOrdinal", "logicalActionKey", "globalIdempotencyKey", "state",
+            "executionGeneration", "reconciliationGeneration", "providerRequestId",
+            "outcomeDigest", "lastErrorCode", "createdAt", "updatedAt", "terminalAt"),
+            recordComponentNames(ExternalIntentSnapshot.class));
+    }
+
+    @Test
+    void apiDuplicateRegistrationOfExecutingRootReturnsOnlySafeReference()
+            throws Exception {
+        ExternalIntentDefinition definition = definition(
+            "action-api-duplicate-0001", digest('a'));
+        ExternalIntentRef intent = assertInstanceOf(
+            ExternalIntentRegistration.Created.class,
+            inApi(TENANT_ID, tx -> store.record(tx, definition))).intent();
+        acquire(intent, "duplicate-holder", LEASE);
+        ExternalIntentRef duplicate = assertInstanceOf(
+            ExternalIntentRegistration.Duplicate.class,
+            inApi(TENANT_ID, tx -> store.record(tx, definition))).intent();
+        assertEquals(ExternalIntentState.EXECUTING, duplicate.state());
+        assertEquals(Set.of(
+            "tenantId", "intentId", "rootIntentId", "attemptOrdinal",
+            "globalIdempotencyKey", "state"),
+            recordComponentNames(ExternalIntentRef.class));
+    }
+
+    @Test
+    void losingWorkerCannotReadOrForgeExecutionCompletion() throws Exception {
+        ExternalIntentRef intent = record("action-execution-forgery-01");
+        ExternalWritePermit holder = acquire(intent, "execution-owner", LEASE);
+        assertInstanceOf(
+            ExecutionClaim.NotExecutable.class,
+            inWorker(TENANT_ID, tx -> store.claimExecution(
+                tx, TENANT_ID, intent.intentId(), "execution-attacker", LEASE)));
+        assertThrows(org.jooq.exception.DataAccessException.class, () ->
+            inWorker(TENANT_ID, tx -> tx.fetchOne("""
+                SELECT execution_owner,execution_generation,execution_token,
+                       execution_lease_until
+                FROM external_call_intent WHERE intent_id=?
+                """, intent.intentId())));
+
+        ExternalWritePermit forged = new ExternalWritePermit(
+            holder.tenantId(), holder.intentId(), "execution-attacker",
+            holder.generation(), UUID.randomUUID(), holder.leaseUntil(),
+            holder.globalIdempotencyKey(), holder.provider(),
+            holder.providerInstallationId(), holder.providerRepositoryId(),
+            holder.operation(), holder.requestReferenceType(), holder.requestReferenceId(),
+            holder.requestReferenceVersion(), holder.requestDigest());
+        assertThrows(LostExternalIntentFence.class, () -> inWorker(TENANT_ID, tx -> {
+            store.completeExecution(
+                tx, forged, new ExecutionResolution.Succeeded(digest('8'), null),
+                terminalEvent(intent, 1), outbox());
+            return null;
+        }));
+        assertEquals(ExternalIntentState.EXECUTING, inWorker(TENANT_ID, tx ->
+            store.load(tx, TENANT_ID, intent.intentId()).orElseThrow().state()));
+        assertEquals(0, count("domain_event"));
+        assertEquals(0, count("outbox_event"));
+    }
+
+    @Test
+    void losingWorkerCannotReadOrForgeReconciliationCompletion() throws Exception {
+        ExternalIntentRef intent = record("action-reconcile-forgery-01");
+        ReconciliationLease holder = beginReconciliation(
+            intent, "reconciliation-owner", LEASE);
+        assertInstanceOf(
+            ReconciliationClaim.NotReconcilable.class,
+            inWorker(TENANT_ID, tx -> store.claimReconciliation(
+                tx, TENANT_ID, intent.intentId(), "reconciliation-attacker", LEASE)));
+        assertThrows(org.jooq.exception.DataAccessException.class, () ->
+            inWorker(TENANT_ID, tx -> tx.fetchOne("""
+                SELECT reconciliation_owner,reconciliation_generation,
+                       reconciliation_token,reconciliation_lease_until
+                FROM external_call_intent WHERE intent_id=?
+                """, intent.intentId())));
+
+        ReconciliationLease forged = new ReconciliationLease(
+            holder.tenantId(), holder.intentId(), "reconciliation-attacker",
+            holder.generation(), UUID.randomUUID(), holder.leaseUntil(),
+            holder.globalIdempotencyKey(), holder.provider(),
+            holder.providerInstallationId(), holder.providerRepositoryId(),
+            holder.operation(), holder.requestReferenceType(), holder.requestReferenceId(),
+            holder.requestReferenceVersion(), holder.requestDigest(),
+            holder.providerRequestId());
+        assertThrows(LostExternalIntentFence.class, () -> inWorker(TENANT_ID, tx -> {
+            store.completeReconciliation(
+                tx, forged,
+                new ReconciliationResolution.ConfirmedNoEffect(digest('9'), null),
+                terminalEvent(intent, 1), outbox());
+            return null;
+        }));
+        assertEquals(ExternalIntentState.RECONCILING, inWorker(TENANT_ID, tx ->
+            store.load(tx, TENANT_ID, intent.intentId()).orElseThrow().state()));
+        assertEquals(0, count("domain_event"));
+        assertEquals(0, count("outbox_event"));
+    }
+
+    @Test
     void workerCannotFinishActiveExecutionByPrimaryKeyWithoutCapability() throws Exception {
         ExternalIntentRef intent = record("action-raw-finish-0001");
         acquire(intent, "worker-capability-owner", LEASE);
@@ -106,13 +297,15 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
                     """, TENANT_ID, intent.intentId());
                 return null;
             }));
-        assertEquals(
-            permit.leaseUntil(),
+        assertThrows(org.jooq.exception.DataAccessException.class, () ->
             inWorker(TENANT_ID, tx -> tx.fetchOne("""
                 SELECT execution_lease_until FROM external_call_intent
                 WHERE tenant_id=? AND intent_id=?
-                """, TENANT_ID, intent.intentId())
-                .get("execution_lease_until", OffsetDateTime.class)));
+                """, TENANT_ID, intent.intentId())));
+        assertEquals(
+            ExternalIntentState.EXECUTING,
+            inWorker(TENANT_ID, tx ->
+                store.load(tx, TENANT_ID, intent.intentId()).orElseThrow().state()));
     }
 
     @Test
@@ -858,6 +1051,24 @@ class JooqExternalIntentStoreTest extends PostgreSqlReliabilityTestSupport {
             "work-item-1",
             1,
             requestDigest);
+    }
+
+    private static Set<String> fieldNames(Record row) {
+        return java.util.Arrays.stream(row.fields())
+            .map(org.jooq.Field::getName)
+            .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
+
+    private static Set<String> recordComponentNames(Class<?> recordType) {
+        return java.util.Arrays.stream(recordType.getRecordComponents())
+            .map(java.lang.reflect.RecordComponent::getName)
+            .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
+
+    private static void assertNullFields(Record row, String... names) {
+        for (String name : names) {
+            assertNull(row.get(name), name + " must not disclose an existing capability");
+        }
     }
 
     private static DomainEvent event(long sequence) {
