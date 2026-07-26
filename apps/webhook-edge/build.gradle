@@ -1,9 +1,1920 @@
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
+import java.security.MessageDigest
+import java.time.Duration
+import java.util.HexFormat
+import java.util.function.LongSupplier
+import java.util.jar.Manifest
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
+import javax.inject.Inject
+import org.gradle.api.DefaultTask
+import org.gradle.api.artifacts.FileCollectionDependency
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.file.ConfigurableFileCollection
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.provider.ListProperty
+import org.gradle.api.provider.Property
+import org.gradle.api.tasks.Classpath
+import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.InputFiles
+import org.gradle.api.tasks.Internal
+import org.gradle.api.tasks.LocalState
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
+import org.gradle.api.tasks.TaskAction
+import org.gradle.process.CommandLineArgumentProvider
+import org.gradle.process.ExecOperations
+
+abstract class VerifyProviderWebhookSignalSchema extends DefaultTask {
+    @InputFile
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract RegularFileProperty getSchemaFile()
+
+    @InputFile
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract RegularFileProperty getGoldenFile()
+
+    @InputFile
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract RegularFileProperty getPackageFile()
+
+    @InputFile
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract RegularFileProperty getPnpmLockFile()
+
+    @Input
+    abstract Property<String> getCorepackExecutable()
+
+    @Internal
+    abstract DirectoryProperty getRepositoryDirectory()
+
+    @LocalState
+    abstract DirectoryProperty getNegativeDirectory()
+
+    @Inject
+    abstract ExecOperations getExecOperations()
+
+    @TaskAction
+    void verifySchema() {
+        File golden = goldenFile.get().asFile
+        def positive = runAjv(golden)
+        if (positive[0] != 0) {
+            throw new GradleException('Golden provider webhook signal failed AJV validation')
+        }
+
+        File negativeRoot = negativeDirectory.get().asFile
+        if (!negativeRoot.isDirectory() && !negativeRoot.mkdirs()) {
+            throw new GradleException('Cannot create provider webhook signal verification directory')
+        }
+        def goldenDocument = (Map) new groovy.json.JsonSlurper().parse(golden)
+        def forbiddenValues = [
+            url: 'https://forbidden.invalid/private',
+            commits: [[message: 'forbidden']],
+            message: 'forbidden',
+            token: 'forbidden',
+            headers: [authorization: 'forbidden'],
+            raw_body: 'forbidden'
+        ]
+        for (def entry : forbiddenValues.entrySet()) {
+            String field = entry.key
+            Object value = entry.value
+            def negativeDocument = new LinkedHashMap(goldenDocument)
+            negativeDocument[field] = value
+            File negative = new File(negativeRoot, "${field}.json")
+            negative.setText(
+                    groovy.json.JsonOutput.prettyPrint(
+                            groovy.json.JsonOutput.toJson(negativeDocument)) + '\n',
+                    'UTF-8')
+            def result = runAjv(negative)
+            if (result[0] == 0 || !result[1].contains('additionalProperties')) {
+                throw new GradleException(
+                        "AJV did not reject forbidden provider webhook signal field: ${field}")
+            }
+        }
+    }
+
+    private List<Object> runAjv(File data) {
+        def output = new ByteArrayOutputStream()
+        def result = execOperations.exec { spec ->
+            spec.workingDir(repositoryDirectory.get().asFile)
+            spec.commandLine([
+                corepackExecutable.get(),
+                'pnpm',
+                'exec',
+                'ajv',
+                'validate',
+                '--spec=draft2020',
+                '-c',
+                'ajv-formats',
+                '-s',
+                schemaFile.get().asFile.absolutePath,
+                '-d',
+                data.absolutePath
+            ])
+            spec.ignoreExitValue = true
+            spec.standardOutput = output
+            spec.errorOutput = output
+        }
+        [result.exitValue, output.toString('UTF-8')]
+    }
+}
+
+final class WebhookEdgeArchiveLimits {
+    final long maxOuterBytes
+    final int maxOuterEntries
+    final int maxArchives
+    final long maxLibraryBytes
+    final long maxTotalLibraryBytes
+    final int maxArchiveEntries
+    final int maxTotalEntries
+    final int maxEntryNameBytes
+    final long maxExpandedEntryBytes
+    final long maxExpandedArchiveBytes
+    final long maxTotalExpandedBytes
+    final int maxDepth
+    final int maxViolations
+    final long maxElapsedNanos
+
+    WebhookEdgeArchiveLimits(
+            long maxOuterBytes,
+            int maxOuterEntries,
+            int maxArchives,
+            long maxLibraryBytes,
+            long maxTotalLibraryBytes,
+            int maxArchiveEntries,
+            int maxTotalEntries,
+            int maxEntryNameBytes,
+            long maxExpandedEntryBytes,
+            long maxExpandedArchiveBytes,
+            long maxTotalExpandedBytes,
+            int maxDepth,
+            int maxViolations,
+            long maxElapsedNanos) {
+        this.maxOuterBytes = maxOuterBytes
+        this.maxOuterEntries = maxOuterEntries
+        this.maxArchives = maxArchives
+        this.maxLibraryBytes = maxLibraryBytes
+        this.maxTotalLibraryBytes = maxTotalLibraryBytes
+        this.maxArchiveEntries = maxArchiveEntries
+        this.maxTotalEntries = maxTotalEntries
+        this.maxEntryNameBytes = maxEntryNameBytes
+        this.maxExpandedEntryBytes = maxExpandedEntryBytes
+        this.maxExpandedArchiveBytes = maxExpandedArchiveBytes
+        this.maxTotalExpandedBytes = maxTotalExpandedBytes
+        this.maxDepth = maxDepth
+        this.maxViolations = maxViolations
+        this.maxElapsedNanos = maxElapsedNanos
+    }
+
+    static WebhookEdgeArchiveLimits production() {
+        new WebhookEdgeArchiveLimits(
+                64L * 1_024 * 1_024,
+                1_024,
+                128,
+                8L * 1_024 * 1_024,
+                64L * 1_024 * 1_024,
+                4_096,
+                32_768,
+                512,
+                4L * 1_024 * 1_024,
+                32L * 1_024 * 1_024,
+                128L * 1_024 * 1_024,
+                2,
+                1,
+                Duration.ofSeconds(30).toNanos())
+    }
+}
+
+final class WebhookEdgeExpectedEntry {
+    final long bytes
+    final String sha256
+
+    WebhookEdgeExpectedEntry(long bytes, String sha256) {
+        if (bytes < 0 || sha256 == null || !(sha256 ==~ /[0-9a-f]{64}/)) {
+            throw new IllegalArgumentException('invalid expected archive entry metadata')
+        }
+        this.bytes = bytes
+        this.sha256 = sha256
+    }
+}
+
+final class WebhookEdgeArtifactVerifier {
+    private static final LongSupplier SYSTEM_NANO_TIME = { System.nanoTime() } as LongSupplier
+    private static final String APPLICATION_CLASSES_ROOT = 'BOOT-INF/classes/'
+    private static final String APPLICATION_PACKAGE_ROOT =
+            'BOOT-INF/classes/com/inforvans/accord/webhookedge/'
+    private static final String APPLICATION_CONFIGURATION = 'BOOT-INF/classes/application.yml'
+    private static final String EXPECTED_START_CLASS =
+            'com.inforvans.accord.webhookedge.WebhookEdgeApplication'
+    private static final String EXPECTED_MAIN_CLASS =
+            'org.springframework.boot.loader.launch.JarLauncher'
+    private static final List<String> FORBIDDEN_MANIFEST_ATTRIBUTES = [
+        'Class-Path',
+        'Premain-Class',
+        'Agent-Class',
+        'Launcher-Agent-Class'
+    ]
+    private static final List<String> FORBIDDEN_OUTER_PACKAGE_PATHS = [
+        'com/inforvans/accord/controlplane/',
+        'com/inforvans/accord/reliability/',
+        'com/inforvans/accord/database/',
+        'org/eclipse/jgit/',
+        'org/gitlab4j/',
+        'org/kohsuke/github/'
+    ]
+    private static final List<String> FORBIDDEN_NESTED_PACKAGE_PATHS = [
+        'com/inforvans/accord/',
+        'org/eclipse/jgit/',
+        'org/gitlab4j/',
+        'org/kohsuke/github/'
+    ]
+    private static final List<String> FORBIDDEN_OUTER_FRAGMENTS = [
+        'control-plane',
+        'platform-kernel',
+        'reliability-',
+        'jgit-',
+        'gitlab4j-',
+        'github-api-',
+        'raw-body',
+        'raw_body'
+    ]
+    private static final List<String> REQUIRED_ENTRIES = [
+        APPLICATION_CONFIGURATION,
+        'BOOT-INF/classes/com/inforvans/accord/webhookedge/WebhookEdgeApplication.class',
+        'BOOT-INF/classes/com/inforvans/accord/webhookedge/webhook/WebhookHandler.class'
+    ]
+
+    static void verify(
+            File artifact,
+            File scratchDirectory,
+            Map<String, WebhookEdgeExpectedEntry> expectedApplicationEntries,
+            Map<String, WebhookEdgeExpectedEntry> expectedLoaderEntries,
+            WebhookEdgeArchiveLimits limits = WebhookEdgeArchiveLimits.production()) {
+        verify(
+                artifact,
+                scratchDirectory,
+                expectedApplicationEntries,
+                expectedLoaderEntries,
+                limits,
+                SYSTEM_NANO_TIME)
+    }
+
+    static void verify(
+            File artifact,
+            File scratchDirectory,
+            Map<String, WebhookEdgeExpectedEntry> expectedApplicationEntries,
+            Map<String, WebhookEdgeExpectedEntry> expectedLoaderEntries,
+            WebhookEdgeArchiveLimits limits,
+            LongSupplier nanoTime) {
+        ScanState state = new ScanState(scratchDirectory.toPath(), limits, nanoTime)
+        state.checkElapsed()
+        if (!artifact.isFile()) {
+            state.failBoundary('artifact is not a regular file')
+        }
+        if (artifact.length() > limits.maxOuterBytes) {
+            state.failBoundary("outer archive byte budget exceeded: ${artifact.length()}")
+        }
+        Files.createDirectories(scratchDirectory.toPath())
+
+        Set<String> entries = new LinkedHashSet<>()
+        Set<String> applicationEntries = new LinkedHashSet<>()
+        Set<String> loaderEntries = new LinkedHashSet<>()
+        state.checkElapsed()
+        ZipFile jar
+        try {
+            jar = new ZipFile(artifact)
+        } catch (IOException exception) {
+            state.failBoundary('outer artifact is not a valid ZIP archive')
+            return
+        }
+        try {
+            def jarEntries = jar.entries()
+            while (jarEntries.hasMoreElements()) {
+                state.checkElapsed()
+                def entry = jarEntries.nextElement()
+                String name = entry.name
+                validateEntryName(name, 'outer archive', state, limits)
+                if (!entries.add(name)) {
+                    state.failBoundary("duplicate entry: ${name}")
+                }
+                state.outerEntries++
+                if (state.outerEntries > limits.maxOuterEntries) {
+                    state.failBoundary("outer entry budget exceeded at ${name}")
+                }
+                if (entry.directory) {
+                    continue
+                }
+                if (containsAny(name, FORBIDDEN_OUTER_FRAGMENTS)
+                        || containsAny(name, FORBIDDEN_OUTER_PACKAGE_PATHS)) {
+                    state.failBoundary("forbidden outer entry: ${name}")
+                }
+                if (name.startsWith(APPLICATION_CLASSES_ROOT)) {
+                    if (name.endsWith('.class')) {
+                        if (!name.startsWith(APPLICATION_PACKAGE_ROOT)) {
+                            state.failBoundary("unexpected application class: ${name}")
+                        }
+                    } else if (name != APPLICATION_CONFIGURATION) {
+                        state.failBoundary("unexpected application entry: ${name}")
+                    }
+                    verifyExpectedOuterEntry(
+                            jar,
+                            entry,
+                            expectedApplicationEntries,
+                            'application output',
+                            state)
+                    applicationEntries.add(name)
+                }
+                if (isEmittedLoaderEntry(name) && !name.startsWith(APPLICATION_CLASSES_ROOT)) {
+                    if (name.endsWith('.class')
+                            && (!name.startsWith('org/springframework/boot/loader/')
+                            || name.toLowerCase(Locale.ROOT).contains('agent'))) {
+                        state.failBoundary("unexpected root class: ${name}")
+                    }
+                    verifyExpectedOuterEntry(
+                            jar,
+                            entry,
+                            expectedLoaderEntries,
+                            'Boot loader',
+                            state)
+                    loaderEntries.add(name)
+                }
+                if (name.startsWith('BOOT-INF/lib/')) {
+                    copyAndScanLibrary(jar, entry, state, limits)
+                }
+            }
+
+            def manifestEntry = jar.getEntry('META-INF/MANIFEST.MF')
+            if (manifestEntry == null) {
+                state.failBoundary('missing META-INF/MANIFEST.MF')
+            } else {
+                state.checkElapsed()
+                InputStream manifestInput = jar.getInputStream(manifestEntry)
+                try {
+                    Manifest manifest = new Manifest(manifestInput)
+                    String mainClass = manifest.mainAttributes.getValue('Main-Class')
+                    if (mainClass != EXPECTED_MAIN_CLASS) {
+                        state.failBoundary(
+                                "Manifest Main-Class must be ${EXPECTED_MAIN_CLASS}, was ${mainClass}")
+                    }
+                    String startClass = manifest.mainAttributes.getValue('Start-Class')
+                    if (startClass != EXPECTED_START_CLASS) {
+                        state.failBoundary(
+                                "Manifest Start-Class must be ${EXPECTED_START_CLASS}, was ${startClass}")
+                    }
+                    for (String attribute : FORBIDDEN_MANIFEST_ATTRIBUTES) {
+                        if (manifest.mainAttributes.getValue(attribute) != null) {
+                            state.failBoundary("Manifest ${attribute} is forbidden")
+                        }
+                    }
+                } finally {
+                    manifestInput.close()
+                }
+            }
+        } finally {
+            jar.close()
+        }
+
+        for (String required : REQUIRED_ENTRIES) {
+            state.checkElapsed()
+            if (!entries.contains(required)) {
+                state.failBoundary("missing required entry: ${required}")
+            }
+        }
+        if (applicationEntries != expectedApplicationEntries.keySet()) {
+            state.failBoundary(describeSetDifference(
+                    'application outputs', expectedApplicationEntries.keySet(), applicationEntries))
+        }
+        if (loaderEntries != expectedLoaderEntries.keySet()) {
+            state.failBoundary(describeSetDifference(
+                    'Boot loader entries', expectedLoaderEntries.keySet(), loaderEntries))
+        }
+        state.checkElapsed()
+    }
+
+    static Map<String, WebhookEdgeExpectedEntry> expectedApplicationEntries(
+            Set<File> outputDirectories) {
+        WebhookEdgeArchiveLimits limits = WebhookEdgeArchiveLimits.production()
+        long startedAtNanos = System.nanoTime()
+        int[] walkedEntries = [0]
+        long[] totalBytes = [0L]
+        Map<String, WebhookEdgeExpectedEntry> expected = new LinkedHashMap<>()
+        for (File directory : outputDirectories.toList().sort { left, right ->
+            left.path <=> right.path
+        }) {
+            if (!directory.exists()) {
+                continue
+            }
+            if (!directory.isDirectory()) {
+                failBoundary("application output input is not a directory: ${directory.name}")
+            }
+            def paths = Files.walk(directory.toPath())
+            try {
+                paths.forEach { path ->
+                    checkExpectedElapsed(startedAtNanos, limits)
+                    walkedEntries[0]++
+                    if (walkedEntries[0] > limits.maxOuterEntries) {
+                        failBoundary('application output entry budget exceeded')
+                    }
+                    if (Files.isSymbolicLink(path)) {
+                        failBoundary('symbolic links are forbidden in application output')
+                    }
+                    if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                        return
+                    }
+                    String relative = directory.toPath().relativize(path).toString().replace('\\', '/')
+                    String packaged = APPLICATION_CLASSES_ROOT + relative
+                    validateApplicationOutputPath(packaged)
+                    if (expected.containsKey(packaged)) {
+                        failBoundary("duplicate application output: ${packaged}")
+                    }
+                    WebhookEdgeExpectedEntry entry = expectedEntry(
+                            path, limits.maxExpandedEntryBytes, startedAtNanos, limits)
+                    totalBytes[0] = checkedExpectedAdd(
+                            totalBytes[0],
+                            entry.bytes,
+                            limits.maxOuterBytes,
+                            'application output aggregate byte budget exceeded')
+                    expected[packaged] = entry
+                }
+            } finally {
+                paths.close()
+            }
+        }
+        if (expected.isEmpty()) {
+            failBoundary('application output is empty')
+        }
+        expected
+    }
+
+    static Map<String, byte[]> loaderReferenceContents(File loaderToolsJar) {
+        WebhookEdgeArchiveLimits limits = WebhookEdgeArchiveLimits.production()
+        long startedAtNanos = System.nanoTime()
+        if (!loaderToolsJar.isFile()
+                || loaderToolsJar.name != 'spring-boot-loader-tools-3.5.3.jar') {
+            failBoundary('Spring Boot loader tools input is not the fixed regular JAR')
+        }
+        byte[] loaderArchiveBytes
+        ZipFile loaderTools
+        try {
+            loaderTools = new ZipFile(loaderToolsJar)
+        } catch (IOException exception) {
+            failBoundary('Spring Boot loader tools input is not a valid ZIP archive')
+            return [:]
+        }
+        try {
+            Set<String> names = new LinkedHashSet<>()
+            java.util.zip.ZipEntry loaderArchiveEntry = null
+            int outerEntries = 0
+            def entries = loaderTools.entries()
+            while (entries.hasMoreElements()) {
+                checkExpectedElapsed(startedAtNanos, limits)
+                java.util.zip.ZipEntry entry = entries.nextElement()
+                outerEntries++
+                if (outerEntries > limits.maxOuterEntries) {
+                    failBoundary('Spring Boot loader tools entry budget exceeded')
+                }
+                if (!names.add(entry.name)) {
+                    failBoundary("duplicate Spring Boot loader tools entry: ${entry.name}")
+                }
+                if (entry.name == 'META-INF/loader/spring-boot-loader.jar') {
+                    if (entry.directory || loaderArchiveEntry != null) {
+                        failBoundary('Spring Boot loader reference archive must occur exactly once')
+                    }
+                    loaderArchiveEntry = entry
+                }
+            }
+            if (loaderArchiveEntry == null) {
+                failBoundary('Spring Boot loader reference archive is unavailable')
+            }
+            if (loaderArchiveEntry.size <= 0 || loaderArchiveEntry.size > limits.maxLibraryBytes) {
+                failBoundary('Spring Boot loader reference archive byte budget exceeded')
+            }
+            InputStream loaderArchiveInput = loaderTools.getInputStream(loaderArchiveEntry)
+            try {
+                loaderArchiveBytes = readBoundedBytes(
+                        loaderArchiveInput,
+                        limits.maxLibraryBytes,
+                        0,
+                        limits.maxLibraryBytes,
+                        startedAtNanos,
+                        limits,
+                        loaderArchiveEntry.name)
+            } finally {
+                loaderArchiveInput.close()
+            }
+            if (loaderArchiveBytes.length != loaderArchiveEntry.size) {
+                failBoundary('Spring Boot loader reference archive byte length mismatch')
+            }
+        } finally {
+            loaderTools.close()
+        }
+        Map<String, byte[]> contentsByName = new LinkedHashMap<>()
+        int entries = 0
+        long expandedBytes = 0
+        ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(loaderArchiveBytes))
+        try {
+            ZipEntry entry
+            while ((entry = zip.nextEntry) != null) {
+                checkExpectedElapsed(startedAtNanos, limits)
+                entries++
+                if (entries > limits.maxArchiveEntries) {
+                    failBoundary('Spring Boot loader reference entry budget exceeded')
+                }
+                if (entry.name == null || entry.name.isEmpty()
+                        || entry.name.getBytes(StandardCharsets.UTF_8).length > limits.maxEntryNameBytes) {
+                    failBoundary('Spring Boot loader reference entry name budget exceeded')
+                }
+                if (!entry.directory) {
+                    byte[] contents = readBoundedBytes(
+                            zip,
+                            limits.maxExpandedEntryBytes,
+                            expandedBytes,
+                            limits.maxExpandedArchiveBytes,
+                            startedAtNanos,
+                            limits,
+                            entry.name)
+                    expandedBytes = checkedExpectedAdd(
+                            expandedBytes,
+                            contents.length,
+                            limits.maxExpandedArchiveBytes,
+                            'Spring Boot loader reference expanded byte budget exceeded')
+                    if (!isEmittedLoaderEntry(entry.name)) {
+                        continue
+                    }
+                    if (entry.name.endsWith('.class')
+                            && (!entry.name.startsWith('org/springframework/boot/loader/')
+                            || entry.name.toLowerCase(Locale.ROOT).contains('agent'))) {
+                        failBoundary("unexpected Spring Boot loader reference class: ${entry.name}")
+                    }
+                    if (contentsByName.containsKey(entry.name)) {
+                        failBoundary("duplicate Spring Boot loader reference entry: ${entry.name}")
+                    }
+                    contentsByName[entry.name] = contents
+                }
+            }
+        } finally {
+            zip.close()
+        }
+        if (contentsByName.isEmpty()) {
+            failBoundary('Spring Boot loader reference contains no emitted entries')
+        }
+        contentsByName
+    }
+
+    static Map<String, WebhookEdgeExpectedEntry> expectedLoaderEntries(File loaderToolsJar) {
+        expectedEntries(loaderReferenceContents(loaderToolsJar))
+    }
+
+    static Map<String, WebhookEdgeExpectedEntry> expectedEntries(Map<String, byte[]> contents) {
+        Map<String, WebhookEdgeExpectedEntry> expected = new LinkedHashMap<>()
+        contents.toSorted().each { name, bytes ->
+            expected[name] = new WebhookEdgeExpectedEntry(bytes.length, sha256(bytes))
+        }
+        expected
+    }
+
+    private static void verifyExpectedOuterEntry(
+            ZipFile archive,
+            java.util.zip.ZipEntry entry,
+            Map<String, WebhookEdgeExpectedEntry> expectedEntries,
+            String label,
+            ScanState state) {
+        WebhookEdgeExpectedEntry expected = expectedEntries[entry.name]
+        if (expected == null) {
+            state.failBoundary("unexpected ${label} entry: ${entry.name}")
+        }
+        if (entry.size != expected.bytes) {
+            state.failBoundary("${label} entry byte length mismatch: ${entry.name}")
+        }
+        MessageDigest digest = sha256Digest()
+        long actualBytes = 0
+        InputStream input = archive.getInputStream(entry)
+        try {
+            byte[] buffer = new byte[8_192]
+            int count
+            while ((count = input.read(buffer)) != -1) {
+                state.checkElapsed()
+                if (count < 0 || actualBytes > expected.bytes - count) {
+                    state.failBoundary("${label} entry byte length mismatch: ${entry.name}")
+                }
+                actualBytes += count
+                digest.update(buffer, 0, count)
+            }
+        } finally {
+            input.close()
+        }
+        if (actualBytes != expected.bytes) {
+            state.failBoundary("${label} entry byte length mismatch: ${entry.name}")
+        }
+        if (HexFormat.of().formatHex(digest.digest()) != expected.sha256) {
+            state.failBoundary("${label} entry SHA-256 mismatch: ${entry.name}")
+        }
+    }
+
+    private static void validateApplicationOutputPath(String packaged) {
+        if (packaged.endsWith('.class')) {
+            if (!packaged.startsWith(APPLICATION_PACKAGE_ROOT)) {
+                failBoundary("unexpected application class output: ${packaged}")
+            }
+        } else if (packaged != APPLICATION_CONFIGURATION) {
+            failBoundary("unexpected application resource output: ${packaged}")
+        }
+    }
+
+    private static boolean isEmittedLoaderEntry(String name) {
+        name.endsWith('.class') || name.startsWith('META-INF/services/')
+    }
+
+    private static WebhookEdgeExpectedEntry expectedEntry(
+            Path path,
+            long maximumBytes,
+            long startedAtNanos,
+            WebhookEdgeArchiveLimits limits) {
+        long declaredBytes = Files.size(path)
+        if (declaredBytes < 0 || declaredBytes > maximumBytes) {
+            failBoundary("application output entry byte budget exceeded: ${path.fileName}")
+        }
+        MessageDigest digest = sha256Digest()
+        long bytes = 0
+        InputStream input = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)
+        try {
+            byte[] buffer = new byte[8_192]
+            int count
+            while ((count = input.read(buffer)) != -1) {
+                checkExpectedElapsed(startedAtNanos, limits)
+                bytes = checkedExpectedAdd(
+                        bytes,
+                        count,
+                        maximumBytes,
+                        "application output entry byte budget exceeded: ${path.fileName}")
+                digest.update(buffer, 0, count)
+            }
+        } finally {
+            input.close()
+        }
+        if (bytes != declaredBytes) {
+            failBoundary("application output byte length changed while reading: ${path.fileName}")
+        }
+        new WebhookEdgeExpectedEntry(bytes, HexFormat.of().formatHex(digest.digest()))
+    }
+
+    private static byte[] readBoundedBytes(
+            InputStream input,
+            long maximumEntryBytes,
+            long aggregateBytes,
+            long maximumAggregateBytes,
+            long startedAtNanos,
+            WebhookEdgeArchiveLimits limits,
+            String entryName) {
+        ByteArrayOutputStream output = new ByteArrayOutputStream()
+        long bytes = 0
+        byte[] buffer = new byte[8_192]
+        int count
+        while ((count = input.read(buffer)) != -1) {
+            checkExpectedElapsed(startedAtNanos, limits)
+            bytes = checkedExpectedAdd(
+                    bytes,
+                    count,
+                    maximumEntryBytes,
+                    "Spring Boot loader reference entry byte budget exceeded: ${entryName}")
+            checkedExpectedAdd(
+                    aggregateBytes,
+                    bytes,
+                    maximumAggregateBytes,
+                    'Spring Boot loader reference expanded byte budget exceeded')
+            output.write(buffer, 0, count)
+        }
+        output.toByteArray()
+    }
+
+    private static long checkedExpectedAdd(
+            long current, long increment, long maximum, String message) {
+        if (increment < 0 || current > maximum - increment) {
+            failBoundary(message)
+        }
+        current + increment
+    }
+
+    private static void checkExpectedElapsed(
+            long startedAtNanos, WebhookEdgeArchiveLimits limits) {
+        long elapsed = System.nanoTime() - startedAtNanos
+        if (elapsed < 0 || elapsed > limits.maxElapsedNanos) {
+            failBoundary('expected archive entry elapsed time budget exceeded')
+        }
+    }
+
+    private static String sha256(byte[] contents) {
+        HexFormat.of().formatHex(sha256Digest().digest(contents))
+    }
+
+    private static MessageDigest sha256Digest() {
+        MessageDigest.getInstance('SHA-256')
+    }
+
+    static void verifyRuntimeBoundary(List<String> runtimeArtifacts, Set<File> declaredFileDependencies) {
+        List<String> rejectedArtifacts = runtimeArtifacts.findAll { value -> value.startsWith('REJECTED|') }
+        if (!rejectedArtifacts.isEmpty()) {
+            failBoundary("non-module runtime artifacts are forbidden: ${rejectedArtifacts}")
+        }
+        if (!declaredFileDependencies.isEmpty()) {
+            List<String> descriptions = declaredFileDependencies.collect { file ->
+                String kind = file.isDirectory() ? 'directory' : (file.isFile() ? 'file' : 'missing')
+                "${kind}:${file.name}"
+            }.sort()
+            failBoundary("declared file dependencies are forbidden: ${descriptions}")
+        }
+    }
+
+    private static void copyAndScanLibrary(
+            ZipFile outer,
+            java.util.zip.ZipEntry library,
+            ScanState state,
+            WebhookEdgeArchiveLimits limits) {
+        state.checkElapsed()
+        if (library.size <= 0) {
+            state.failBoundary("${library.name}: empty nested archive")
+        }
+        if (library.size > limits.maxLibraryBytes) {
+            state.failBoundary("${library.name}: nested archive byte budget exceeded")
+        }
+        Path copy = state.nextScratchArchive()
+        long copied = 0
+        InputStream input = outer.getInputStream(library)
+        OutputStream output = Files.newOutputStream(copy)
+        try {
+            byte[] buffer = new byte[8_192]
+            int count
+            while ((count = input.read(buffer)) != -1) {
+                state.checkElapsed()
+                copied = checkedAdd(state, copied, count, limits.maxLibraryBytes,
+                        "${library.name}: nested archive byte budget exceeded")
+                state.libraryBytes = checkedAdd(
+                        state,
+                        state.libraryBytes,
+                        count,
+                        limits.maxTotalLibraryBytes,
+                        "${library.name}: aggregate nested archive byte budget exceeded")
+                output.write(buffer, 0, count)
+            }
+        } finally {
+            try {
+                output.close()
+            } finally {
+                input.close()
+            }
+        }
+        if (library.size >= 0 && copied != library.size) {
+            state.failBoundary("${library.name}: nested archive size mismatch")
+        }
+        scanArchive(copy, library.name, 1, state, limits)
+    }
+
+    private static void scanArchive(
+            Path archive,
+            String displayName,
+            int depth,
+            ScanState state,
+            WebhookEdgeArchiveLimits limits) {
+        state.checkElapsed()
+        if (depth > limits.maxDepth) {
+            state.failBoundary("${displayName}: nested archive depth budget exceeded")
+        }
+        state.archives++
+        if (state.archives > limits.maxArchives) {
+            state.failBoundary("${displayName}: nested archive count budget exceeded")
+        }
+        ZipFile nested
+        try {
+            nested = new ZipFile(archive.toFile())
+        } catch (IOException exception) {
+            state.failBoundary("${displayName}: invalid or truncated ZIP archive")
+            return
+        }
+        try {
+            Set<String> names = new LinkedHashSet<>()
+            int archiveEntries = 0
+            int regularEntries = 0
+            long archiveExpandedBytes = 0
+            def entries = nested.entries()
+            while (entries.hasMoreElements()) {
+                state.checkElapsed()
+                java.util.zip.ZipEntry entry = entries.nextElement()
+                String name = entry.name
+                validateEntryName(name, displayName, state, limits)
+                if (!names.add(name)) {
+                    state.failBoundary("${displayName}!/${name}: duplicate entry")
+                }
+                archiveEntries++
+                state.nestedEntries++
+                if (archiveEntries > limits.maxArchiveEntries) {
+                    state.failBoundary("${displayName}!/${name}: per-archive entry budget exceeded")
+                }
+                if (state.nestedEntries > limits.maxTotalEntries) {
+                    state.failBoundary("${displayName}!/${name}: aggregate entry budget exceeded")
+                }
+                if (entry.directory) {
+                    continue
+                }
+                regularEntries++
+                if (containsAny(name, FORBIDDEN_NESTED_PACKAGE_PATHS)) {
+                    state.failBoundary("${displayName}!/${name}: forbidden nested class path")
+                }
+                EntryRead read = readEntry(nested, entry, displayName, state, limits)
+                archiveExpandedBytes = checkedAdd(
+                        state,
+                        archiveExpandedBytes,
+                        read.bytes,
+                        limits.maxExpandedArchiveBytes,
+                        "${displayName}!/${name}: per-archive expanded byte budget exceeded")
+                if (read.archive != null) {
+                    scanArchive(
+                            read.archive,
+                            "${displayName}!/${name}",
+                            depth + 1,
+                            state,
+                            limits)
+                }
+            }
+            if (regularEntries == 0) {
+                state.failBoundary("${displayName}: empty nested archive")
+            }
+        } catch (IOException exception) {
+            state.failBoundary("${displayName}: corrupt nested archive payload")
+        } finally {
+            nested.close()
+        }
+    }
+
+    private static EntryRead readEntry(
+            ZipFile archive,
+            java.util.zip.ZipEntry entry,
+            String displayName,
+            ScanState state,
+            WebhookEdgeArchiveLimits limits) {
+        state.checkElapsed()
+        if (entry.size > limits.maxExpandedEntryBytes) {
+            state.failBoundary("${displayName}!/${entry.name}: expanded entry byte budget exceeded")
+        }
+        InputStream input = archive.getInputStream(entry)
+        OutputStream candidateOutput = null
+        Path candidate = null
+        long actual = 0
+        byte[] prefix = new byte[4]
+        int prefixSize = 0
+        boolean detectionComplete = archiveName(entry.name)
+        try {
+            if (detectionComplete) {
+                candidate = state.nextScratchArchive()
+                candidateOutput = Files.newOutputStream(candidate)
+            }
+            byte[] buffer = new byte[8_192]
+            int count
+            while ((count = input.read(buffer)) != -1) {
+                state.checkElapsed()
+                actual = checkedAdd(
+                        state,
+                        actual,
+                        count,
+                        limits.maxExpandedEntryBytes,
+                        "${displayName}!/${entry.name}: expanded entry byte budget exceeded")
+                state.expandedBytes = checkedAdd(
+                        state,
+                        state.expandedBytes,
+                        count,
+                        limits.maxTotalExpandedBytes,
+                        "${displayName}!/${entry.name}: aggregate expanded byte budget exceeded")
+                int outputOffset = 0
+                if (!detectionComplete) {
+                    int prefixCount = Math.min(prefix.length - prefixSize, count)
+                    System.arraycopy(buffer, 0, prefix, prefixSize, prefixCount)
+                    prefixSize += prefixCount
+                    outputOffset = prefixCount
+                    if (prefixSize == prefix.length) {
+                        detectionComplete = true
+                        if (zipMagic(prefix, prefixSize)) {
+                            candidate = state.nextScratchArchive()
+                            candidateOutput = Files.newOutputStream(candidate)
+                            candidateOutput.write(prefix)
+                        }
+                    }
+                }
+                if (candidateOutput != null && outputOffset < count) {
+                    candidateOutput.write(buffer, outputOffset, count - outputOffset)
+                }
+            }
+        } finally {
+            try {
+                if (candidateOutput != null) {
+                    candidateOutput.close()
+                }
+            } finally {
+                input.close()
+            }
+        }
+        if (entry.size >= 0 && actual != entry.size) {
+            state.failBoundary("${displayName}!/${entry.name}: expanded entry size mismatch")
+        }
+        new EntryRead(actual, candidate)
+    }
+
+    private static boolean archiveName(String name) {
+        String lower = name.toLowerCase(Locale.ROOT)
+        lower.endsWith('.jar') || lower.endsWith('.zip') || lower.endsWith('.war') || lower.endsWith('.ear')
+    }
+
+    private static boolean zipMagic(byte[] prefix, int size) {
+        size == 4
+                && prefix[0] == (byte) 'P'
+                && prefix[1] == (byte) 'K'
+                && ((prefix[2] == 3 && prefix[3] == 4)
+                || (prefix[2] == 5 && prefix[3] == 6)
+                || (prefix[2] == 7 && prefix[3] == 8))
+    }
+
+    private static void validateEntryName(
+            String name,
+            String displayName,
+            ScanState state,
+            WebhookEdgeArchiveLimits limits) {
+        if (name == null || name.isEmpty()
+                || name.getBytes(StandardCharsets.UTF_8).length > limits.maxEntryNameBytes) {
+            state.failBoundary("${displayName}: entry name budget exceeded")
+        }
+        String normalized = name.endsWith('/') ? name.substring(0, name.length() - 1) : name
+        if (normalized.isEmpty()
+                || name.contains('\\')
+                || name.startsWith('/')
+                || name ==~ /^[A-Za-z]:.*/
+                || normalized.split('/', -1).any { segment ->
+                    segment.isEmpty() || segment == '.' || segment == '..'
+                }) {
+            state.failBoundary("${displayName}!/${name}: unsafe entry path")
+        }
+    }
+
+    private static long checkedAdd(
+            ScanState state, long current, long increment, long maximum, String message) {
+        if (increment < 0 || current > maximum - increment) {
+            state.failBoundary(message)
+        }
+        current + increment
+    }
+
+    private static String describeSetDifference(
+            String label, Set<String> expected, Set<String> actual) {
+        List<String> missing = (expected - actual).toList().sort().take(20)
+        List<String> unexpected = (actual - expected).toList().sort().take(20)
+        "${label} differ; missing=${missing}, unexpected=${unexpected}"
+    }
+
+    private static void failBoundary(String violation) {
+        throw new GradleException("Webhook edge artifact boundary violated: ${violation}")
+    }
+
+    private static boolean containsAny(String value, List<String> fragments) {
+        for (String fragment : fragments) {
+            if (value.contains(fragment)) {
+                return true
+            }
+        }
+        false
+    }
+
+    private static final class ScanState {
+        private final Path scratchDirectory
+        private final WebhookEdgeArchiveLimits limits
+        private final LongSupplier nanoTime
+        private final long startedAtNanos
+        private int nextArchive
+        private int outerEntries
+        private int archives
+        private int nestedEntries
+        private int violations
+        private long libraryBytes
+        private long expandedBytes
+
+        private ScanState(
+                Path scratchDirectory,
+                WebhookEdgeArchiveLimits limits,
+                LongSupplier nanoTime) {
+            if (limits.maxViolations != 1) {
+                throw new GradleException(
+                        'Webhook edge artifact verifier violation budget must be exactly 1')
+            }
+            if (limits.maxElapsedNanos <= 0) {
+                throw new GradleException(
+                        'Webhook edge artifact verifier elapsed time budget must be positive')
+            }
+            this.scratchDirectory = scratchDirectory
+            this.limits = limits
+            this.nanoTime = Objects.requireNonNull(nanoTime, 'nanoTime')
+            this.startedAtNanos = nanoTime.getAsLong()
+        }
+
+        private Path nextScratchArchive() {
+            scratchDirectory.resolve(String.format(Locale.ROOT, 'nested-%05d.zip', nextArchive++))
+        }
+
+        private void checkElapsed() {
+            long elapsed = nanoTime.getAsLong() - startedAtNanos
+            if (elapsed < 0 || elapsed > limits.maxElapsedNanos) {
+                failBoundary('elapsed time budget exceeded')
+            }
+        }
+
+        private void failBoundary(String violation) {
+            violations++
+            if (violations != limits.maxViolations) {
+                throw new GradleException(
+                        'Webhook edge artifact boundary violation budget exceeded')
+            }
+            throw new GradleException("Webhook edge artifact boundary violated: ${violation}")
+        }
+    }
+
+    private static final class EntryRead {
+        private final long bytes
+        private final Path archive
+
+        private EntryRead(long bytes, Path archive) {
+            this.bytes = bytes
+            this.archive = archive
+        }
+    }
+}
+
+abstract class VerifyWebhookEdgeBoundary extends DefaultTask {
+    @InputFile
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract RegularFileProperty getArtifact()
+
+    @InputFiles
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract ConfigurableFileCollection getApplicationOutputDirectories()
+
+    @Classpath
+    abstract ConfigurableFileCollection getRuntimeClasspath()
+
+    @Input
+    abstract ListProperty<String> getRuntimeArtifacts()
+
+    @InputFile
+    @PathSensitive(PathSensitivity.NONE)
+    abstract RegularFileProperty getLoaderToolsJar()
+
+    @InputFiles
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract ConfigurableFileCollection getDeclaredFileDependencies()
+
+    @LocalState
+    abstract DirectoryProperty getScratchDirectory()
+
+    @TaskAction
+    void verifyArtifact() {
+        WebhookEdgeArtifactVerifier.verifyRuntimeBoundary(
+                runtimeArtifacts.get(), declaredFileDependencies.files)
+        WebhookEdgeArtifactVerifier.verify(
+                artifact.get().asFile,
+                scratchDirectory.get().asFile,
+                WebhookEdgeArtifactVerifier.expectedApplicationEntries(
+                        applicationOutputDirectories.files),
+                WebhookEdgeArtifactVerifier.expectedLoaderEntries(
+                        loaderToolsJar.get().asFile))
+    }
+}
+
+abstract class VerifyWebhookEdgeBoundaryFixtures extends DefaultTask {
+    private static final int HOSTILE_FIXTURE_CASES = 44
+    private static final String APPLICATION_CLASS =
+            'BOOT-INF/classes/com/inforvans/accord/webhookedge/WebhookEdgeApplication.class'
+    private static final String HANDLER_CLASS =
+            'BOOT-INF/classes/com/inforvans/accord/webhookedge/webhook/WebhookHandler.class'
+    private static final String LOADER_SERVICE =
+            'META-INF/services/java.nio.file.spi.FileSystemProvider'
+    private static final byte[] LOADER_SERVICE_CONTENTS =
+            'org.springframework.boot.loader.nio.file.NestedFileSystemProvider\n'
+                    .getBytes(StandardCharsets.UTF_8)
+
+    @LocalState
+    abstract DirectoryProperty getFixtureDirectory()
+
+    @InputFile
+    @PathSensitive(PathSensitivity.NONE)
+    abstract RegularFileProperty getLoaderToolsJar()
+
+    @TaskAction
+    void verifyNegativeFixtures() {
+        Path root = fixtureDirectory.get().asFile.toPath()
+        Files.createDirectories(root)
+        Map<String, byte[]> applicationContents = [
+            (APPLICATION_CLASS): new byte[] {1},
+            (HANDLER_CLASS): new byte[] {1},
+            'BOOT-INF/classes/application.yml':
+                    'spring: {}\n'.getBytes(StandardCharsets.UTF_8)
+        ]
+        Map<String, WebhookEdgeExpectedEntry> applicationEntries =
+                WebhookEdgeArtifactVerifier.expectedEntries(applicationContents)
+        Map<String, byte[]> loaderContents = WebhookEdgeArtifactVerifier.loaderReferenceContents(
+                loaderToolsJar.get().asFile)
+        Map<String, WebhookEdgeExpectedEntry> loaderEntries =
+                WebhookEdgeArtifactVerifier.expectedEntries(loaderContents)
+        Map<String, byte[]> canonicalLoaderContents = copyEntries(loaderContents)
+        canonicalLoaderContents[LOADER_SERVICE] = LOADER_SERVICE_CONTENTS
+        byte[] safeLibrary = zipBytes(['safe/Library.class': new byte[] {1}])
+        Map<String, byte[]> canonical = canonicalEntries(
+                applicationContents, canonicalLoaderContents, safeLibrary)
+        Path positive = writeZip(root.resolve('canonical.jar'), canonical)
+
+        WebhookEdgeArtifactVerifier.verify(
+                positive.toFile(),
+                root.resolve('canonical-scratch').toFile(),
+                applicationEntries,
+                loaderEntries)
+        WebhookEdgeArtifactVerifier.verifyRuntimeBoundary(
+                ['org.springframework.boot:spring-boot:3.5.3'], [] as Set<File>)
+
+        WebhookEdgeArchiveLimits production = WebhookEdgeArchiveLimits.production()
+        if (production.maxViolations != 1) {
+            throw new GradleException('Production artifact violation budget must be exactly 1')
+        }
+        if (production.maxElapsedNanos != Duration.ofSeconds(30).toNanos()) {
+            throw new GradleException('Production artifact elapsed budget must be PT30S')
+        }
+
+        FixtureResults results = new FixtureResults(HOSTILE_FIXTURE_CASES)
+        Map<String, byte[]> mutatedApplicationClass = copyEntries(canonical)
+        mutatedApplicationClass[APPLICATION_CLASS] =
+                mutateFirstByte(mutatedApplicationClass[APPLICATION_CLASS])
+        expectRejected(
+                results,
+                'application-class-byte-mutation',
+                writeZip(root.resolve('application-class-byte-mutation.jar'), mutatedApplicationClass),
+                applicationEntries,
+                loaderEntries,
+                production,
+                'application output entry SHA-256 mismatch',
+                root)
+
+        Map<String, byte[]> mutatedApplicationConfiguration = copyEntries(canonical)
+        mutatedApplicationConfiguration['BOOT-INF/classes/application.yml'] = mutateFirstByte(
+                mutatedApplicationConfiguration['BOOT-INF/classes/application.yml'])
+        expectRejected(
+                results,
+                'application-configuration-byte-mutation',
+                writeZip(
+                        root.resolve('application-configuration-byte-mutation.jar'),
+                        mutatedApplicationConfiguration),
+                applicationEntries,
+                loaderEntries,
+                production,
+                'application output entry SHA-256 mismatch',
+                root)
+
+        String mutatedLoaderClass = loaderContents.keySet()
+                .findAll { name -> name.endsWith('.class') }
+                .toList()
+                .sort()
+                .first()
+        Map<String, byte[]> mutatedLoader = copyEntries(canonical)
+        mutatedLoader[mutatedLoaderClass] = mutateFirstByte(mutatedLoader[mutatedLoaderClass])
+        expectRejected(
+                results,
+                'boot-loader-byte-mutation',
+                writeZip(root.resolve('boot-loader-byte-mutation.jar'), mutatedLoader),
+                applicationEntries,
+                loaderEntries,
+                production,
+                'Boot loader entry SHA-256 mismatch',
+                root)
+
+        Map<String, byte[]> mutatedLoaderService = copyEntries(canonical)
+        mutatedLoaderService[LOADER_SERVICE] =
+                mutateFirstByte(mutatedLoaderService[LOADER_SERVICE])
+        expectRejected(
+                results,
+                'boot-loader-service-byte-mutation',
+                writeZip(
+                        root.resolve('boot-loader-service-byte-mutation.jar'),
+                        mutatedLoaderService),
+                applicationEntries,
+                loaderEntries,
+                production,
+                'Boot loader entry SHA-256 mismatch',
+                root)
+
+        Map<String, byte[]> missingLoaderService = copyEntries(canonical)
+        missingLoaderService.remove(LOADER_SERVICE)
+        expectRejected(
+                results,
+                'missing-boot-loader-service',
+                writeZip(root.resolve('missing-boot-loader-service.jar'), missingLoaderService),
+                applicationEntries,
+                loaderEntries,
+                production,
+                LOADER_SERVICE,
+                root)
+
+        String injectedLoaderService = 'META-INF/services/example.InjectedProvider'
+        Map<String, byte[]> injectedLoaderServiceEntries = copyEntries(canonical)
+        injectedLoaderServiceEntries[injectedLoaderService] =
+                'example.InjectedProvider\n'.getBytes(StandardCharsets.UTF_8)
+        expectRejected(
+                results,
+                'injected-boot-loader-service',
+                writeZip(
+                        root.resolve('injected-boot-loader-service.jar'),
+                        injectedLoaderServiceEntries),
+                applicationEntries,
+                loaderEntries,
+                production,
+                injectedLoaderService,
+                root)
+
+        Map<String, byte[]> missingApplicationConfiguration = copyEntries(canonical)
+        missingApplicationConfiguration.remove('BOOT-INF/classes/application.yml')
+        expectRejected(
+                results,
+                'missing-application-configuration',
+                writeZip(
+                        root.resolve('missing-application-configuration.jar'),
+                        missingApplicationConfiguration),
+                applicationEntries,
+                loaderEntries,
+                production,
+                'application.yml',
+                root)
+
+        Map<String, byte[]> wrongStartClass = copyEntries(canonical)
+        wrongStartClass['META-INF/MANIFEST.MF'] = manifestBytes([
+            'Start-Class': 'com.inforvans.accord.controlplane.ControlApiApplication'
+        ])
+        expectRejected(
+                results,
+                'wrong-start-class',
+                writeZip(root.resolve('wrong-start-class.jar'), wrongStartClass),
+                applicationEntries,
+                loaderEntries,
+                production,
+                'Manifest Start-Class',
+                root)
+
+        byte[] forbiddenLibrary = zipBytes([
+            'com/inforvans/accord/Injected.class': new byte[] {1}
+        ])
+        for (String libraryName : ['library.BIN', 'library.JAR', 'library']) {
+            Map<String, byte[]> entries = copyEntries(canonical)
+            entries["BOOT-INF/lib/${libraryName}"] = forbiddenLibrary
+            expectRejected(
+                    results,
+                    libraryName,
+                    writeZip(root.resolve("${libraryName}.jar"), entries),
+                    applicationEntries,
+                    loaderEntries,
+                    WebhookEdgeArchiveLimits.production(),
+                    'forbidden nested class path',
+                    root)
+        }
+
+        Map<String, byte[]> invalidArchives = [
+            'empty-bytes': new byte[0],
+            'empty-zip': zipBytes([:]),
+            'not-zip': 'not a zip'.getBytes(StandardCharsets.US_ASCII),
+            'truncated': Arrays.copyOf(safeLibrary, safeLibrary.length - 12),
+            'corrupt-payload': corruptFirstPayload(safeLibrary)
+        ]
+        for (Map.Entry<String, byte[]> invalidArchive : invalidArchives.entrySet()) {
+            String name = invalidArchive.key
+            byte[] archive = invalidArchive.value
+            Map<String, byte[]> entries = copyEntries(canonical)
+            entries['BOOT-INF/lib/safe'] = archive
+            expectRejected(
+                    results,
+                    name,
+                    writeZip(root.resolve("${name}.jar"), entries),
+                    applicationEntries,
+                    loaderEntries,
+                    WebhookEdgeArchiveLimits.production(),
+                    name == 'empty-zip' ? 'empty nested archive' : 'archive',
+                    root)
+        }
+
+        Map<String, Map<String, String>> manifestMutations = [
+            'wrong-main': ['Main-Class': 'example.UntrustedLauncher'],
+            'class-path': ['Class-Path': 'external.jar'],
+            'premain': ['Premain-Class': 'example.Agent'],
+            'agent': ['Agent-Class': 'example.Agent'],
+            'launcher-agent': ['Launcher-Agent-Class': 'example.Agent']
+        ]
+        for (Map.Entry<String, Map<String, String>> manifestMutation : manifestMutations.entrySet()) {
+            String name = manifestMutation.key
+            Map<String, String> mutation = manifestMutation.value
+            Map<String, byte[]> entries = copyEntries(canonical)
+            entries['META-INF/MANIFEST.MF'] = manifestBytes(mutation)
+            expectRejected(
+                    results,
+                    name,
+                    writeZip(root.resolve("${name}.jar"), entries),
+                    applicationEntries,
+                    loaderEntries,
+                    WebhookEdgeArchiveLimits.production(),
+                    mutation.keySet().first(),
+                    root)
+        }
+
+        List<String> injectedClasses = [
+            'Agent.class',
+            'org/springframework/boot/loader/InjectedAgent.class',
+            'BOOT-INF/classes/com/inforvans/accord/webhookedge/Injected.class'
+        ]
+        for (int index = 0; index < injectedClasses.size(); index++) {
+            String injected = injectedClasses[index]
+            Map<String, byte[]> entries = copyEntries(canonical)
+            entries[injected] = new byte[] {1}
+            expectRejected(
+                    results,
+                    "injected-class-${index}",
+                    writeZip(root.resolve("injected-class-${index}.jar"), entries),
+                    applicationEntries,
+                    loaderEntries,
+                    WebhookEdgeArchiveLimits.production(),
+                    injected,
+                    root)
+        }
+
+        List<String> duplicateEntries = [
+            'META-INF/MANIFEST.MF',
+            'BOOT-INF/classes/application.yml',
+            APPLICATION_CLASS
+        ]
+        for (int index = 0; index < duplicateEntries.size(); index++) {
+            String duplicate = duplicateEntries[index]
+            Path artifact = root.resolve("duplicate-${index}.jar")
+            writeZipWithDuplicate(artifact, canonical, duplicate)
+            expectRejected(
+                    results,
+                    "duplicate-${index}",
+                    artifact,
+                    applicationEntries,
+                    loaderEntries,
+                    WebhookEdgeArchiveLimits.production(),
+                    'duplicate entry',
+                    root)
+        }
+
+        Map<String, byte[]> unsafePath = copyEntries(canonical)
+        unsafePath['BOOT-INF/lib/safe'] = zipBytes(['../safe.class': new byte[] {1}])
+        expectRejected(
+                results,
+                'unsafe-path',
+                writeZip(root.resolve('unsafe-path.jar'), unsafePath),
+                applicationEntries,
+                loaderEntries,
+                WebhookEdgeArchiveLimits.production(),
+                'unsafe entry path',
+                root)
+
+        Map<String, byte[]> longName = copyEntries(canonical)
+        longName['BOOT-INF/lib/safe'] = zipBytes([("safe/" + ('x' * 508)): new byte[] {1}])
+        expectRejected(
+                results,
+                'entry-name-budget',
+                writeZip(root.resolve('entry-name-budget.jar'), longName),
+                applicationEntries,
+                loaderEntries,
+                WebhookEdgeArchiveLimits.production(),
+                'entry name budget',
+                root)
+
+        Map<String, byte[]> deep = copyEntries(canonical)
+        deep['BOOT-INF/lib/safe'] = zipBytes([
+            'safe/level-two': zipBytes([
+                'safe/level-three': zipBytes(['safe/Leaf.class': new byte[] {1}])
+            ])
+        ])
+        expectRejected(
+                results,
+                'depth-budget',
+                writeZip(root.resolve('depth-budget.jar'), deep),
+                applicationEntries,
+                loaderEntries,
+                WebhookEdgeArchiveLimits.production(),
+                'depth budget',
+                root)
+
+        Map<String, WebhookEdgeArchiveLimits> reducedLimits = [
+            'outer-byte-budget': limits(production, [maxOuterBytes: positive.toFile().length() - 1]),
+            'outer-entry-budget': limits(production, [maxOuterEntries: canonical.size() - 1]),
+            'archive-count-budget': limits(production, [maxArchives: 0]),
+            'library-byte-budget': limits(production, [maxLibraryBytes: safeLibrary.length - 1]),
+            'total-library-byte-budget': limits(production, [maxTotalLibraryBytes: 0]),
+            'archive-entry-budget': limits(production, [maxArchiveEntries: 0]),
+            'total-entry-budget': limits(production, [maxTotalEntries: 0]),
+            'expanded-entry-budget': limits(production, [maxExpandedEntryBytes: 0]),
+            'expanded-archive-budget': limits(production, [maxExpandedArchiveBytes: 0]),
+            'total-expanded-budget': limits(production, [maxTotalExpandedBytes: 0])
+        ]
+        Map<String, String> budgetMessages = [
+            'outer-byte-budget': 'outer archive byte budget',
+            'outer-entry-budget': 'outer entry budget',
+            'archive-count-budget': 'archive count budget',
+            'library-byte-budget': 'archive byte budget',
+            'total-library-byte-budget': 'aggregate nested archive byte budget',
+            'archive-entry-budget': 'per-archive entry budget',
+            'total-entry-budget': 'aggregate entry budget',
+            'expanded-entry-budget': 'expanded entry byte budget',
+            'expanded-archive-budget': 'per-archive expanded byte budget',
+            'total-expanded-budget': 'aggregate expanded byte budget'
+        ]
+        for (Map.Entry<String, WebhookEdgeArchiveLimits> reducedLimit : reducedLimits.entrySet()) {
+            String name = reducedLimit.key
+            WebhookEdgeArchiveLimits reduced = reducedLimit.value
+            expectRejected(
+                    results,
+                    name,
+                    positive,
+                    applicationEntries,
+                    loaderEntries,
+                    reduced,
+                    budgetMessages[name],
+                    root)
+        }
+
+        Map<String, byte[]> failFastEntries = new LinkedHashMap<>()
+        failFastEntries['BOOT-INF/classes/first-forbidden.txt'] = new byte[] {1}
+        failFastEntries['BOOT-INF/classes/second-forbidden.txt'] = new byte[] {1}
+        failFastEntries.putAll(canonical)
+        expectFirstViolationOnly(
+                results,
+                'violation-budget',
+                writeZip(root.resolve('violation-budget.jar'), failFastEntries),
+                applicationEntries,
+                loaderEntries,
+                production,
+                'first-forbidden.txt',
+                'second-forbidden.txt',
+                root)
+
+        expectRejected(
+                results,
+                'elapsed-budget',
+                positive,
+                applicationEntries,
+                loaderEntries,
+                production,
+                'elapsed time budget exceeded',
+                root,
+                new DeterministicNanoTime(2))
+
+        Path declaredDirectory = root.resolve('declared-directory')
+        Files.createDirectories(declaredDirectory)
+        expectRuntimeRejected(
+                results,
+                'declared-directory',
+                ['org.springframework.boot:spring-boot:3.5.3'],
+                [declaredDirectory.toFile()] as Set<File>,
+                'declared file dependencies')
+        expectRuntimeRejected(
+                results,
+                'project-artifact',
+                ['REJECTED|org.gradle.api.artifacts.component.ProjectComponentIdentifier|edge.jar|regular=true'],
+                [] as Set<File>,
+                'non-module runtime artifacts')
+
+        results.verifyComplete()
+    }
+
+    private static Map<String, byte[]> canonicalEntries(
+            Map<String, byte[]> applicationContents,
+            Map<String, byte[]> loaderContents,
+            byte[] safeLibrary) {
+        Map<String, byte[]> entries = new LinkedHashMap<>()
+        entries['META-INF/MANIFEST.MF'] = manifestBytes([:])
+        applicationContents.toSorted().each { name, contents -> entries[name] = contents }
+        loaderContents.toSorted().each { name, contents -> entries[name] = contents }
+        entries['BOOT-INF/lib/safe'] = safeLibrary
+        entries
+    }
+
+    private static Map<String, byte[]> copyEntries(Map<String, byte[]> source) {
+        new LinkedHashMap<String, byte[]>(source)
+    }
+
+    private static byte[] mutateFirstByte(byte[] source) {
+        if (source.length == 0) {
+            throw new GradleException('Cannot mutate an empty synthetic archive entry')
+        }
+        byte[] mutated = source.clone()
+        mutated[0] = (byte) (mutated[0] ^ 0x01)
+        mutated
+    }
+
+    private static byte[] manifestBytes(Map<String, String> mutations) {
+        Map<String, String> attributes = new LinkedHashMap<>()
+        attributes['Manifest-Version'] = '1.0'
+        attributes['Main-Class'] = 'org.springframework.boot.loader.launch.JarLauncher'
+        attributes['Start-Class'] = 'com.inforvans.accord.webhookedge.WebhookEdgeApplication'
+        attributes.putAll(mutations)
+        StringBuilder content = new StringBuilder()
+        attributes.each { name, value -> content.append(name).append(': ').append(value).append('\r\n') }
+        content.append('\r\n').toString().getBytes(StandardCharsets.UTF_8)
+    }
+
+    private static Path writeZip(Path artifact, Map<String, byte[]> entries) {
+        ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(artifact))
+        try {
+            entries.each { name, contents ->
+                zip.putNextEntry(new ZipEntry(name))
+                zip.write(contents)
+                zip.closeEntry()
+            }
+        } finally {
+            zip.close()
+        }
+        artifact
+    }
+
+    private static byte[] zipBytes(Map<String, byte[]> entries) {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream()
+        ZipOutputStream zip = new ZipOutputStream(bytes)
+        try {
+            entries.each { name, contents ->
+                zip.putNextEntry(new ZipEntry(name))
+                zip.write(contents)
+                zip.closeEntry()
+            }
+        } finally {
+            zip.close()
+        }
+        bytes.toByteArray()
+    }
+
+    private static void writeZipWithDuplicate(
+            Path artifact, Map<String, byte[]> entries, String duplicate) {
+        String placeholder = 'z' * duplicate.length()
+        Map<String, byte[]> withPlaceholder = copyEntries(entries)
+        withPlaceholder[placeholder] = entries[duplicate]
+        writeZip(artifact, withPlaceholder)
+        byte[] bytes = Files.readAllBytes(artifact)
+        replaceAll(bytes, placeholder.getBytes(StandardCharsets.US_ASCII),
+                duplicate.getBytes(StandardCharsets.US_ASCII))
+        Files.write(artifact, bytes)
+    }
+
+    private static void replaceAll(byte[] bytes, byte[] target, byte[] replacement) {
+        if (target.length != replacement.length) {
+            throw new IllegalArgumentException('ZIP name replacement must preserve length')
+        }
+        int replacements = 0
+        for (int offset = 0; offset <= bytes.length - target.length; offset++) {
+            boolean matches = true
+            for (int index = 0; index < target.length; index++) {
+                if (bytes[offset + index] != target[index]) {
+                    matches = false
+                    break
+                }
+            }
+            if (matches) {
+                System.arraycopy(replacement, 0, bytes, offset, replacement.length)
+                replacements++
+                offset += target.length - 1
+            }
+        }
+        if (replacements != 2) {
+            throw new GradleException("Expected two ZIP name replacements, found ${replacements}")
+        }
+    }
+
+    private static byte[] corruptFirstPayload(byte[] source) {
+        byte[] corrupted = source.clone()
+        int fileNameLength = littleEndian16(corrupted, 26)
+        int extraLength = littleEndian16(corrupted, 28)
+        int payload = 30 + fileNameLength + extraLength
+        if (payload >= corrupted.length) {
+            throw new GradleException('Cannot locate synthetic ZIP payload')
+        }
+        corrupted[payload] = (byte) (corrupted[payload] ^ 0x01)
+        corrupted
+    }
+
+    private static int littleEndian16(byte[] bytes, int offset) {
+        (bytes[offset] & 0xff) | ((bytes[offset + 1] & 0xff) << 8)
+    }
+
+    private static WebhookEdgeArchiveLimits limits(
+            WebhookEdgeArchiveLimits source, Map<String, Number> overrides) {
+        new WebhookEdgeArchiveLimits(
+                overrides.getOrDefault('maxOuterBytes', source.maxOuterBytes).longValue(),
+                overrides.getOrDefault('maxOuterEntries', source.maxOuterEntries).intValue(),
+                overrides.getOrDefault('maxArchives', source.maxArchives).intValue(),
+                overrides.getOrDefault('maxLibraryBytes', source.maxLibraryBytes).longValue(),
+                overrides.getOrDefault('maxTotalLibraryBytes', source.maxTotalLibraryBytes).longValue(),
+                overrides.getOrDefault('maxArchiveEntries', source.maxArchiveEntries).intValue(),
+                overrides.getOrDefault('maxTotalEntries', source.maxTotalEntries).intValue(),
+                overrides.getOrDefault('maxEntryNameBytes', source.maxEntryNameBytes).intValue(),
+                overrides.getOrDefault('maxExpandedEntryBytes', source.maxExpandedEntryBytes).longValue(),
+                overrides.getOrDefault('maxExpandedArchiveBytes', source.maxExpandedArchiveBytes).longValue(),
+                overrides.getOrDefault('maxTotalExpandedBytes', source.maxTotalExpandedBytes).longValue(),
+                overrides.getOrDefault('maxDepth', source.maxDepth).intValue(),
+                overrides.getOrDefault('maxViolations', source.maxViolations).intValue(),
+                overrides.getOrDefault('maxElapsedNanos', source.maxElapsedNanos).longValue())
+    }
+
+    private static void expectRejected(
+            FixtureResults results,
+            String name,
+            Path artifact,
+            Map<String, WebhookEdgeExpectedEntry> applicationEntries,
+            Map<String, WebhookEdgeExpectedEntry> loaderEntries,
+            WebhookEdgeArchiveLimits limits,
+            String expectedMessage,
+            Path root,
+            LongSupplier nanoTime = null) {
+        results.beginCase(name)
+        try {
+            if (nanoTime == null) {
+                WebhookEdgeArtifactVerifier.verify(
+                        artifact.toFile(),
+                        root.resolve("scratch-${name}").toFile(),
+                        applicationEntries,
+                        loaderEntries,
+                        limits)
+            } else {
+                WebhookEdgeArtifactVerifier.verify(
+                        artifact.toFile(),
+                        root.resolve("scratch-${name}").toFile(),
+                        applicationEntries,
+                        loaderEntries,
+                        limits,
+                        nanoTime)
+            }
+            results.recordFailure("${name}: accepted")
+        } catch (GradleException failure) {
+            if (!failure.message.contains(expectedMessage)) {
+                results.recordFailure("${name}: wrong violation ${failure.message}")
+            }
+        } catch (Throwable failure) {
+            results.recordFailure("${name}: unnormalized ${failure.class.name}")
+        }
+    }
+
+    private static void expectFirstViolationOnly(
+            FixtureResults results,
+            String name,
+            Path artifact,
+            Map<String, WebhookEdgeExpectedEntry> applicationEntries,
+            Map<String, WebhookEdgeExpectedEntry> loaderEntries,
+            WebhookEdgeArchiveLimits limits,
+            String expectedFirst,
+            String forbiddenLater,
+            Path root) {
+        results.beginCase(name)
+        try {
+            WebhookEdgeArtifactVerifier.verify(
+                    artifact.toFile(),
+                    root.resolve("scratch-${name}").toFile(),
+                    applicationEntries,
+                    loaderEntries,
+                    limits)
+            results.recordFailure("${name}: accepted")
+        } catch (GradleException failure) {
+            if (!failure.message.contains(expectedFirst)
+                    || failure.message.contains(forbiddenLater)) {
+                results.recordFailure("${name}: did not terminate at the first violation")
+            }
+        } catch (Throwable failure) {
+            results.recordFailure("${name}: unnormalized ${failure.class.name}")
+        }
+    }
+
+    private static void expectRuntimeRejected(
+            FixtureResults results,
+            String name,
+            List<String> runtimeArtifacts,
+            Set<File> fileDependencies,
+            String expectedMessage) {
+        results.beginCase(name)
+        try {
+            WebhookEdgeArtifactVerifier.verifyRuntimeBoundary(runtimeArtifacts, fileDependencies)
+            results.recordFailure("${name}: accepted")
+        } catch (GradleException failure) {
+            if (!failure.message.contains(expectedMessage)) {
+                results.recordFailure("${name}: wrong violation ${failure.message}")
+            }
+        } catch (Throwable failure) {
+            results.recordFailure("${name}: unnormalized ${failure.class.name}")
+        }
+    }
+
+    private static final class DeterministicNanoTime implements LongSupplier {
+        private int callsWithinBudget
+
+        private DeterministicNanoTime(int callsWithinBudget) {
+            this.callsWithinBudget = callsWithinBudget
+        }
+
+        @Override
+        long getAsLong() {
+            if (callsWithinBudget-- > 0) {
+                return 0L
+            }
+            Duration.ofSeconds(31).toNanos()
+        }
+    }
+
+    private static final class FixtureResults {
+        private final int expectedCases
+        private final List<String> failures = []
+        private int cases
+
+        private FixtureResults(int expectedCases) {
+            this.expectedCases = expectedCases
+        }
+
+        private void beginCase(String name) {
+            if (cases >= expectedCases) {
+                throw new GradleException(
+                        "Webhook edge hostile fixture case budget exceeded at ${name}")
+            }
+            cases++
+        }
+
+        private void recordFailure(String failure) {
+            if (failures.size() >= expectedCases) {
+                throw new GradleException(
+                        'Webhook edge hostile fixture violation budget exceeded')
+            }
+            failures.add(failure)
+        }
+
+        private void verifyComplete() {
+            if (cases != expectedCases) {
+                throw new GradleException(
+                        "Webhook edge hostile fixture count was ${cases}, expected ${expectedCases}")
+            }
+            if (!failures.isEmpty()) {
+                throw new GradleException(
+                        "Webhook edge boundary negative fixtures failed: ${failures}")
+            }
+        }
+    }
+}
+
+abstract class WebhookEdgeTestArguments implements CommandLineArgumentProvider {
+    @InputFile
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract RegularFileProperty getArtifact()
+
+    @Input
+    abstract ListProperty<String> getRuntimeArtifacts()
+
+    @InputFiles
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract ConfigurableFileCollection getApplicationOutputDirectories()
+
+    @InputFile
+    @PathSensitive(PathSensitivity.NONE)
+    abstract RegularFileProperty getLoaderToolsJar()
+
+    @Override
+    Iterable<String> asArguments() {
+        List<String> arguments = [
+            "-Daccord.webhook-edge.boot-jar=${artifact.get().asFile.absolutePath}",
+            "-Daccord.webhook-edge.runtime-coordinates=${runtimeArtifacts.get().join('\n')}",
+            "-Daccord.webhook-edge.loader-tools-jar=${loaderToolsJar.get().asFile.absolutePath}"
+        ]
+        List<File> outputs = applicationOutputDirectories.files.toList().sort { left, right ->
+            left.absolutePath <=> right.absolutePath
+        }
+        arguments.add("-Daccord.webhook-edge.application-output-count=${outputs.size()}")
+        outputs.eachWithIndex { output, index ->
+            arguments.add(
+                    "-Daccord.webhook-edge.application-output-${index}=${output.absolutePath}")
+        }
+        arguments
+    }
+}
+
 plugins {
-    id 'java-library'
+    alias(libs.plugins.spring.boot)
+    id 'java'
 }
 
 dependencies {
-    testImplementation platform(libs.junit.bom)
+    implementation enforcedPlatform(libs.spring.boot.bom)
+    implementation libs.spring.boot.web
+    implementation libs.spring.boot.actuator
+    implementation libs.spring.boot.jooq
+    implementation libs.jackson.databind
+    runtimeOnly libs.postgresql
+    testImplementation libs.spring.boot.test
     testImplementation libs.junit.jupiter
     testImplementation libs.assertj.core
+    testImplementation libs.archunit.junit
+    testImplementation libs.flyway.core
+    testImplementation libs.flyway.postgresql
+    testImplementation libs.testcontainers.junit
+    testImplementation libs.testcontainers.postgresql
+}
+
+tasks.named('processTestResources') {
+    from(rootProject.file('database/webhook-edge/bootstrap')) {
+        include '00-pre-flyway-roles.sql'
+        into 'webhook-edge/bootstrap'
+    }
+    from(rootProject.file('database/webhook-edge/migrations')) {
+        include 'V001__webhook_inbox_outbox.sql'
+        into 'webhook-edge/migration'
+    }
+}
+
+def runtimeArtifactsProvider = configurations.runtimeClasspath.incoming.artifacts.resolvedArtifacts.map {
+        artifacts ->
+    artifacts.collect { artifact ->
+        def component = artifact.id.componentIdentifier
+        if (component instanceof ModuleComponentIdentifier && artifact.file.isFile()) {
+            return "${component.group}:${component.module}:${component.version}"
+        }
+        "REJECTED|${component.class.name}|${artifact.file.name}|regular=${artifact.file.isFile()}"
+    }.toSet().toList().sort()
+}
+def loaderToolsJarProvider = layout.file(providers.provider {
+    def location = org.springframework.boot.loader.tools.LoaderImplementation
+            .protectionDomain?.codeSource?.location
+    if (location == null || location.protocol != 'file') {
+        throw new GradleException('Spring Boot loader tools CodeSource is not a local file')
+    }
+    File loaderToolsJar = new File(location.toURI()).canonicalFile
+    if (!loaderToolsJar.isFile()
+            || loaderToolsJar.name != 'spring-boot-loader-tools-3.5.3.jar') {
+        throw new GradleException(
+                'Spring Boot LoaderImplementation did not resolve to the fixed loader-tools JAR')
+    }
+    loaderToolsJar
+})
+
+def declaredRuntimeFileDependencies = objects.fileCollection()
+[configurations.implementation, configurations.runtimeOnly].each { configuration ->
+    configuration.dependencies.withType(FileCollectionDependency).configureEach { dependency ->
+        declaredRuntimeFileDependencies.from(dependency.files)
+    }
+}
+
+def bootJarTask = tasks.named('bootJar')
+def webhookEdgeTestArguments = objects.newInstance(WebhookEdgeTestArguments)
+webhookEdgeTestArguments.artifact.set(bootJarTask.flatMap { task -> task.archiveFile })
+webhookEdgeTestArguments.runtimeArtifacts.set(runtimeArtifactsProvider)
+webhookEdgeTestArguments.applicationOutputDirectories.from(sourceSets.main.output)
+webhookEdgeTestArguments.loaderToolsJar.set(loaderToolsJarProvider)
+
+tasks.named('test') {
+    dependsOn bootJarTask
+    jvmArgumentProviders.add(webhookEdgeTestArguments)
+}
+
+tasks.register('verifyProviderWebhookSignalSchema', VerifyProviderWebhookSignalSchema) {
+    group = 'verification'
+    description = 'Validates the closed provider webhook signal contract and forbidden fields.'
+    schemaFile.set(rootProject.layout.projectDirectory.file(
+            'contracts/events/provider-webhook-signal.schema.json'))
+    goldenFile.set(rootProject.layout.projectDirectory.file(
+            'contracts/golden-fixtures/webhooks/gitlab-19.1-push.signal.json'))
+    packageFile.set(rootProject.layout.projectDirectory.file('package.json'))
+    pnpmLockFile.set(rootProject.layout.projectDirectory.file('pnpm-lock.yaml'))
+    corepackExecutable.set(System.getProperty('os.name').toLowerCase().contains('windows')
+            ? 'corepack.cmd'
+            : 'corepack')
+    repositoryDirectory.set(rootProject.layout.projectDirectory)
+    negativeDirectory.set(layout.buildDirectory.dir(
+            'tmp/verifyProviderWebhookSignalSchema'))
+}
+
+tasks.register('verifyWebhookEdgeBoundary', VerifyWebhookEdgeBoundary) {
+    dependsOn bootJarTask
+    artifact.set(bootJarTask.flatMap { task -> task.archiveFile })
+    applicationOutputDirectories.from(sourceSets.main.output)
+    runtimeClasspath.from(configurations.runtimeClasspath)
+    runtimeArtifacts.set(runtimeArtifactsProvider)
+    loaderToolsJar.set(loaderToolsJarProvider)
+    declaredFileDependencies.from(declaredRuntimeFileDependencies)
+    scratchDirectory.set(layout.buildDirectory.dir('tmp/verifyWebhookEdgeBoundary'))
+}
+
+tasks.register('verifyWebhookEdgeBoundaryFixtures', VerifyWebhookEdgeBoundaryFixtures) {
+    group = 'verification'
+    description = 'Runs hostile artifacts through the production webhook edge boundary verifier.'
+    loaderToolsJar.set(loaderToolsJarProvider)
+    fixtureDirectory.set(layout.buildDirectory.dir('tmp/verifyWebhookEdgeBoundaryFixtures'))
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('verifyWebhookEdgeBoundary')
+    dependsOn tasks.named('verifyWebhookEdgeBoundaryFixtures')
+    dependsOn tasks.named('verifyProviderWebhookSignalSchema')
 }
