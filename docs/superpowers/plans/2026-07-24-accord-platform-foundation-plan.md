@@ -281,7 +281,7 @@ $settings = Get-Content -Raw -Encoding utf8 settings.gradle
 }
 $toolVersions = Get-Content -Encoding utf8 .tool-versions
 $expectedTools = [ordered]@{
-  java = 'temurin-21.0.7+6.0.LTS'; gradle = '8.14.3'; nodejs = '22.17.0';
+  java = 'temurin-21.0.11+10'; gradle = '8.14.3'; nodejs = '22.22.1';
   pnpm = '10.12.4'; python = '3.12.11'; uv = '0.7.13'; buf = '1.55.1';
   helm = '3.17.3'; opentofu = '1.9.1'; k6 = '0.57.0';
   conftest = '0.61.2'; kubeconform = '0.7.0'; syft = '1.27.1';
@@ -348,9 +348,9 @@ Expected: `design-baseline: PASS`, then FAIL. The layout test reports `Missing w
 Create `.tool-versions`:
 
 ```text
-java temurin-21.0.7+6.0.LTS
+java temurin-21.0.11+10
 gradle 8.14.3
-nodejs 22.17.0
+nodejs 22.22.1
 pnpm 10.12.4
 python 3.12.11
 uv 0.7.13
@@ -593,7 +593,7 @@ Create the root `package.json`:
   "name": "accord",
   "private": true,
   "packageManager": "pnpm@10.12.4",
-  "engines": { "node": "22.17.0", "pnpm": "10.12.4" },
+  "engines": { "node": "22.22.1", "pnpm": "10.12.4" },
   "scripts": {
     "check": "pnpm -r --if-present test && pnpm -r --if-present typecheck",
     "contracts:lint": "redocly lint contracts/openapi/accord-control-api.yaml"
@@ -844,7 +844,7 @@ final class AccordCtlTest {
 }
 ```
 
-The Webhook Edge and two initial security-service build files use the Java library baseline above only until their owning tasks add Spring Boot entry points. They remain separate Gradle projects and deployable artifacts, may depend on generated contracts and capability-specific libraries, and may not depend on a control-plane domain module. Provider Connector, Credential Broker, Agent Pack Gateway, Attachment Scanner, and BreakGlass Broker are registered only by their owning later plans rather than as empty Foundation placeholders. `libs/java/observability` is the only initial shared-library target; it may contain telemetry types only and cannot become a generic utility package.
+The Webhook Edge and two initial security-service build files use the Java library baseline above only until their owning tasks add Spring Boot entry points. They remain separate Gradle projects and deployable artifacts, may depend on generated contracts and capability-specific libraries, and may not depend on a control-plane domain module. Provider Connector, Credential Broker, Agent Pack Gateway, Attachment Scanner, and BreakGlass Broker are registered only by their owning later plans rather than as empty Foundation stubs. `libs/java/observability` is the only initial shared-library target; it may contain telemetry types only and cannot become a generic utility package.
 
 Create `scripts/run-gradle.ps1` so every plan command has the same Windows/Linux wrapper selection:
 
@@ -3315,7 +3315,7 @@ StoredHttpResult accepts status 100-599, copies and case-folds headers into an i
 
 JooqCommandGate has no clock, pool, or transaction ownership. Its public constructor needs no infrastructure argument; each operation receives the caller's transaction-scoped DSLContext.
 
-Initial claim inserts a valid placeholder before it asks the database for current time:
+Initial claim inserts a valid sentinel before it asks the database for current time:
 
 ~~~sql
 INSERT INTO idempotency_result (
@@ -3328,7 +3328,7 @@ ON CONFLICT DO NOTHING
 RETURNING claim_generation
 ~~~
 
-If inserted, read clock_timestamp() and replace both placeholder deadlines with database_now + lease_duration under owner/generation/token/-infinity predicates. Never calculate a correctness deadline from a JVM clock.
+If inserted, read clock_timestamp() and replace both sentinel deadlines with database_now + lease_duration under owner/generation/token/-infinity predicates. Never calculate a correctness deadline from a JVM clock.
 
 If the insert conflicts, lock the exact tenant/actor/route/key row with FOR UPDATE. A missing row can occur when a concurrent worker deletes an expired row between the conflict and select; retry the insert/select sequence once, then fail closed. Compare the fingerprint after the lock. Completed state returns exact persisted status, validated canonical headers, and exact text body. A live started state returns InProgress.
 
@@ -3642,10 +3642,10 @@ git diff --cached --name-only
 git commit -m "fix: prevent external intent capability disclosure"
 ~~~
 
-Task 10's first TDD substep owns one independent unpublished-V002 safe-scope follow-up without
-amending either prior commit. A reconciliation lease does not contain scope and must never be treated
-as sufficient event authority; Task 10 is blocked until that focused migration/catalog/store test is
-GREEN.
+The independent unpublished-V002 safe-scope follow-up is already committed as `7f973ae`. A
+reconciliation lease does not contain scope and must never be treated as sufficient event authority.
+Task 10 treats that commit as an immutable ancestor prerequisite and must not restage or amend any of
+its five paths.
 
 ### Task 9: Prove Enterprise HTTP Reliability At The Control API
 
@@ -4511,22 +4511,24 @@ and prove a replacement worker recovers after the first worker JVM is killed wit
 Provider mutation call.
 
 **Files:**
-- Modify: `database/control-plane/migrations/V002__reliable_event_delivery.sql`
-- Modify: `database/control-plane/src/test/java/com/inforvans/accord/database/ReliableDeliveryMigrationTest.java`
-- Modify: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExternalIntentSnapshot.java`
-- Modify: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/JooqExternalIntentStore.java`
-- Modify: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/JooqExternalIntentStoreTest.java`
-- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkflowRef.java`
-- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationOutcome.java`
-- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationObservationPort.java`
-- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationActivities.java`
-- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReadOnlyReconciliationActivity.java`
-- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkflow.java`
-- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkflowImpl.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/workflow/ReconciliationWorkflowRef.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/workflow/ReconciliationOutcome.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/workflow/ReconciliationObservationPort.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/workflow/ReconciliationActivities.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/workflow/ReadOnlyReconciliationActivity.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/workflow/ReconciliationWorkflow.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/workflow/ReconciliationWorkflowImpl.java`
 - Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalConnectionProperties.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalServiceStubsFactory.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalSecretFileLoader.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalSecretAclPolicy.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/PosixTemporalSecretAclPolicy.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/WindowsTemporalSecretAclPolicy.java`
 - Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalRuntimeConfiguration.java`
 - Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalWorkerLifecycle.java`
 - Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/reconciliation/WorkerTenantTransactions.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/reconciliation/ReconciliationRuntimeProperties.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/reconciliation/ReconciliationFailure.java`
 - Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/reconciliation/ProviderObservationPort.java`
 - Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/reconciliation/FencedReconciliationObservation.java`
 - Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkflowTest.java`
@@ -4567,18 +4569,31 @@ lifecycle. Do not implement Task 10 and the Task 12 worker-wiring step concurren
    Provider adapters cannot implement, wrap, or replace that high-level port; they implement only
    the lower `ProviderObservationPort`. Every activity attempt must:
    (a) in tx1 install `ref.tenantId()` as tenant context, call FT8 `claimReconciliation`, and commit;
-   (b) expose only state for `NotReconcilable`, expose no capability for `Missing`, and retain an
-   `Acquired` `ReconciliationLease` only in that activity attempt's process memory; (c) perform the
-   bounded read-only `ProviderObservationPort.observe(lease, PT2S)` with no JDBC transaction open;
-   and (d) in tx2 reinstall tenant context and use that same in-memory lease. Terminal resolutions
+   (b) expose only state for `NotReconcilable` and no capability for `Missing`. Map a live
+   `RECONCILING` state to retryable `RECONCILIATION_BUSY`; map already-terminal `SUCCEEDED`,
+   `CONFIRMED_NO_EFFECT`, and `DIVERGED` directly to `CONVERGED`, `CONFIRMED_NO_EFFECT`, and
+   `DIVERGED` with zero renewal, Provider observation, tx2, event, or outbox; and map only the
+   remaining non-terminal non-reconcilable states to non-retryable
+   `RECONCILIATION_NOT_RECONCILABLE`. For `Acquired`, tx1 calls the existing
+   `renewReconciliation(tx, claimedLease, PT30S)` with the complete claim fence before commit and
+   retains only the returned renewed `ReconciliationLease` in that activity attempt's process
+   memory; claim, safe-snapshot load, and renewal are one atomic transaction, so any failure rolls
+   all three back. (c) Perform the bounded read-only
+   `ProviderObservationPort.observe(renewedLease, PT2S)` with no JDBC transaction open; and (d) in
+   tx2 reinstall tenant context and use that same renewed in-memory lease. Terminal resolutions
    call `completeReconciliation` with canonical safe `DomainEvent`/`OutboxMessage` so terminal intent,
-   event, and outbox commit atomically. `STILL_UNKNOWN` or a normalized retryable observation error
-   calls `markReconciliationOutcomeUnknown`. A stale fence rolls tx2 back. Capability data is
-   discarded when the attempt ends.
-3. Reconciliation is observation-only. Production workflow/activity packages and their runtime
-   dependency graph contain no Provider mutation port, generic Provider client, Provider SDK, or
-   generic HTTP/gRPC client. Every integration path that executes an activity uses the same probe
-   with separate `/observe` and `/mutate` counters and requires mutation count `0`.
+   event, and outbox commit atomically. `STILL_UNKNOWN` or closed retryable
+   `OBSERVATION_UNAVAILABLE` calls `markReconciliationOutcomeUnknown`; the retryable failure is
+   raised only after tx2 commits. A stale fence rolls tx2 back. Capability data is discarded when
+   the attempt ends.
+3. Reconciliation is observation-only. `..temporal.workflow..` and `..worker.reconciliation..`
+   contain no Provider mutation port, Provider SDK, declared HTTP client, `java.net` client,
+   `io.grpc`/Netty transport, or direct Temporal service client. Only the bounded Temporal runtime
+   package may use Temporal's official gRPC transport for mTLS. Resolved `io.grpc:*` coordinates are
+   allowed only when their reverse dependency chain reaches
+   `io.temporal:temporal-serviceclient:1.28.1`; the worker declares no direct HTTP, gRPC, or Provider
+   client dependency. Every integration path that executes an activity uses the same probe with
+   separate `/observe` and `/mutate` counters and requires mutation count `0`.
 4. Production accepts only a `grpcs://` endpoint plus a client certificate, PKCS#8 private key,
    trust certificate, expected server name, and allowed secret root. Blank, unreadable, malformed,
    mismatched, expired, untrusted, wrong-name, escaping, or over-permissioned material prevents a
@@ -4594,50 +4609,83 @@ lifecycle. Do not implement Task 10 and the Task 12 worker-wiring step concurren
 7. The crash test is not an in-process worker restart. A parent JVM owns the TLS Temporal service
    and probe counters, kills the first child with `Process.destroyForcibly()`, waits for its exit,
    starts a distinct replacement child, and observes completion from persisted Temporal history.
-8. Integration tests use exactly `temporalio/server:1.28.1`, the source coordinate later incorporated
-   unchanged by Task 13. A one-shot schema-setup container must finish successfully before a distinct
-   real server container starts; `auto-setup`, `start-dev`, an in-process service, fake frontend, or
-   TLS proxy does not satisfy Task 10. Tests resolve and record the coordinate's actual immutable
-   repository digest. A registry-resolution failure, including the current local failure, is not
-   GREEN and cannot be replaced with a guessed/cached digest. The real server frontend terminates and
-   verifies mTLS and owns the test namespace.
+8. Integration tests use exactly `temporalio/server:1.28.1` and schema tool
+   `temporalio/admin-tools:1.28.1-tctl-1.18.4-cli-1.4.1`; both source coordinates are later
+   incorporated unchanged by Task 13. A one-shot schema-setup container must finish successfully
+   before a distinct real server container starts; `auto-setup`, `start-dev`, an in-process service,
+   fake frontend, or TLS proxy does not satisfy Task 10. Tests resolve and record each coordinate's
+   actual immutable
+   multi-platform repository digest
+   `sha256:acaf8454947544312216c6e153929b7db060571f736bbced290bfaf76e287499` and require the
+   `linux/amd64` manifest
+   `sha256:0842f5e71b5c935adad01d133457d886e1748a675f79f5cbb6758aee5031dcb0`.
+   Registry resolution was independently confirmed through Docker Hub tag metadata, raw manifest
+   inspection, and the local official-coordinate `RepoDigest`. Any future resolution failure or
+   mismatch is not GREEN and cannot be replaced with a guessed/cached digest. The schema tool must
+   resolve to repository digest
+   `sha256:01537b62d995f27a0f0d33a01ac4caa6779622f454fb2eb36fed0dccd45c6244`
+   and linux/amd64 manifest
+   `sha256:00864ac86e79aec0d418582892d3435564c613b68b72fe2e41e9c50176794983`.
+   The real server frontend terminates and verifies mTLS and owns the test namespace.
 9. `WorkerTenantTransactions` receives the worker process's caller-owned `DSLContext` backed by its
-   caller-owned datasource and uses only `DSLContext.transactionResult`. Every call executes
-   `set_config('app.tenant_id', tenantId, true)`, reads `accord_security.current_tenant_id()`, and
-   verifies equality before invoking the callback with the transaction DSLContext. It owns no pool,
-   datasource, transaction manager, implicit transaction, or retry policy.
+    caller-owned datasource and exposes exactly
+    `public <T> T inTenant(UUID tenantId, Function<DSLContext,T> work)`. It uses only
+    `DSLContext.transactionResult`. Every call executes
+   `set_config('app.tenant_id', tenantId, true)`, reads `accord_security.current_tenant_id()` and
+   `current_user`, and verifies the tenant plus literal session role `accord_worker` before invoking
+   the callback with the transaction DSLContext. It owns no pool, datasource, transaction manager,
+   implicit transaction, or retry policy.
 10. `ProviderObservationPort` is read-only and has exactly
     `ReconciliationResolution observe(ReconciliationLease lease, Duration timeout)`. It exposes no
     mutation method and returns no raw Provider response. `FencedReconciliationObservation` always
     supplies the constant `Duration.ofSeconds(2)`; a Provider adapter cannot choose or extend it.
+11. `ReconciliationRuntimeProperties` requires `instanceId` matching
+    `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$` with no default and requires `claimLease` to equal `PT8S`.
+    The instance ID is exactly the claim owner and terminal event actor. Child A and Child B use
+    distinct fixed IDs. `ReconciliationFailure` has only closed codes
+    `OBSERVATION_UNAVAILABLE`, `RECONCILIATION_BUSY`, `RECONCILIATION_MISSING`,
+    `RECONCILIATION_NOT_RECONCILABLE`, `RECONCILIATION_FENCE_LOST`,
+    `RECONCILIATION_PERSISTENCE_UNAVAILABLE`, and `RECONCILIATION_INTERNAL`; it has no caller text,
+    cause, details, or writable stack trace. Activity failures emit only a constant generic message
+    and one code. Raw Provider/SQL exceptions never enter Temporal history, heartbeat, result, log,
+    or metric attributes.
+12. The Activity emits an identifier-only heartbeat immediately on entry and the fenced orchestrator
+    emits another after tx1 commit, immediately before and after observation, and immediately before
+    and after tx2. The six ordered checkpoints carry exactly `intentId`. The caller-owned pool and
+    PostgreSQL 17 session enforce connection acquisition/driver connect at most `PT2S`, validation
+    at most `PT1S`, socket at most `PT4S`, cancel at most `PT2S`, statement at most `PT2S`, lock at
+    most `PT1S`, idle transaction at most `PT3S`, and transaction at most `PT6S`. Each interval from
+    one completed heartbeat call through the next completed heartbeat call also has one
+    application-owned monotonic `PT8S` semantic deadline. Blocking calls receive only its remaining
+    budget, and the interval includes pool acquisition, database work, Java scheduling, and the SDK
+    heartbeat call itself; reaching the deadline fails closed instead of starting or continuing more
+    work. Tests measure the real completed-call interval as `< PT10S`, leaving at least `PT2S` beyond
+    the semantic cap for runtime jitter. Observation is `PT2S`, and an attempt remains strictly below
+    start-to-close `PT30S`. Missing or enlarged bounds fail startup.
 
-- [ ] **TDD prerequisite: expose safe intent scope before production reconciliation**
+- [ ] **Ancestor prerequisite: verify the already-committed safe intent scope**
 
-Because V002 is still unpublished, extend `ExternalIntentSnapshot` and
-`load_external_intent_snapshot` in place with the exact non-sensitive `scopeType`/`scopeId` pair from
-Task 8. Write the catalog and store tests first: `ReliableDeliveryMigrationTest` asserts exact OUT
-order/types and unchanged ACL, while `JooqExternalIntentStoreTest` proves same/cross-tenant loads,
-successor scope preservation, and unchanged null capability/provider columns on non-winning claims.
-Runtime roles retain zero table/column SELECT on `external_call_intent`; the security-definer snapshot
-routine remains the only scope source. RED is the changed exact snapshot expectation; GREEN requires
-the SQL routine, Java record, and mapper to agree without adding a capability field.
-
-Run the focused FT8 tests, then stage this unpublished-V002 fix separately before any Task 10 worker
-implementation:
+Task 10 neither edits nor stages the safe-scope work already committed as `7f973ae`. Before writing a
+worker test, fail closed unless that commit is an ancestor of `HEAD`, all five owned paths are clean in
+both worktree and index, and the focused FT8 regression remains GREEN:
 
 ~~~powershell
-./gradlew.bat :database:control-plane:test --tests '*ReliableDeliveryMigrationTest' :apps:control-plane:modules:reliability:test --tests '*JooqExternalIntentStoreTest' --no-daemon --dependency-verification=strict
-$task10SafeScopePaths = @(
+git merge-base --is-ancestor 7f973ae HEAD
+if ($LASTEXITCODE -ne 0) { throw '7f973ae is not an ancestor of HEAD' }
+$safeScopePaths = @(
   'database/control-plane/migrations/V002__reliable_event_delivery.sql'
   'database/control-plane/src/test/java/com/inforvans/accord/database/ReliableDeliveryMigrationTest.java'
   'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExternalIntentSnapshot.java'
   'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/JooqExternalIntentStore.java'
   'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/JooqExternalIntentStoreTest.java'
 )
-git add -- $task10SafeScopePaths
-git diff --cached --name-only
-git commit -m "fix: expose safe external intent scope"
+if (git diff --name-only -- $safeScopePaths) { throw '7f973ae safe-scope worktree paths are dirty' }
+if (git diff --cached --name-only -- $safeScopePaths) { throw '7f973ae safe-scope index paths are dirty' }
+./gradlew.bat :database:control-plane:test --tests '*ReliableDeliveryMigrationTest' :apps:control-plane:modules:reliability:test --tests '*JooqExternalIntentStoreTest' --no-daemon --dependency-verification=strict
 ~~~
+
+Expected: `7f973ae` is an ancestor, both path checks are empty, and the regression passes. The five
+paths do not appear in the Task 10 implementation manifest below.
 
 - [ ] **Step 1: Write the RED workflow boundary and retry tests**
 
@@ -4687,13 +4735,57 @@ public interface ReconciliationActivities {
 
 @WorkflowInterface
 public interface ReconciliationWorkflow {
-    @WorkflowMethod
+    @WorkflowMethod(name = "accord.reconciliation.v1")
     ReconciliationOutcome reconcile(ReconciliationWorkflowRef ref);
 }
 
 @FunctionalInterface
 public interface ProviderObservationPort {
     ReconciliationResolution observe(ReconciliationLease lease, Duration timeout);
+}
+
+@ConfigurationProperties("accord.reconciliation")
+public record ReconciliationRuntimeProperties(String instanceId, Duration claimLease) {
+    private static final Pattern INSTANCE_ID =
+        Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$");
+
+    public ReconciliationRuntimeProperties {
+        if (instanceId == null || !INSTANCE_ID.matcher(instanceId).matches()) {
+            throw new IllegalArgumentException("invalid reconciliation instance ID");
+        }
+        if (!Duration.ofSeconds(8).equals(claimLease)) {
+            throw new IllegalArgumentException("reconciliation claim lease must be PT8S");
+        }
+    }
+}
+
+public final class ReconciliationFailure extends RuntimeException {
+    private static final long serialVersionUID = 1L;
+
+    public enum Code {
+        OBSERVATION_UNAVAILABLE,
+        RECONCILIATION_BUSY,
+        RECONCILIATION_MISSING,
+        RECONCILIATION_NOT_RECONCILABLE,
+        RECONCILIATION_FENCE_LOST,
+        RECONCILIATION_PERSISTENCE_UNAVAILABLE,
+        RECONCILIATION_INTERNAL
+    }
+
+    private final Code code;
+
+    private ReconciliationFailure(Code code) {
+        super(Objects.requireNonNull(code, "code").name(), null, false, false);
+        this.code = code;
+    }
+
+    public static ReconciliationFailure of(Code code) {
+        return new ReconciliationFailure(code);
+    }
+
+    public Code code() {
+        return code;
+    }
 }
 ~~~
 
@@ -4706,6 +4798,33 @@ Run:
 Expected RED: compilation fails because the temporal types do not exist. No database or Docker
 service is needed for this first failure.
 
+- [ ] **Dependency bootstrap after Step 1 RED and before Step 2 GREEN**
+
+Only after observing the Step 1 RED, add version `bouncycastle = "1.81"` and library alias
+`bouncycastle-pkix` for `org.bouncycastle:bcpkix-jdk18on` to `gradle/libs.versions.toml`. Add
+`implementation libs.temporal.sdk`, `implementation libs.spring.boot.jooq`,
+`runtimeOnly libs.postgresql`, `testImplementation libs.temporal.testing`,
+`testImplementation libs.bouncycastle.pkix`, database control-plane test fixtures, Flyway core plus
+PostgreSQL, and the existing JUnit/Testcontainers PostgreSQL dependencies to the worker build.
+Bouncy Castle is test-only and must remain absent from the runtime graph.
+
+The worker build also defines `verifyTemporalGrpcClosure` over the resolved runtime graph and wires it
+into `check`. For every resolved `io.grpc:*` component, it reverse-traverses every incoming path to
+the runtime root and fails if any path does not pass through exact
+`io.temporal:temporal-serviceclient:1.28.1`; direct declarations and alternate gRPC consumers fail.
+A hostile Gradle fixture injects one direct `io.grpc` dependency and proves the real gate rejects it.
+
+Bootstrap the focused worker lock and dependency verification metadata together before compiling
+Step 2 GREEN. This first writer is intentionally non-strict because the new artifacts do not yet
+exist in verification metadata; review only the newly introduced Temporal, Bouncy Castle, database,
+and their transitive coordinates immediately afterward. Do not run a strict resolution until this
+review is complete:
+
+~~~powershell
+./gradlew.bat :apps:control-plane:worker:dependencies --write-locks --write-verification-metadata sha256,pgp --no-configuration-cache --no-daemon
+git diff -- apps/control-plane/worker/gradle.lockfile gradle/verification-metadata.xml
+~~~
+
 - [ ] **Step 2: Add the deterministic workflow and production fenced observation**
 
 Implement `ReadOnlyReconciliationActivity` as a final class with one non-null high-level
@@ -4714,27 +4833,55 @@ once and has no capability-bearing field or other port. Production final class
 `FencedReconciliationObservation implements ReconciliationObservationPort`; runtime configuration
 constructs it from `WorkerTenantTransactions`, FT8 `JooqExternalIntentStore`, and exactly one
 `ProviderObservationPort`. No Provider adapter or integration test supplies an alternate high-level
-implementation. The activity heartbeats only `ref.intentId()` immediately before and after its one
-high-level port invocation. Implement
-`ReconciliationWorkflowImpl` with one activity stub
-using a 30-second schedule-to-close timeout, ten-second start-to-close timeout, three-second
-heartbeat timeout, one-second initial retry, coefficient `2.0`, eight-second maximum interval, and
-five maximum attempts. Treat `RECONCILIATION_NOT_RECONCILABLE` and `RECONCILIATION_MISSING` as
-non-retryable. Tests prove heartbeat details contain only the intent UUID, never tenant/capability/
-Provider facts, and that missed heartbeats make the attempt eligible for prompt reassignment.
+implementation. `ReadOnlyReconciliationActivity.observe` first emits
+`Activity.getExecutionContext().heartbeat(ref.intentId())` and only then delegates once to the
+high-level port. `FencedReconciliationObservation` receives a package-private, constructor-injected
+heartbeat callback whose only argument type is `UUID`; the production adapter delegates to
+`Activity.getExecutionContext().heartbeat(intentId)` and tests inject a recorder. It emits heartbeats
+immediately after tx1 commits, immediately before and after Provider observation, and immediately
+before and after tx2 on the normal return path. The response-loss test cuts transport after the
+Activity method has returned, never by inserting a production hook. Every detail is exactly
+`ref.intentId()` and never contains tenant, fence, capability, Provider fact, or
+free text. Implement `ReconciliationWorkflowImpl` with one activity stub using schedule-to-close
+`PT2M`, start-to-close `PT30S`, heartbeat `PT10S`, one-second initial retry, coefficient `2.0`,
+eight-second maximum interval, and eight maximum attempts. Eight attempts are required so the closed
+retry window reaches beyond the initial `PT8S` claim plus its committed `PT30S` extension while the
+schedule-to-close `PT2M` remains the outer bound. Treat
+`RECONCILIATION_NOT_RECONCILABLE` and `RECONCILIATION_MISSING` as non-retryable. Tests inspect the
+actual `ActivityOptions`, assert the six ordered heartbeat checkpoints on every acquired attempt,
+and prove heartbeat expiry makes an abruptly lost attempt eligible for reassignment.
+
+`ReadOnlyReconciliationActivity` catches `ReconciliationFailure` outside its heartbeat/cancellation
+path. It maps `RECONCILIATION_MISSING`, `RECONCILIATION_NOT_RECONCILABLE`, and
+`RECONCILIATION_INTERNAL` with `ApplicationFailure.newNonRetryableFailure("reconciliation rejected",
+code.name())`; all other closed codes use
+`ApplicationFailure.newFailure("reconciliation retry required", code.name())`. It attaches no cause,
+details, original message, lease, or Provider value.
 
 Create `FencedReconciliationObservationTest.java` first with the real FT8 PostgreSQL fixture and
 worker login/role. For every attempt, assert this exact production sequence:
 
+Every Task 10 database-backed fixture configures Flyway target exactly `003`, asserts successful
+history is exactly V001/V002/V003, and fails if V004 is present; no Task 10 test calls unbounded
+`migrate()`/latest even after Task 12 adds V004 to the classpath.
+
 1. `WorkerTenantTransactions` opens tx1 through the injected caller `DSLContext.transactionResult`,
    installs and reads back transaction-local tenant context, calls `claimReconciliation`, and only
-   for `Acquired` loads the safe snapshot scope/root identifier in that same transaction. It commits
-   before any Provider observation.
-2. `Missing` returns no capability; `NotReconcilable` exposes only its state. Both fail closed with
-   their normalized non-retryable code and make zero low-level observation calls.
-3. Only `Acquired` retains the lease plus the minimal safe snapshot `scopeType`, `scopeId`, and
+   for `Acquired` loads the safe snapshot scope/root identifier and calls
+   `renewReconciliation(tx, claimedLease, Duration.ofSeconds(30))` in that same transaction. The
+   renewal uses the full generation/token/owner/lease/provider/request fence; only its returned lease
+   proceeds. Tx1 commits claim, snapshot read, and renewal before any Provider observation, while an
+   exception or timeout rolls the entire claim-and-renew transaction back.
+2. `Missing` returns no capability and fails non-retryably with `RECONCILIATION_MISSING`.
+   `NotReconcilable` exposes only its state: a still-live `RECONCILING` fence raises retryable
+   `RECONCILIATION_BUSY`; terminal `SUCCEEDED`, `CONFIRMED_NO_EFFECT`, and `DIVERGED` map directly to
+   `CONVERGED`, `CONFIRMED_NO_EFFECT`, and `DIVERGED`; every other state raises non-retryable
+   `RECONCILIATION_NOT_RECONCILABLE`. A terminal mapping represents a prior tx2 commit whose Activity
+   response was lost: it returns without renewal, Provider observation, tx2, or another domain
+   event/outbox. Every non-acquired branch makes zero renewal and low-level observation calls.
+3. Only `Acquired` retains the renewed lease plus the minimal safe snapshot `scopeType`, `scopeId`, and
    `rootIntentId` finalization context in that activity invocation's memory. The low-level port
-   receives `(lease, PT2S)` after tx1 closes; a connection/transaction probe proves no JDBC
+   receives `(renewedLease, PT2S)` after tx1 closes; a connection/transaction probe proves no JDBC
    transaction is open, and its `/mutate` count remains zero.
 4. Terminal `ReconciliationResolution` opens tx2, reinstalls/verifies tenant context, and calls
    `completeReconciliation` with one canonical `DomainEvent`/`OutboxMessage`. The activity process
@@ -4749,12 +4896,28 @@ worker login/role. For every attempt, assert this exact production sequence:
    completion routine revalidates scope against the intent row together with the full lease fence;
    terminal intent, event, and outbox commit atomically.
 5. `STILL_UNKNOWN` and a normalized retryable low-level error each open tx2 with the same in-memory
-   lease and call `markReconciliationOutcomeUnknown`. The retryable error is rethrown only after that
-   commit. A stale lease at either completion path rolls back tx2 and exposes no capability.
+   lease and call `markReconciliationOutcomeUnknown`. A Provider adapter converts transport failure
+   to closed `OBSERVATION_UNAVAILABLE` without its original cause/message; the activity rethrows
+   only the closed retryable code after tx2 commits. A lost fence maps to retryable
+   `RECONCILIATION_FENCE_LOST`; SQLState class `08`, `40`, `53`, and `57P01` map to retryable
+   `RECONCILIATION_PERSISTENCE_UNAVAILABLE`; unexpected failures map to non-retryable
+   `RECONCILIATION_INTERNAL`. Heartbeat cancellation remains a Temporal SDK signal and is never
+   swallowed or remapped. A stale lease at either completion path rolls back tx2 and exposes no
+   capability.
 
 The test also proves rollback after each tx2 write, exact safe-event bytes, all terminal resolution
-mappings, no mutation API on `ProviderObservationPort`, `FencedReconciliationObservation` as the sole
-production `ReconciliationObservationPort` implementation, and zero Provider mutation calls.
+mappings, replay of each already-terminal tx1 state with zero observation and no additional
+event/outbox, no mutation API on `ProviderObservationPort`, `FencedReconciliationObservation` as the
+sole production `ReconciliationObservationPort` implementation, and zero Provider mutation calls.
+Using the same real PostgreSQL 17 fixture, bounded-delay cases hold pool acquisition until just below
+`PT2S`, execute statements just below `PT2S`, keep each transaction just below `PT6S`, and delay the
+Provider response just below `PT2S`; tx2 must still commit, all six heartbeats remain ordered, and no
+replacement is dispatched. Separate over-limit cases exhaust each bound: connection/statement/
+transaction failures map only to closed `RECONCILIATION_PERSISTENCE_UNAVAILABLE` and roll back the
+active transaction, while an observation timeout maps only to closed
+`OBSERVATION_UNAVAILABLE`, runs no JDBC work during observation, and follows the existing fenced tx2
+unknown-outcome path. If that tx2 exceeds its own fence or database budget it rolls back. Tests assert
+no raw timeout/SQL/Provider cause enters history, heartbeat, log, metric, event, or outbox.
 
 Run:
 
@@ -4762,11 +4925,12 @@ Run:
 ./gradlew.bat :apps:control-plane:worker:test --tests '*ReconciliationWorkflowTest' --tests '*FencedReconciliationObservationTest' --no-daemon
 ~~~
 
-Expected GREEN: retryable observation runs twice, non-retryable observation runs once, workflow
-input is only `ReconciliationWorkflowRef`, every acquired attempt follows the fenced transaction
-sequence through the production orchestrator, safe event scope comes from PostgreSQL snapshot rather
-than the lease/Provider adapter, no capability leaves process memory, and every case reports mutation
-count zero.
+Expected GREEN: retryable observation runs twice, non-retryable observation runs once, a replacement
+attempt against the committed renewed PT30S fence observes retryable `RECONCILIATION_BUSY` before the
+same workflow acquires the next generation, workflow input is only `ReconciliationWorkflowRef`,
+every acquired attempt follows the fenced transaction sequence through the production orchestrator,
+safe event scope comes from PostgreSQL snapshot rather than the lease/Provider adapter, no
+capability leaves process memory, and every case reports mutation count zero.
 
 - [ ] **Step 3: Write RED production mTLS configuration tests**
 
@@ -4775,17 +4939,48 @@ catalog. `TemporalTestCertificates` uses it to create an ephemeral CA, a server 
 `temporal.test`, and distinct trusted, untrusted, expired, wrong-EKU, wrong-SAN, and key-mismatched
 cases under the JUnit temporary directory; no private key is checked into the repository.
 
-`TemporalMtlsTestServer` starts PostgreSQL 17.5, runs an explicit one-shot schema setup to successful
-exit, and then starts a distinct real server from exactly `temporalio/server:1.28.1` on a private
-Testcontainers network. It resolves the source through the registry, obtains the actual repository
-digest from Docker inspection, and rejects missing, tag-only, cached-but-unresolved, or fabricated
-identity; the current local registry-resolution failure therefore blocks GREEN. Capture mode writes
-both the exact coordinate and actual digest to `reconciliation-workflow-v1.provenance.json`; once
-committed, both mTLS and replay tests require byte-equal coordinate and digest. Mount an ephemeral Temporal server
-configuration that enables TLS on the real frontend listener, requires and verifies client
-certificates, uses the generated server key/certificate and CA, and creates one fixed test namespace.
-Readiness is the actual frontend gRPC health/namespace response over trusted mTLS. The helper rejects
-`TestWorkflowEnvironment`, an in-process service, a fake frontend, or a separate TLS-terminating proxy.
+`TemporalMtlsTestServer` starts two isolated PostgreSQL 17.5 authorities: one control-plane
+container/database migrated with Flyway target exactly `003` plus fenced activity state, and one Temporal container with
+separate `temporal` and `temporal_visibility` databases. A one-shot container from exact schema
+source `temporalio/admin-tools:1.28.1-tctl-1.18.4-cli-1.4.1` overrides its default entrypoint with
+exact executable `/usr/local/bin/temporal-sql-tool`. The control fixture calls
+`Flyway.configure().target("003")`; its history must contain exactly one successful row for each of
+V001, V002, and V003 and no V004 row, even when V004 later exists on the classpath.
+
+For each Temporal database, the helper invokes these exact argument arrays, substituting only the
+fixed database and matching versioned schema directory shown; options are never assembled by a
+shell:
+
+~~~text
+["/usr/local/bin/temporal-sql-tool","--endpoint","temporal-postgres","--port","5432","--user","temporal_schema_admin","--database","temporal","--plugin","postgres12","create-database","--defaultdb","postgres"]
+["/usr/local/bin/temporal-sql-tool","--endpoint","temporal-postgres","--port","5432","--user","temporal_schema_admin","--database","temporal","--plugin","postgres12","setup-schema","-v","0.0"]
+["/usr/local/bin/temporal-sql-tool","--endpoint","temporal-postgres","--port","5432","--user","temporal_schema_admin","--database","temporal","--plugin","postgres12","update-schema","-d","/etc/temporal/schema/postgresql/v12/temporal/versioned"]
+["/usr/local/bin/temporal-sql-tool","--endpoint","temporal-postgres","--port","5432","--user","temporal_schema_admin","--database","temporal_visibility","--plugin","postgres12","create-database","--defaultdb","postgres"]
+["/usr/local/bin/temporal-sql-tool","--endpoint","temporal-postgres","--port","5432","--user","temporal_schema_admin","--database","temporal_visibility","--plugin","postgres12","setup-schema","-v","0.0"]
+["/usr/local/bin/temporal-sql-tool","--endpoint","temporal-postgres","--port","5432","--user","temporal_schema_admin","--database","temporal_visibility","--plugin","postgres12","update-schema","-d","/etc/temporal/schema/postgresql/v12/visibility/versioned"]
+~~~
+
+The password is supplied only as the one-shot container environment variable `SQL_PASSWORD`; it is
+absent from argv, command rendering, logs, exceptions, provenance, and test evidence. The helper
+asserts the executable and both versioned directories exist, verifies every exit code is `0`, uses a
+test-only schema login, redacts bounded child output, and starts the distinct real server from exactly
+`temporalio/server:1.28.1` on the private Testcontainers network.
+
+The helper resolves both image sources through registry metadata plus raw manifest inspection,
+obtains the actual local RepoDigest from Docker inspection, and rejects missing, tag-only,
+cached-but-unresolved, or fabricated identity. The server requires repository digest
+`sha256:acaf8454947544312216c6e153929b7db060571f736bbced290bfaf76e287499` and the
+`linux/amd64` manifest named above. The schema tool requires repository digest
+`sha256:01537b62d995f27a0f0d33a01ac4caa6779622f454fb2eb36fed0dccd45c6244` and linux/amd64
+manifest `sha256:00864ac86e79aec0d418582892d3435564c613b68b72fe2e41e9c50176794983`.
+An unresolved or mismatched identity blocks GREEN. Capture mode writes both exact coordinates and
+digests to `reconciliation-workflow-v1.provenance.json`; once committed, mTLS and replay tests
+require byte-equal coordinates and digests. Mount an ephemeral Temporal server configuration that
+enables TLS on the real frontend listener, requires and verifies client certificates, uses the
+generated server key/certificate and CA, and creates fixed namespace
+`accord-reconciliation-test-v1`. Readiness is the actual frontend gRPC health/namespace response
+over trusted mTLS. The helper rejects `TestWorkflowEnvironment`, an in-process service, a fake
+frontend, or a separate TLS-terminating proxy.
 
 The trusted case and every other integration case that can dispatch an activity use
 production `FencedReconciliationObservation`; `ReconciliationProbeServer` is wired only through a
@@ -4810,9 +5005,9 @@ Test this matrix with real `WorkflowServiceStubs`, `WorkflowClient`, `WorkerFact
 | insecure private-key owner/mode or ACL for the current platform | setup fails before stubs exist |
 | non-positive RPC/shutdown timeout | property binding fails before stubs exist |
 
-Before the first GREEN mTLS run, add the Temporal and Bouncy Castle build coordinates and run the
-metadata-generation command from Step 7, then review only those new artifacts/signatures. Do not
-weaken dependency verification or attempt strict lock resolution before their metadata exists.
+Before the first GREEN mTLS run, verify the dependency-bootstrap lock and metadata contain the exact
+reviewed Temporal and Bouncy Castle closure. Do not weaken dependency verification or attempt strict
+resolution before that metadata exists.
 
 Run:
 
@@ -4833,10 +5028,20 @@ spring:
     username: ${ACCORD_WORKER_DB_USER:accord_worker_login}
     password: ${ACCORD_WORKER_DB_PASSWORD:local-worker-only}
     hikari:
-      connection-init-sql: SET ROLE ${ACCORD_DB_SESSION_ROLE:accord_worker}
+      connection-init-sql: SET ROLE accord_worker
+      connection-timeout: 2000
+      validation-timeout: 1000
+      data-source-properties:
+        connectTimeout: 2
+        socketTimeout: 4
+        cancelSignalTimeout: 2
+        options: "-c statement_timeout=2000 -c lock_timeout=1000 -c idle_in_transaction_session_timeout=3000 -c transaction_timeout=6000"
   flyway:
     enabled: false
 accord:
+  reconciliation:
+    instance-id: ${ACCORD_PROCESS_INSTANCE_ID}
+    claim-lease: PT8S
   temporal:
     endpoint: ${ACCORD_TEMPORAL_ENDPOINT}
     namespace: ${ACCORD_TEMPORAL_NAMESPACE}
@@ -4850,20 +5055,61 @@ accord:
     shutdown-timeout: PT20S
 ~~~
 
+There is no configurable session-role substitution: the worker artifact is authorized only for literal
+`accord_worker`. Configuration binding rejects a missing process instance ID, a value outside
+`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`, or a claim lease other than exactly `PT8S`. The same instance
+ID is the database claim owner and terminal event actor; it never uses a generated UUID. Integration
+tests assert Hikari connection `2s`/validation `1s`, pgjdbc connect `2s`/socket `4s`/cancel `2s`, and
+server-side statement `2s`/lock `1s`/idle-transaction `3s`/PostgreSQL 17 transaction `6s` from live
+sessions. The orchestrator's monotonic `PT8S` completed-heartbeat-to-completed-heartbeat deadline
+includes pool acquisition, transaction work, scheduling, and SDK call overhead and passes only the
+remaining time to each operation; measured intervals must remain `< PT10S`. Observation remains
+`PT2S`, and the complete attempt is below start-to-close `PT30S`. An
+absent, zero, negative, enlarged, unsupported, or environment-erased timeout fails startup/tests
+rather than falling back to driver/database defaults. Fixtures verify PostgreSQL reports major
+version 17 before relying on `transaction_timeout`.
+
 Parse the endpoint once as a URI and require scheme `grpcs`, a host and explicit port, and no user
 info, path, query, or fragment. Pass only the validated `host:port` authority to
 `WorkflowServiceStubsOptions.setTarget`; enable HTTPS, install the exact client/trust `SslContext`,
 and apply the validated server name through the channel authority override. Never pass
 `grpcs://...` to gRPC name resolution and never retry with the raw endpoint.
 
-Resolve the configured secret root and each Kubernetes Secret symlink chain with `toRealPath`, reject
-loops/broken links, and require every resolved file to remain beneath the resolved root. Recheck a
-bounded regular file before opening it and read at most 64 KiB. On POSIX, a private key is owned by
-root or the effective user, any readable group is one of the process groups, and no unrelated-user
-permission or group/other write bit is allowed; certificate/trust files forbid group/other writes.
-On Windows, an ACL adapter accepts only the service identity, Administrators, and SYSTEM as owners,
-rejects broad read/write grants on the private key, and rejects broad writes on certificates. Tests
-exercise both permission adapters independent of the host OS. Error messages name only the property.
+`TemporalSecretFileLoader` resolves the configured secret root and every Kubernetes Secret symlink
+hop with `toRealPath`, rejects loops/broken links, and requires every resolved directory and file to
+remain beneath the resolved root. It snapshots the projection target and every final file's real path,
+`fileKey`, size, last-modified time, owner, and ACL/mode; opens the resolved regular file with
+`FileChannel` plus `NOFOLLOW_LINKS`; reads exactly `1..65536` bytes through that already-open handle;
+then repeats real-path, attributes, owner, ACL/mode, channel-size, and whole-projection-target checks.
+On POSIX it must traverse relative to an opened `SecureDirectoryStream` and open the final entry with
+`NOFOLLOW_LINKS`; absence of secure-directory support fails closed. On Windows it must use the
+platform secure-open option `NOFOLLOW_LINKS` plus `ExtendedOpenOption.NOSHARE_DELETE` and keep that
+handle open through validation/read/revalidation; unsupported no-share semantics fail closed. The
+opened handle's size/identity and the path's file key must agree before and after the read. Any missing stable identity, changed hop/attribute, short/extra read, or concurrent `..data` rotation
+fails closed and zeroes every accumulated buffer; it never validates one path and reopens another.
+The root and all non-projection parent directories must also be owned by an approved identity and
+must deny unapproved rename/create/delete-child/write-ACL/write-owner authority, closing ancestor
+replacement races. Private-key byte arrays are cleared after TLS context construction and on every
+failure.
+
+`TemporalSecretAclPolicy` is fail-closed when the host exposes no usable ACL view.
+`PosixTemporalSecretAclPolicy` reads numeric `unix:uid`/`unix:gid` plus process primary and
+supplementary numeric groups, never localized names: secret directories forbid group/other write;
+private keys forbid every other-user bit and group write, with group read allowed only for a process
+group; certificates forbid group/other write. `WindowsTemporalSecretAclPolicy` compares resolved
+`UserPrincipal` objects/SIDs, permits only the service identity, SYSTEM, or Administrators as owner,
+evaluates inherited and explicit ALLOW/DENY entries plus parent `DELETE_CHILD`, rejects every
+unapproved read/write/delete/ACL/owner right on the private key, and rejects unapproved
+write/delete/ACL/owner rights on certificates or their directories. An unresolved principal,
+unsupported right, null file key, or localized display-name comparison fails closed. Host-independent
+tests inject POSIX and Windows attribute/ACL snapshots and exercise replacement before open, during
+read, after read, projection rotation, inherited directory authority, and buffer zeroing. On Windows,
+test-generated private keys must first disable inherited permissions and install the exact approved
+owner/SYSTEM/Administrators ACL before exercising the success path; the inherited `%TEMP%` ACL is
+never implicitly approved. Error messages name only the property.
+
+`TemporalServiceStubsFactory` alone parses validated secret material and constructs the Netty mTLS
+channel/stubs. Workflow and reconciliation packages never import it or any gRPC/Netty type.
 
 `TemporalRuntimeConfiguration` builds `WorkerTenantTransactions` from the process-owned `DSLContext`,
 builds the final `FencedReconciliationObservation` around the configured low-level
@@ -4904,13 +5150,29 @@ canonical protobuf JSON. Capture is reproducible only through:
 git diff -- apps/control-plane/worker/src/test/resources/temporal/reconciliation-workflow-v1.json apps/control-plane/worker/src/test/resources/temporal/reconciliation-workflow-v1.provenance.json
 ~~~
 
-The capture also writes the closed provenance sidecar with SDK coordinate/version `1.28.1`, the SDK
-artifact SHA-256 approved in `verification-metadata.xml`, exact server source coordinate
-`temporalio/server:1.28.1` and its registry-resolved actual repository digest, namespace, task queue,
-workflow ID/type, exact capture command, and history SHA-256. Tests recompute every value available
-locally and reject a tag-only/cached-but-unresolved server identity, coordinate or digest mismatch,
-history edit, unknown provenance field, or capture over a non-mTLS channel. Capture cannot become
-GREEN until the source coordinate resolves to that actual digest.
+Give `@WorkflowMethod` the explicit type name `accord.reconciliation.v1`; never depend on the Java
+interface name as an implicit wire type. The capture writes canonical key-sorted JSON with exactly
+these top-level fields: `capture_argv`, `history_resource`, `history_sha256`, `namespace`, `schema`,
+`schema_tool`, `sdk`, `server`, `server_name`, `task_queue`, `transport`, `version`, `workflow_id`,
+and `workflow_type`. It contains no timestamp, run ID, hostname, username, or absolute path.
+
+The fixed scalar values are `history_resource=temporal/reconciliation-workflow-v1.json`,
+`namespace=accord-reconciliation-test-v1`,
+`schema=accord.temporal.reconciliation-history-provenance`, `server_name=temporal.test`,
+`task_queue=accord-reconciliation-v1`, `transport=mtls`, `version=1`,
+`workflow_id=reconciliation-golden-v1`, and `workflow_type=accord.reconciliation.v1`.
+`capture_argv` is exactly the seven-element argument array shown in the capture command above,
+starting with relative `./gradlew.bat`. `history_sha256` is recomputed from the canonical history
+resource and must match `^sha256:[0-9a-f]{64}$`.
+
+`schema_tool` contains exactly `coordinate`, `linux_amd64_manifest_digest`, and
+`repository_digest`, with the pinned admin-tools values from Step 3. `server` contains the same
+three fields with the pinned server values. `sdk` contains exactly
+`coordinate=io.temporal:temporal-sdk:1.28.1` and `artifact_sha256`, whose value is recomputed from
+the exact SDK artifact approved in `verification-metadata.xml` and matches the same digest pattern.
+Tests reject every unknown/missing field and require both image digest pairs to match registry raw
+manifest bytes plus local RepoDigest. A tag-only/cached-but-unresolved image identity, coordinate or
+digest mismatch, history edit, unknown provenance field, or non-mTLS capture is non-GREEN.
 
 The replay test parses JSON into Temporal's protobuf `History`, recursively visits every `Payload`
 field in every event attribute/header/memo, reads `metadata.encoding`, and decodes every non-empty
@@ -4934,7 +5196,7 @@ captured history and provenance are added: `WorkflowReplayer` completes with no 
 every payload is decoded and structurally inspected, provenance matches, and the capture probe's
 mutation count is zero.
 
-- [ ] **Step 6: Prove recovery after a child JVM is killed forcibly**
+- [ ] **Step 6: Prove recovery at observation and post-tx2 response-loss crash cuts**
 
 Create `ReconciliationCrashRecoveryIT.java`, `ReconciliationProbeServer.java`, and
 `ReconciliationWorkerChildMain.java` with this exact sequence:
@@ -4942,29 +5204,59 @@ Create `ReconciliationCrashRecoveryIT.java`, `ReconciliationProbeServer.java`, a
 1. The parent starts the mTLS Temporal service and a loopback JDK HTTP probe with separate
    `/observe` and `/mutate` counters.
 2. Child A creates the production TLS stubs/client/factory/worker from command-line paths and writes
-   `READY\n` to stdout only after polling starts. Both children use production
+   `READY\n` to stdout only after polling starts. Child A uses process instance ID
+   `reconciliation-crash-a`, Child B uses `reconciliation-crash-b`, and both use exact claim lease
+   `PT8S` plus the production fixed `PT30S` renewal inside tx1. Both children use production
    `FencedReconciliationObservation` plus the probe-backed low-level `ProviderObservationPort`.
-3. The parent starts one workflow with a fixed `ReconciliationWorkflowRef`. Child A's attempt commits
-   tx1 tenant-context installation plus FT8 claim, keeps the acquired lease only in its process
-   memory, and issues the first `/observe` request outside any JDBC transaction; the activity's last
-   heartbeat detail before the high-level port invocation is only the intent UUID. The handler
-   increments its counter and blocks past the three-second heartbeat timeout.
+3. For crash cut A, the parent starts one workflow with a fixed `ReconciliationWorkflowRef`. Child A's attempt commits
+   tx1 tenant-context installation plus FT8 claim and full-fence PT30S renewal, keeps only the
+   returned renewed lease in its process memory, and issues the first `/observe` request outside any
+   JDBC transaction. The Activity entry heartbeat and the orchestrator's later pre-observe heartbeat
+   detail are each only the intent UUID. The handler
+   increments its counter and parks on a parent-owned latch without imposing another timing rule.
 4. The parent calls `destroyForcibly()`, waits at most ten seconds for Child A to exit, and verifies
-   it did not run a shutdown hook completion marker.
+   it did not run a shutdown hook completion marker. It then waits until the persisted Activity's
+   `PT10S` heartbeat timeout has expired before requiring reassignment; it never treats child exit or
+   the `PT2S` Provider timeout as Temporal task availability.
 5. The parent releases the blocked probe, starts Child B with the same namespace and task queue, and
-   requires a replacement activity task within ten seconds. After the database reconciliation fence
-   is reclaimable, Child B commits its own tx1 claim, observes outside JDBC, then commits tx2
+   requires a replacement activity task within twenty seconds after heartbeat expiry. Child B is
+   allowed to arrive before the committed initial-PT8S-plus-PT30S database fence expires; every live
+   `RECONCILING` result becomes retryable `RECONCILIATION_BUSY`, and the workflow must not terminate.
+   The fixed eight-attempt retry policy reaches beyond that fence while remaining inside schedule-to-close
+   `PT2M`. After PostgreSQL atomically expires the old fence, Child B
+   acquires the next generation in tx1, observes outside JDBC, then commits tx2
    `completeReconciliation` plus event/outbox atomically; the original workflow ID returns
-   `CONVERGED` within another twenty seconds.
+   `CONVERGED` within the invocation's 120-second semantic budget.
 6. The parent asserts observation count is at least two, mutation count is exactly zero, heartbeat
    details contain only the intent UUID, decoded history contains no capability or Provider fact,
    there is one terminal workflow execution/event/outbox result, and Child B exits cleanly after an
    explicit stop command.
+7. For independent crash cut B, seed a fresh fixed intent/workflow and install a test-source-only
+   Temporal `ActivityInboundCallsInterceptor` in Child A. The interceptor calls `next.execute(input)`;
+   only after it returns (therefore after tx2 committed and the Activity produced its result) it writes
+   one constant `TX2_COMMITTED_RESPONSE_PENDING` marker and blocks on a test latch before Temporal can
+   send the Activity response. The parent observes that marker, forcibly kills Child A, starts Child B
+   only after heartbeat expiry, and waits on the original workflow handle. Child B's tx1 sees terminal
+   `SUCCEEDED`, maps it to `CONVERGED`, and returns without tx2 or Provider access. Repeat the same
+   focused mapping test for persisted `CONFIRMED_NO_EFFECT` and `DIVERGED` terminal states.
+8. Crash cut B must end with one terminal intent row, one domain event, one outbox row, a single
+   terminal workflow result, and zero second-attempt calls to `/observe` or `/mutate`; immutable event
+   and outbox bytes equal the first tx2 commit. The original workflow handle, not a replacement
+   workflow execution, returns the mapped outcome. The interceptor and latch exist only in test
+   sources; no production Activity, fenced class, constructor, property, or runtime branch contains a
+   crash hook.
 
 Build the child command from `java.home/bin/java`, the current test runtime classpath, and fixed
-arguments. Give the entire test one monotonic 45-second hard deadline; every wait consumes that
-single budget, and `finally` forcibly terminates any surviving child before stopping containers.
-Do not invoke a shell, wait for the ten-second start-to-close timeout when heartbeat expiry is
+arguments. Give each crash-cut invocation one `System.nanoTime()`-based 120-second semantic deadline;
+every wait uses `min(localCap, remaining)` against that single budget. Local caps are 60 seconds for
+PostgreSQL/schema/server/namespace readiness, 15 seconds for each child `READY`, 10 seconds for the
+first observe or tx2-commit latch, 10 seconds for forced/halt exit, heartbeat expiry plus 20 seconds
+for the first replacement activity, 60 seconds for the workflow result including any pre-expiry
+`RECONCILIATION_BUSY` retries, and 10 seconds for Child B stop. Add
+JUnit `@Timeout(135)` per crash-cut invocation only as a deadlock watchdog. In cut A, Child A is
+killed immediately after the observe latch; there is no assertion that it both blocks longer than a
+heartbeat and dies before the Provider timeout. `finally` forcibly terminates every surviving child
+before stopping containers. Do not invoke a shell, wait for start-to-close when heartbeat expiry is
 available, or infer success from process exit alone.
 
 Run:
@@ -4973,23 +5265,19 @@ Run:
 ./gradlew.bat :apps:control-plane:worker:test --tests '*ReconciliationCrashRecoveryIT' --no-daemon
 ~~~
 
-Expected GREEN: Child A is forcibly terminated, Child B completes the same persisted execution,
-observation is safely repeated, and `/mutate` remains untouched.
+Expected GREEN: observation-cut recovery safely repeats the observation, post-tx2 response-loss
+recovery repeats neither observation nor persistence, Child B completes the same persisted workflow
+execution in both cuts, and `/mutate` remains untouched.
 
 - [ ] **Step 7: Lock, verify, and commit Task 10 before Task 12 worker wiring**
 
-Add version `bouncycastle = "1.81"` and library alias `bouncycastle-pkix` for
-`org.bouncycastle:bcpkix-jdk18on` to `gradle/libs.versions.toml`. Add
-`implementation libs.temporal.sdk`, `implementation libs.spring.boot.jooq`,
-`runtimeOnly libs.postgresql`, `testImplementation libs.temporal.testing`,
-`testImplementation libs.bouncycastle.pkix`, database control-plane test fixtures, Flyway core plus
-PostgreSQL, and the existing JUnit/Testcontainers PostgreSQL dependencies to the worker build. These
-are Task 10's baseline worker datasource/jOOQ/PostgreSQL dependencies; Task 12 must reuse them rather
-than add duplicates. Bouncy Castle is test-only and absent from the runtime graph. Use the same
-bootstrap order as Task 9: generate the focused worker lock and metadata together without strict
-verification, immediately review only the worker lock/new dependency closure, then run the strict
-global lock writer. Hash the worker lock plus metadata, repeat the exact focused combined writer and
-require no byte change, then run strict read-only global resolution and fenced/full checks:
+The dependency bootstrap already added Task 10's baseline worker
+datasource/jOOQ/PostgreSQL/Temporal dependencies; Task 12 must reuse them rather than add duplicates.
+Confirm Bouncy Castle remains test-only and absent from the runtime graph. Re-run the focused worker
+lock and metadata writer, immediately verify it is byte-stable against the reviewed bootstrap, then
+run the strict global lock writer. Hash the worker lock plus metadata, repeat the exact focused
+combined writer and require no byte change, then run strict read-only global resolution and
+fenced/full checks:
 
 ~~~powershell
 ./gradlew.bat :apps:control-plane:worker:dependencies --write-locks --write-verification-metadata sha256,pgp --no-configuration-cache --no-daemon
@@ -5009,21 +5297,39 @@ if (Compare-Object $workerBeforeRepeat $workerAfterRepeat -SyncWindow 0) { throw
 ./gradlew.bat :apps:control-plane:worker:test --tests '*FencedReconciliationObservationTest' --no-daemon --dependency-verification=strict
 ./gradlew.bat :apps:control-plane:worker:check --no-daemon --dependency-verification=strict
 git diff --check
+$safeScopePaths = @(
+  'database/control-plane/migrations/V002__reliable_event_delivery.sql'
+  'database/control-plane/src/test/java/com/inforvans/accord/database/ReliableDeliveryMigrationTest.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExternalIntentSnapshot.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/JooqExternalIntentStore.java'
+  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/JooqExternalIntentStoreTest.java'
+)
+git merge-base --is-ancestor 7f973ae HEAD
+if ($LASTEXITCODE -ne 0) { throw '7f973ae is not an ancestor of HEAD' }
+if (git diff --name-only -- $safeScopePaths) { throw '7f973ae safe-scope worktree paths are dirty' }
+if (git diff --cached --name-only -- $safeScopePaths) { throw '7f973ae safe-scope index paths are dirty' }
 $task10Paths = @(
   'apps/control-plane/worker/build.gradle'
   'apps/control-plane/worker/gradle.lockfile'
   'apps/control-plane/worker/src/main/resources/application.yml'
-  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkflowRef.java'
-  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationOutcome.java'
-  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationObservationPort.java'
-  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationActivities.java'
-  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReadOnlyReconciliationActivity.java'
-  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkflow.java'
-  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkflowImpl.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/workflow/ReconciliationWorkflowRef.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/workflow/ReconciliationOutcome.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/workflow/ReconciliationObservationPort.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/workflow/ReconciliationActivities.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/workflow/ReadOnlyReconciliationActivity.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/workflow/ReconciliationWorkflow.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/workflow/ReconciliationWorkflowImpl.java'
   'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalConnectionProperties.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalServiceStubsFactory.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalSecretFileLoader.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalSecretAclPolicy.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/PosixTemporalSecretAclPolicy.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/WindowsTemporalSecretAclPolicy.java'
   'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalRuntimeConfiguration.java'
   'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalWorkerLifecycle.java'
   'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/reconciliation/WorkerTenantTransactions.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/reconciliation/ReconciliationRuntimeProperties.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/reconciliation/ReconciliationFailure.java'
   'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/reconciliation/ProviderObservationPort.java'
   'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/reconciliation/FencedReconciliationObservation.java'
   'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkflowTest.java'
@@ -5040,16 +5346,22 @@ $task10Paths = @(
   'gradle/libs.versions.toml'
   'gradle/verification-metadata.xml'
 )
+if ($task10Paths.Count -ne 36) { throw 'Task 10 manifest must contain exactly 36 paths' }
 git add -- $task10Paths
-git diff --cached --name-only
+$actual = @(git diff --cached --name-only | Sort-Object)
+$expected = @($task10Paths | Sort-Object)
+if (Compare-Object $expected $actual -SyncWindow 0) {
+  throw 'Task 10 index differs from the exact implementation manifest'
+}
 git commit -m "feat: prove durable Temporal reconciliation"
 ~~~
 
-Expected: the safe-scope staging set plus `$task10Paths` equal the declared Task 10 files exactly.
-Temporal resolves at `1.28.1`, Bouncy Castle `1.81` is test-only, strict resolution makes no
-second metadata/lock change, `temporalio/server:1.28.1` resolves to the actual provenance digest, all
-TLS, boundary, replay, and crash tests pass, the two staging manifests jointly match the declared
-Task 10 list exactly, history contains no
+Expected: `$task10Paths` contains exactly 36 paths and alone equals the declared Task 10 files; the five `7f973ae`
+safe-scope paths remain clean and absent from the index. Temporal resolves at `1.28.1`, Bouncy Castle
+`1.81` is test-only, strict resolution makes no
+second metadata/lock change, both `temporalio/server:1.28.1` and the exact admin-tools schema source
+resolve to their pinned repository/platform digests, all TLS, boundary, replay, and crash tests pass,
+the one Task 10 staging manifest matches the declared Task 10 list exactly, history contains no
 lease/capability/Provider fact, and mutation count is zero in every
 activity-executing test. Registry resolution failure remains non-GREEN.
 
@@ -5219,7 +5531,24 @@ normalized signal only.
 Run:
 
 ~~~powershell
-corepack pnpm exec ajv validate --spec=draft2020 -s contracts/events/provider-webhook-signal.schema.json -d contracts/golden-fixtures/webhooks/gitlab-19.1-push.signal.json
+corepack pnpm exec ajv validate --spec=draft2020 -c ajv-formats -s contracts/events/provider-webhook-signal.schema.json -d contracts/golden-fixtures/webhooks/gitlab-19.1-push.signal.json
+@'
+const fs = require('node:fs');
+const Ajv2020 = require('ajv/dist/2020');
+const addFormats = require('ajv-formats');
+const schema = JSON.parse(fs.readFileSync(
+  'contracts/events/provider-webhook-signal.schema.json', 'utf8'));
+const fixture = JSON.parse(fs.readFileSync(
+  'contracts/golden-fixtures/webhooks/gitlab-19.1-push.signal.json', 'utf8'));
+const ajv = new Ajv2020({strict: true});
+addFormats(ajv);
+const validate = ajv.compile(schema);
+for (const field of ['url', 'commits', 'message', 'token', 'headers', 'raw_body']) {
+  if (validate({...fixture, [field]: 'forbidden'})) {
+    throw new Error(`schema accepted forbidden field: ${field}`);
+  }
+}
+'@ | corepack pnpm exec node -
 ~~~
 
 Expected: PASS. Adding `url`, `commits`, `message`, `token`, `headers`, or `raw_body` to a negative
@@ -5275,26 +5604,68 @@ all pass against only the edge database.
 Use Spring Boot web, actuator, jOOQ, Jackson, and PostgreSQL dependencies only. Package edge
 bootstrap/migrations into the test resources from `database/webhook-edge`; do not add a Gradle
 project dependency on any control-plane module or database fixture. Configure Flyway disabled at
-runtime, the edge runtime login/session role, required binding-file path, actuator probes, and no
-Provider content credential property.
+runtime, the edge runtime login/session role, required binding-file path, and no Provider content
+credential property. Set `management.endpoint.health.probes.enabled=true` explicitly. Liveness has
+exactly `livenessState`; readiness has exactly `readinessState,db,bindingProjection`, so a secret
+projection or database outage never makes the process falsely ready and never makes it falsely dead.
 
-`WebhookEdgeBoundaryTest` must scan main/test imports, runtime coordinates, and the boot jar. It
-rejects `com.inforvans.accord.reliability`, `com.inforvans.accord.database`, any
-`:apps:control-plane` project dependency, Git SDK/client libraries, and raw-body fixture resources in
-the executable artifact.
+`WebhookEdgeBoundaryTest` and the Gradle `check` task independently scan main/test imports, resolved
+runtime coordinates, and the real boot JAR. They reject `com.inforvans.accord.reliability`,
+`com.inforvans.accord.database`, any `:apps:control-plane` project dependency, Git SDK/client
+libraries, raw-body fixtures, and every forbidden or shaded Accord/JGit/GitLab4J/GitHub class.
+Under `BOOT-INF/lib/`, every ordinary file is treated as an archive regardless of filename or
+extension; empty, non-ZIP, truncated, duplicate-entry, bad-CRC, unsafe-path, and recursively nested
+archives fail closed. Directories are not archives. Both implementations close outer/nested streams
+on the first violation and enforce the same production budgets: 64 MiB outer artifact, 1,024 outer
+entries, 128 archives, 8 MiB per library, 64 MiB total library bytes, 4,096 entries per archive,
+32,768 total nested entries, 512 UTF-8 bytes per name, 4 MiB per expanded entry, 32 MiB per expanded
+archive, 128 MiB total expanded bytes, nesting depth 2, violation budget 1, and elapsed budget PT30S.
+Overflow, negative/unknown declared sizes, path aliases, and time moving backward also fail closed.
+
+The executable is a byte-exact projection, not a package-prefix allowlist. The Gradle gate binds
+`sourceSets.main.output` as task inputs, enumerates every ordinary output file, and requires
+`BOOT-INF/classes/` to contain exactly the same relative names, byte lengths, and SHA-256 values with
+no missing, duplicate, or extra resource. It independently binds the actual regular
+`spring-boot-loader-tools-3.5.3.jar`, extracts its single
+`META-INF/loader/spring-boot-loader.jar`, and requires the boot JAR root to contain exactly the
+loader archive's emitted ordinary `.class` and `META-INF/services/*` entries with the same names,
+lengths, and SHA-256 values. The loader task input, application output directories, and built boot JAR
+are real Gradle inputs; directory/file dependency injection is rejected by a real hostile Gradle
+fixture. The manifest occurs once, has exact `Main-Class=org.springframework.boot.loader.launch.JarLauncher`
+and `Start-Class=com.inforvans.accord.webhookedge.WebhookEdgeApplication`, and contains none of
+`Class-Path`, `Premain-Class`, `Agent-Class`, or `Launcher-Agent-Class`. Root application/agent
+classes, duplicate critical entries, same-name byte mutations to the application class,
+`application.yml`, loader classes, or loader services all fail.
+
+The hostile suite contains 41 real/synthetic cases covering all structural, fingerprint, recursive,
+CRC, duplicate, resource-budget, manifest, dependency-injection, and time-budget failures in both the
+JUnit and Gradle gates. Checking only the current clean artifact is insufficient.
+
+Packaged-process tests launch the real JAR with `--server.port=0`, remove Kubernetes environment
+detection, read the PID-tagged Tomcat port from bounded child output, drain all stdout/stderr while
+retaining at most a 64 KiB tail, and exercise the orthogonal readiness matrix: invalid/missing
+projection plus unavailable database, valid projection plus unavailable database, invalid/missing
+projection plus live edge PostgreSQL, and valid projection plus live edge PostgreSQL. Liveness is
+`200` in all four cases; readiness is `503` unless both dependencies are valid, when it is `200`.
+Every case closes HTTP resources and verifies the child process and output-reader thread are dead;
+even a graceful wait that returns while the process remains alive escalates to forced termination and
+must still prove final death.
 
 Run:
 
 ~~~powershell
 ./gradlew.bat :apps:webhook-edge:dependencies --write-locks --no-configuration-cache --no-daemon --dependency-verification=strict
 ./gradlew.bat resolveAndLockAll --write-verification-metadata sha256,pgp --no-configuration-cache --no-daemon
-./gradlew.bat :apps:webhook-edge:check :apps:webhook-edge:bootJar --no-daemon --dependency-verification=strict
-corepack pnpm exec ajv validate --spec=draft2020 -s contracts/events/provider-webhook-signal.schema.json -d contracts/golden-fixtures/webhooks/gitlab-19.1-push.signal.json
+./gradlew.bat :apps:webhook-edge:check :apps:webhook-edge:bootJar --rerun-tasks --no-daemon --dependency-verification=strict --configuration-cache-problems=fail
+./gradlew.bat :apps:webhook-edge:check :apps:webhook-edge:bootJar --no-daemon --dependency-verification=strict --configuration-cache-problems=fail
+corepack pnpm exec ajv validate --spec=draft2020 -c ajv-formats -s contracts/events/provider-webhook-signal.schema.json -d contracts/golden-fixtures/webhooks/gitlab-19.1-push.signal.json
 git diff --check
 ~~~
 
-Expected: the executable is independently deployable, contains no control-plane package, accepts
-only authenticated bounded GitLab metadata, and persists no raw request material.
+Expected: the first full build stores a configuration-cache entry and the second reports
+`Reusing configuration cache` with no cache problem; the executable is independently deployable,
+contains no control-plane package, accepts only authenticated bounded GitLab metadata, and persists
+no raw request material.
 
 - [ ] **Step 8: Commit the isolated GitLab edge**
 
@@ -5347,6 +5718,9 @@ idempotency results.
 **Files:**
 - Create: `database/control-plane/migrations/V004__reliability_coordination_and_fences.sql`
 - Create: `database/control-plane/src/test/java/com/inforvans/accord/database/ReliabilityCoordinationMigrationTest.java`
+- Modify: `database/control-plane/src/test/java/com/inforvans/accord/database/PlatformMigrationTest.java`
+- Modify: `database/control-plane/src/test/java/com/inforvans/accord/database/ReliableDeliveryMigrationTest.java`
+- Modify: `database/control-plane/src/test/java/com/inforvans/accord/database/FoundationHttpReliabilityMigrationTest.java`
 - Modify: `apps/control-plane/modules/reliability/build.gradle`
 - Modify: `apps/control-plane/modules/reliability/gradle.lockfile`
 - Modify: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReliableEventStore.java`
@@ -5370,6 +5744,7 @@ idempotency results.
 - Create: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/OutboxDispatcherTest.java`
 - Create: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/InboxDispatcherTest.java`
 - Create: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/IdempotencyResultCleanerTest.java`
+- Modify: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/PostgreSqlReliabilityTestSupport.java`
 - Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/WorkerReliabilityProperties.java`
 - Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/WorkerScheduling.java`
 - Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/WorkerDrainCoordinator.java`
@@ -5386,6 +5761,12 @@ committed before the Task 12 worker files are changed, because both tasks own th
 lock, YAML, and lifecycle ordering. Task 12 reuses Task 10's datasource, jOOQ, PostgreSQL,
 `WorkerTenantTransactions`, and production fenced reconciliation wiring; it neither adds duplicate
 database dependencies nor alters Task 10 TLS/fence semantics.
+
+Task 12 has two separately authorized checkpoints. Checkpoint A contains only the 29-path V004 and
+reliability-core manifest named below and may be implemented and committed before Task 10. It must
+not touch worker files or global verification metadata. Checkpoint B contains the remaining nine
+worker/metadata paths and remains blocked until all of Task 10 is committed and green. Neither
+checkpoint alone may be reported as complete Task 12.
 
 **Authoritative invariants:**
 
@@ -5408,9 +5789,12 @@ database dependencies nor alters Task 10 TLS/fence semantics.
    it receives no table ownership, trigger bypass, TRUNCATE, or message DELETE privilege.
 6. Outbox leasing commits before `EventTransport.deliver`. The Provider/downstream call runs with no
    JDBC transaction open. A successful call returns a bounded `DeliveryReceipt`; the worker commits
-   that receipt under the full fence before a separate fenced acknowledgement. Recovery with a
-   valid stored receipt acknowledges without another external call. A crash after external success
-   but before receipt persistence relies on the event ID downstream idempotency key.
+   that receipt under the full fence before a separate fenced acknowledgement. The immutable receipt
+   preserves both complete historical fences: permit owner/generation/token/deadline and message
+   owner/generation/token/deadline. Insertion validates both as live. Recovery under a later owner
+   validates the immutable receipt digest, then acknowledges under only the later owner's current live
+   fences without another external call or pretending the historical fences are still live. A crash
+   after external success but before receipt persistence relies on the event ID downstream idempotency key.
 7. `TransactionalInboxHandler.handle(DSLContext, LeasedInboxMessage)` performs database/domain work
    only. Handler domain mutations, domain event, outbox, handler receipt, and `COMPLETED` transition
    commit in one tenant transaction under the full permit/message fences. A fence loss or any
@@ -5422,11 +5806,34 @@ database dependencies nor alters Task 10 TLS/fence semantics.
 9. Worker has no direct `DELETE` on `idempotency_result`. A bounded security-definer function uses
    database time and the installed tenant context to delete only rows with `state='COMPLETED' AND
    expires_at < clock_timestamp()`. It never deletes `STARTED`, regardless of lease or expiry.
+10. One tenant permit represents one bounded, single-channel turn selected from OUTBOX, INBOX, or
+     CLEANUP by the earliest effective ready timestamp after tenant context is installed. An outbox turn leases at most
+     `min(batch_size, available_concurrency)` and starts every leased external call immediately. An
+     inbox turn leases exactly one message because its handler transaction locks and revalidates the
+     same permit row. A cleanup turn deletes one bounded batch through the completed-only routine.
+     CLEANUP uses the same fair directory row and live permit; there is no independent cleanup poller,
+     tenant scanner, or schedule that discovers tenants outside the directory.
+11. Every message insert signals the tenant directory through an `AFTER INSERT` trigger, including
+     inserts made inside existing security-definer completion routines. `ReliableEventStore` also
+     explicitly re-signals a duplicate nonterminal inbox row when its effective availability is
+     earlier than the directory value. Every newly completed idempotency result signals CLEANUP at its
+     `expires_at`. Correctness never depends on one Java call site remembering to signal work.
+12. Only `WorkerScheduling` owns unscoped directory transactions. Its private directory facade exposes
+    dedicated acquire, renew, and finish operations, verifies literal `current_user=accord_worker`
+    and `accord_security.current_tenant_id() IS NULL` before invoking the matching directory routine,
+    and exposes no generic unscoped callback. OUTBOX, INBOX, and CLEANUP work then run through Task 10's
+    exact `WorkerTenantTransactions.inTenant(UUID, Function<DSLContext,T>)` boundary.
+13. Any path that can touch both the tenant directory and an inbox row locks the directory first.
+    V004 replaces `accept_inbox_message` with `CREATE OR REPLACE FUNCTION`; both first acceptance and
+    duplicate acceptance upsert/lock the directory before locking or inserting the inbox natural key.
+    The worker follows the same order, so duplicate delivery and worker completion cannot deadlock.
 
 - [ ] **Step 1: Write RED V004 migration and privilege tests**
 
-Create `ReliabilityCoordinationMigrationTest.java`. Migrate explicitly through V003, then V004, and
-assert:
+Create `ReliabilityCoordinationMigrationTest.java`. First migrate with Flyway target exactly `003`,
+write pre-V004 PENDING outbox/inbox rows and COMPLETED idempotency rows for multiple tenants with
+distinct `available_at`/`expires_at` values, then migrate the same database with target exactly `004`.
+Assert:
 
 - Flyway history contains successful V001, V002, V003, V004 in order with one row per version;
 - V002 checksums are unchanged;
@@ -5440,6 +5847,28 @@ assert:
 - worker direct DELETE on `idempotency_result` is revoked and only the bounded cleanup function is
   executable;
 - API can execute tenant work signal but has no direct tenant-directory or receipt-table grant.
+- every legacy PENDING outbox/inbox row and COMPLETED idempotency row appears in the payload-free
+  directory at the tenant's exact earliest timestamp; tenants with multiple legacy rows converge by
+  `LEAST`, and reapplying the same upsert statements is byte/state idempotent;
+- after V004, a newly inserted or newly transitioned COMPLETED idempotency result advances directory
+  availability with `LEAST`, while STARTED and future nonterminal changes do not signal CLEANUP;
+- `accept_inbox_message` is a V004 `CREATE OR REPLACE` routine whose catalog definition and runtime
+  lock trace prove directory-first order for both new and duplicate inbox delivery.
+
+Before introducing V004, freeze the three current committed migrations as honest historical
+snapshots. Restore `PlatformMigrationTest` to its V001-only behavior from commit `ae4978a`, remove
+the later V003 assertions duplicated by `FoundationHttpReliabilityMigrationTest`, target V001, and
+assert one successful history row with checksum `-1912123152`.
+`ReliableDeliveryMigrationTest` targets V002 and asserts checksum `997992209`, and
+`FoundationHttpReliabilityMigrationTest` targets V003 and asserts checksum `2145439011`. Their
+catalog and privilege assertions describe only the target release. `ReliabilityCoordinationMigrationTest`
+alone migrates through latest and proves the V004 replacements.
+
+These checksums prove the current repository bytes, not an unknown deployed database history.
+Before Checkpoint A is applied to any durable environment, query its `flyway_schema_history` and
+compare all three checksums. Any mismatch blocks deployment for investigation; `flyway repair`
+must never be used merely to normalize it. A new disposable/local environment records that no
+pre-existing durable history was present.
 
 Run:
 
@@ -5457,12 +5886,50 @@ Expected RED: V004 and all coordination/receipt objects are absent.
 2. Add message generation/token columns and constraints without changing V002 data meaning.
 3. Create the payload-free fair tenant directory and its ready/fairness index.
 4. Create append-only outbox delivery and inbox handler receipt tables with tenant-first foreign
-   keys and one receipt per message natural key.
+   keys, both complete historical fences, and one receipt per message natural key.
 5. Drop the two V002 immutable message triggers and install strict transition functions/triggers.
-6. Apply forced tenant RLS to both receipt tables before grants.
-7. Revoke all table privileges, then grant only the exact API/worker matrix.
-8. Revoke worker `DELETE` on `idempotency_result`; create the bounded completed-result cleanup
-   function with fixed search path and grant only its execution.
+6. `CREATE OR REPLACE` V002 `accept_inbox_message` so it upserts and locks the directory row before
+   the inbox natural-key row, preserving the V002 signature/result/ACL exactly.
+7. Install universal outbox/inbox `AFTER INSERT` signal triggers plus the idempotency COMPLETED signal
+   trigger before any runtime grant.
+8. Backfill legacy PENDING outbox/inbox `available_at` and COMPLETED idempotency `expires_at` with
+   set-based `INSERT ... ON CONFLICT (tenant_id) DO UPDATE SET available_at =
+   LEAST(reliability_tenant_work.available_at, EXCLUDED.available_at)` statements. Group each source
+   by tenant and `MIN` first; the statements are idempotent and never copy payloads.
+9. Apply forced tenant RLS to both receipt tables before grants.
+10. Revoke all table privileges, then grant only the exact API/worker matrix.
+11. Revoke worker `DELETE` on `idempotency_result`; create the bounded completed-result cleanup
+    function with fixed search path and grant only its execution.
+
+`reliability_tenant_work` has `tenant_id uuid` as its primary key, non-null `available_at`, nullable
+`last_granted_at`, `permit_owner`, `permit_token`, and `permit_lease_until`, plus non-null
+`permit_generation bigint default 0`. Its constraints require an entirely absent or entirely
+present live fence and a nonnegative generation. No-known-work is represented by PostgreSQL
+`infinity`; the exact fair index is `(last_granted_at NULLS FIRST, available_at, tenant_id)`.
+
+Each receipt stores the tenant-first message natural key; historical permit owner, generation, token,
+and deadline; historical message owner, generation, token, and deadline; a bounded
+`receipt_id varchar(255)`; canonical `receipt_digest char(71)`; and `recorded_at`. It has one
+tenant-first foreign key and one immutable receipt per message. Receipt insertion revalidates both
+complete fences as live in the same transaction. A later owner verifies the immutable stored digest
+and acknowledges under its own current permit/message fences; acknowledgement never accepts caller
+reconstruction of receipt bytes and never requires the historical deadlines to remain live.
+
+The V004 security-definer routines owned by `accord_migrator` and fixed to
+`search_path=pg_catalog, pg_temp` are `signal_reliability_tenant_work`,
+`acquire_reliability_tenant_work`, `renew_reliability_tenant_work`,
+`lock_reliability_tenant_work_permit`, `finish_reliability_tenant_work`, and
+`delete_expired_completed_idempotency_results`. API may execute only signal; worker may execute all
+six. Transition, receipt-guard, and append-only trigger functions remain invoker-only with no
+runtime `EXECUTE`. Neither runtime role receives direct tenant-directory privileges. API retains
+existing event/outbox reads only; worker receives message reads, receipt read/insert, and only named
+lifecycle-column updates.
+
+Each universal message-insert signal trigger function is `SECURITY INVOKER`, compares
+`NEW.tenant_id` only with the verified transaction-local tenant, and calls the parameter-free
+security-definer signal routine. Revoke direct `EXECUTE` on each trigger function from `PUBLIC` and
+both runtime roles. Receipt guards revalidate the directory fence only through
+`lock_reliability_tenant_work_permit`; they never directly select `reliability_tenant_work`.
 
 The cleanup function accepts `batch_size` in `1..500`, selects the current tenant's eligible rows in
 `expires_at`/primary-key order with `FOR UPDATE SKIP LOCKED`, deletes by the selected primary keys,
@@ -5490,6 +5957,9 @@ Create `TenantWorkRepositoryTest.java` using worker login/role for runtime SQL. 
 - API signal derives tenant from transaction context and cannot name or inspect another tenant;
 - an SQL listener fails the test if outbox/inbox is touched before a live permit is acquired and
   the exact tenant context is installed.
+- with `SET LOCAL lock_timeout='250ms'`, barriers race duplicate `accept_inbox_message` calls against
+  worker permit/inbox completion for at least 100 iterations; every trace locks the directory before
+  the inbox row, no transaction deadlocks or times out, and one natural inbox row survives.
 
 Create `MessageFenceProperties.java` with jqwik properties for positive bounded durations,
 monotonic generation, token replacement, exact-deadline comparison, deterministic retry jitter,
@@ -5523,9 +5993,21 @@ public record TenantWorkPermit(
 
 `TenantWorkRepository.acquire` uses one atomic CTE ordered by fairness fields and computes deadline
 from `clock_timestamp()`. `OutboxRepository.lease` and `InboxRepository.lease` require a
-`TenantWorkPermit`, install and verify its tenant context as the first SQL in a new transaction,
-revalidate the live permit, then lease at most the configured batch size. No repository owns a pool
-or opens a connection.
+`TenantWorkPermit`. The repository's first tenant-scoped SQL revalidates the live permit, then leases
+at most the configured batch size. Repositories never install context, start a transaction, own a
+pool, or open a connection; every tenant repository method accepts caller-owned `DSLContext tx` as
+its first parameter.
+
+Task 12 Checkpoint B defines a private `DirectoryTransactions` facade inside existing
+`WorkerScheduling.java`. It owns the caller `DSLContext.transactionResult` used without tenant
+context and exposes only typed `acquire`, `renew`, and `finish` methods; each transaction first
+asserts `current_user='accord_worker'` and
+`accord_security.current_tenant_id() IS NULL`, then invokes exactly one corresponding
+`TenantWorkRepository` directory operation. It has no `Function<DSLContext,T>` or arbitrary SQL
+entry point. Once a permit identifies the tenant, scheduling calls Task 10's fixed
+`public <T> T inTenant(UUID tenantId, Function<DSLContext,T> work)` for channel selection and every
+OUTBOX, INBOX, or CLEANUP operation. Renewal extends from the exact prior database deadline, never
+from JVM observation time, and message renewal is capped by the tenant permit deadline.
 
 All lifecycle SQL uses database time. JVM `Clock` may format telemetry but cannot calculate a lease,
 expiry decision, retry eligibility, or cleanup eligibility.
@@ -5547,7 +6029,10 @@ boundaries:
 | stale fence during receipt | receipt and acknowledgement both absent |
 | stale fence after stored receipt | new owner may acknowledge the verified receipt without calling transport |
 
-Also prove transport timeout is shorter than the message lease, retries are bounded, terminal
+For every receipt case, assert persisted columns contain both complete historical fences and the
+receipt insertion fails if either fence is stale. The later-owner case proves acknowledgement accepts
+only the immutable stored digest plus the later owner's current live fences; a caller-supplied receipt
+body or partial historical fence is rejected. Also prove transport timeout is shorter than the message lease, retries are bounded, terminal
 `DEAD` occurs exactly once, and receipt IDs/digests/error codes are bounded and contain no payload,
 URL, credential, or exception message.
 
@@ -5555,14 +6040,20 @@ Run the focused test. Expected RED: receipt repository operations and dispatcher
 
 - [ ] **Step 6: Implement transaction-free delivery and receipt-before-ack**
 
-Define `EventTransport.deliver(LeasedEvent)` to return `DeliveryReceipt` and require the event UUID as
-the downstream idempotency key. `OutboxDispatcher` executes exactly:
+Define `EventTransport.deliver(LeasedEvent, Duration timeout)` to return `DeliveryReceipt`, require
+the event UUID as the downstream idempotency key, and receive the validated timeout explicitly.
+`OutboxDispatcher` executes exactly:
 
 1. inspect for an existing valid receipt;
 2. if absent, call transport with no transaction open;
 3. persist the returned receipt in its own tenant transaction under both live fences;
 4. acknowledge in a later tenant transaction under the current full fences and exact receipt digest;
 5. release/reschedule the tenant permit to the earliest ready message time.
+
+The dispatcher accepts the entire bounded leased list, starts at most the configured concurrency,
+persists each completed receipt in its own transaction, acknowledges separately, and finishes the
+permit exactly once after the turn. An uncertain fence or transaction outcome leaves the permit
+leased for expiry recovery rather than falsely releasing it.
 
 Failure normalization stores only a closed uppercase error code. Unknown destinations fail closed
 through the same retry/dead policy.
@@ -5603,12 +6094,16 @@ one transaction it revalidates both fences, invokes the selected local handler, 
 receipt, marks the inbox `COMPLETED`, and signals/reschedules tenant work. The final fenced update is
 the last SQL statement; a changed row count other than one throws and rolls back the transaction.
 
-Modify `ReliableEventStore.append` and the accepted branch of `acceptInbox` to call the tenant work
-signal function in their existing transaction after message insertion. Duplicate inbox acceptance
-does not emit a second signal unless the existing row is nonterminal and its current availability
-is earlier than the directory value. Extend `ReliableEventStoreTest` to assert that a successful
-append/first inbox acceptance signals exactly once and every rollback or terminal duplicate leaves
-the directory unchanged.
+Universal V004 insert triggers signal every new outbox/inbox message, including rows inserted by
+security-definer completion routines. `ReliableEventStore` must not duplicate that first-insert
+signal. Its duplicate-inbox branch explicitly re-signals only when the existing row is nonterminal
+and its current effective availability is earlier than the directory value. V004's
+`CREATE OR REPLACE accept_inbox_message` obtains/upserts and locks the directory row before reading or
+locking the inbox natural key; the worker completion path uses the same directory-first order. Extend
+`ReliableEventStoreTest` to assert that a successful append/first inbox acceptance produces one
+effective directory signal, every rollback or terminal duplicate leaves the directory unchanged,
+direct routine inserts cannot create invisible work, and the 250 ms lock-timeout concurrency barrier
+never deadlocks or reverses the order.
 
 Run `InboxDispatcherTest` plus existing FT8 reliability tests. Expected GREEN: atomic completion,
 replay, schema/digest rejection, tenant isolation, and original append/deduplication behavior pass.
@@ -5622,17 +6117,78 @@ the installed tenant, repeated calls finish the remaining eligible completed row
 as rejected before deletion, and race cleanup against claim takeover.
 
 `IdempotencyResultCleaner` calls only the V004 function inside an already tenant-scoped worker
-transaction; it contains no direct `DELETE` SQL.
+transaction; it contains no direct `DELETE` SQL. It is invoked only when the fair scheduler selects
+the CLEANUP channel under the same tenant permit used by OUTBOX/INBOX, then reschedules/finishes that
+permit through the directory facade. It has no independent timer, poller, tenant query, or scanner.
 
 Run the focused test. Expected GREEN after implementation: only expired `COMPLETED` rows are removed
 in bounded batches using database time.
+
+- [ ] **Checkpoint A: Verify and commit the V004 reliability core before Task 10**
+
+Run the database, reliability, API, jOOQ generation, strict dependency, and diff checks. Refresh
+only the reliability lock after adding jqwik; the expected new locked modules are
+`jqwik`, `jqwik-api`, `jqwik-engine`, `jqwik-time`, and `jqwik-web` at `1.9.2`, and the already
+approved global verification metadata must remain byte-for-byte unchanged. Then stage exactly:
+
+~~~powershell
+git diff --exit-code -- gradle/verification-metadata.xml
+./gradlew.bat :apps:control-plane:modules:reliability:dependencies --write-locks --no-configuration-cache --no-daemon --dependency-verification=strict
+./gradlew.bat resolveAndLockAll --no-configuration-cache --no-daemon --dependency-verification=strict
+./gradlew.bat :database:control-plane:test :apps:control-plane:modules:reliability:test :apps:control-plane:api:test --no-daemon --dependency-verification=strict
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/generate-control-plane-jooq.ps1 -Port 55532
+git diff --exit-code -- gradle/verification-metadata.xml
+git diff --check
+$task12CorePaths = @(
+  'database/control-plane/migrations/V004__reliability_coordination_and_fences.sql'
+  'database/control-plane/src/test/java/com/inforvans/accord/database/ReliabilityCoordinationMigrationTest.java'
+  'database/control-plane/src/test/java/com/inforvans/accord/database/PlatformMigrationTest.java'
+  'database/control-plane/src/test/java/com/inforvans/accord/database/ReliableDeliveryMigrationTest.java'
+  'database/control-plane/src/test/java/com/inforvans/accord/database/FoundationHttpReliabilityMigrationTest.java'
+  'apps/control-plane/modules/reliability/build.gradle'
+  'apps/control-plane/modules/reliability/gradle.lockfile'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReliableEventStore.java'
+  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/ReliableEventStoreTest.java'
+  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/PostgreSqlReliabilityTestSupport.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/TenantWorkPermit.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/MessageFence.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/LeasedEvent.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/LeasedInboxMessage.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/DeliveryReceipt.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/HandlerReceipt.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/TenantWorkRepository.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/OutboxRepository.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/InboxRepository.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/EventTransport.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/TransactionalInboxHandler.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/OutboxDispatcher.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/InboxDispatcher.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/IdempotencyResultCleaner.java'
+  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/TenantWorkRepositoryTest.java'
+  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/MessageFenceProperties.java'
+  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/OutboxDispatcherTest.java'
+  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/InboxDispatcherTest.java'
+  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/IdempotencyResultCleanerTest.java'
+)
+git add -- $task12CorePaths
+$actual = @(git diff --cached --name-only | Sort-Object)
+$expected = @($task12CorePaths | Sort-Object)
+if (Compare-Object $expected $actual -SyncWindow 0) {
+  throw 'Checkpoint A index differs from the exact 29-path manifest'
+}
+git commit -m "feat: coordinate reliable work with durable fences"
+~~~
+
+Expected: exactly 29 paths are staged; no worker, V001-V003 migration, FT11, or global metadata file
+is included. This checkpoint is a production-testable core, but Task 12 remains incomplete.
 
 - [ ] **Step 10: Write RED worker selection and drain tests**
 
 Create `WorkerSchedulingTest.java` and `WorkerDrainCoordinatorTest.java`. Prove:
 
-- `accord.process-role=control-worker` creates exactly one tenant poller, outbox dispatcher, inbox
-  dispatcher, cleanup poller, and drain coordinator; API role creates none;
+- `accord.process-role=control-worker` creates exactly one fair tenant scheduler, outbox dispatcher,
+  inbox dispatcher, cleanup channel handler, and drain coordinator; API role creates none and there is
+  no independent cleanup poller;
 - duplicate destination or handler keys fail startup; absent adapters install fail-closed handlers;
 - polling never holds more work than configured concurrency and always acquires permit first;
 - drain changes `RUNNING -> QUIESCING -> DRAINED`, rejects new acquisitions immediately, and marks
@@ -5673,8 +6229,11 @@ accord:
     drain-timeout: PT20S
 ~~~
 
-`WorkerDrainCoordinator` is a Spring `SmartLifecycle` at phase `200`. `WorkerScheduling` stops
-scheduling before `WorkerDrainCoordinator` waits for in-flight work.
+`WorkerScheduling` implements the private typed unscoped directory facade described above and rejects
+startup unless its role/context probes prove literal `accord_worker` with no tenant installed.
+Channel selection and all payload work occur only after `WorkerTenantTransactions.inTenant` installs
+the acquired permit's tenant. `WorkerDrainCoordinator` is a Spring `SmartLifecycle` at phase `200`.
+`WorkerScheduling` stops scheduling before `WorkerDrainCoordinator` waits for in-flight work.
 During drain, live work may renew its full fences within the remaining grace period; no renewal may
 extend beyond that period. On timeout, cancel local waiting, leave unconfirmed external outcomes
 unacknowledged, and let database leases recover them.
@@ -5698,42 +6257,18 @@ permit/message; ready tenants make bounded progress; every stale fence fails; ou
 converge through durable receipts; inbox effects are atomic; shutdown leaves no false completion;
 and cleanup never deletes a `STARTED` row.
 
-- [ ] **Step 13: Lock and commit the V004 worker slice**
+- [ ] **Step 13: Lock and commit the remaining worker slice after Task 10**
 
-Refresh only Task 12's affected locks and approved metadata without re-adding Task 10's baseline
-database closure, verify the second resolution is stable, then stage the exact Task 12 paths:
+Refresh only Task 12 Checkpoint B's worker lock and approved metadata without re-adding Task 10's
+baseline database closure, verify the second resolution is stable, then stage the exact remaining
+nine paths:
 
 ~~~powershell
 ./gradlew.bat :apps:control-plane:modules:reliability:dependencies :apps:control-plane:worker:dependencies --write-locks --no-configuration-cache --no-daemon --dependency-verification=strict
 ./gradlew.bat resolveAndLockAll --write-verification-metadata sha256,pgp --no-configuration-cache --no-daemon
 ./gradlew.bat resolveAndLockAll --no-configuration-cache --no-daemon --dependency-verification=strict
 git diff --check
-$task12Paths = @(
-  'database/control-plane/migrations/V004__reliability_coordination_and_fences.sql'
-  'database/control-plane/src/test/java/com/inforvans/accord/database/ReliabilityCoordinationMigrationTest.java'
-  'apps/control-plane/modules/reliability/build.gradle'
-  'apps/control-plane/modules/reliability/gradle.lockfile'
-  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReliableEventStore.java'
-  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/ReliableEventStoreTest.java'
-  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/TenantWorkPermit.java'
-  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/MessageFence.java'
-  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/LeasedEvent.java'
-  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/LeasedInboxMessage.java'
-  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/DeliveryReceipt.java'
-  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/HandlerReceipt.java'
-  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/TenantWorkRepository.java'
-  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/OutboxRepository.java'
-  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/InboxRepository.java'
-  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/EventTransport.java'
-  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/TransactionalInboxHandler.java'
-  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/OutboxDispatcher.java'
-  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/InboxDispatcher.java'
-  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/IdempotencyResultCleaner.java'
-  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/TenantWorkRepositoryTest.java'
-  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/MessageFenceProperties.java'
-  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/OutboxDispatcherTest.java'
-  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/InboxDispatcherTest.java'
-  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/IdempotencyResultCleanerTest.java'
+$task12WorkerPaths = @(
   'apps/control-plane/worker/build.gradle'
   'apps/control-plane/worker/gradle.lockfile'
   'apps/control-plane/worker/src/main/resources/application.yml'
@@ -5744,13 +6279,17 @@ $task12Paths = @(
   'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/WorkerDrainCoordinatorTest.java'
   'gradle/verification-metadata.xml'
 )
-git add -- $task12Paths
-git diff --cached --name-only
+git add -- $task12WorkerPaths
+$actual = @(git diff --cached --name-only | Sort-Object)
+$expected = @($task12WorkerPaths | Sort-Object)
+if (Compare-Object $expected $actual -SyncWindow 0) {
+  throw 'Checkpoint B index differs from the exact nine-path manifest'
+}
 git commit -m "feat: dispatch reliable work with durable fences"
 ~~~
 
-Expected: V003 remains owned by Task 9 and unchanged; the staged set contains V004 plus reliability
-and worker files only; Task 10 mTLS/replay tests remain green; and Task 13 begins immediately after
+Expected: V003 and Checkpoint A remain unchanged; exactly nine worker/metadata paths are staged;
+Task 10 mTLS/replay tests remain green; Task 12 is now complete; and Task 13 begins immediately after
 this section.
 
 
@@ -5791,7 +6330,7 @@ Provider facts without using GitHub product semantics.
 - Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/LocalTemporalPki.java`
 - Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/TemporalLocalTopologyIT.java`
 - Modify: `.tool-versions`
-- Modify: `apps/control-plane/worker/build.gradle`
+- Modify: `tests/integration/build.gradle`
 - Modify: `.gitignore`
 
 `infra/images/images.lock.json` is the only image lock in the repository. There is no
@@ -5801,9 +6340,10 @@ Task 16 consumes the same bytes when it renders Dockerfiles and never creates an
 
 **Authoritative invariants:**
 
-1. The closed lock has exactly these role keys: `postgres`, `temporal-server`, `temporal-ui`,
-   `minio`, `minio-client`, `wiremock`, `localstack`, `otel-collector`, `java-build`, and
-   `java-runtime`. Each entry contains one reviewed source tag, canonical registry/repository,
+1. The closed lock has exactly these role keys: `postgres`, `temporal-schema-tool`,
+   `temporal-server`, `temporal-ui`, `minio`, `minio-client`, `wiremock`, `localstack`,
+   `otel-collector`, `java-build`, and `java-runtime`. Each entry contains one reviewed source tag,
+   canonical registry/repository,
    manifest-list digest, required platform digests, retrieval time, license identifier, and
    end-of-support date. Every digest is lowercase `sha256:<64 hex>` and is recomputed from fetched
    manifest bytes.
@@ -5819,11 +6359,18 @@ Task 16 consumes the same bytes when it renders Dockerfiles and never creates an
    `accord_temporal_schema_login` for schema setup and `accord_temporal_runtime_login` for runtime.
    Neither identity can connect to `accord`, `accord_webhook`, or `accord_signing`, and no Accord
    application login can connect to the Temporal or visibility database.
-5. `temporal-server` incorporates Task 10's source coordinate unchanged as exactly
-   `temporalio/server:1.28.1` plus its registry-resolved actual immutable digest. It is a real server,
-   not `auto-setup`, a dev server, an in-process service, or `TestWorkflowEnvironment`. An explicit
-   one-shot schema service prepares `accord_temporal` and `accord_temporal_visibility` and exits
-   successfully before the distinct server starts. A missing actual digest is non-GREEN.
+5. `temporal-schema-tool` and `temporal-server` incorporate Task 10's coordinates unchanged as
+    exactly `temporalio/admin-tools:1.28.1-tctl-1.18.4-cli-1.4.1` and
+    `temporalio/server:1.28.1`. Admin-tools is locked to repository digest
+    `sha256:01537b62d995f27a0f0d33a01ac4caa6779622f454fb2eb36fed0dccd45c6244` and linux/amd64 manifest
+    `sha256:00864ac86e79aec0d418582892d3435564c613b68b72fe2e41e9c50176794983`;
+    server is locked to repository digest
+    `sha256:acaf8454947544312216c6e153929b7db060571f736bbced290bfaf76e287499` and linux/amd64 manifest
+    `sha256:0842f5e71b5c935adad01d133457d886e1748a675f79f5cbb6758aee5031dcb0`.
+    The schema tool uses executable `/usr/local/bin/temporal-sql-tool` with plugin `postgres12`; the server is real, not
+    `auto-setup`, a dev server, an in-process service, or `TestWorkflowEnvironment`. The schema
+    service prepares `accord_temporal` and `accord_temporal_visibility` and exits successfully before
+    the distinct server starts. A missing actual digest for either image is non-GREEN.
 6. The Temporal frontend on 7233 requires a client certificate signed by the local Temporal client
    CA and verifies the server name `temporal`. Server, worker, UI, and schema/admin identities use
    separate keys and Extended Key Usage. Private keys are generated under ignored
@@ -5845,11 +6392,88 @@ Task 16 consumes the same bytes when it renders Dockerfiles and never creates an
 11. Every verification check returns exit 0 for `PASS`, 1 for `FAIL`, or 2 for `BLOCKED` and writes
      a closed check-result JSON. An absent executable or wrong version is
      `BLOCKED_TOOLCHAIN`, never a skip or pass.
-12. Task 13 adds exact normalized core pins `docker 29.4.2`, `docker-buildx 0.33.0`, and
-    `git 2.52.0` to `.tool-versions`. Preflight derives requirements only from that lock. A parser may
+12. Task 13 adds exact normalized core pins `docker 29.4.2`, `docker-buildx 0.33.0`,
+    `docker-compose 5.1.3`, and `git 2.52.0` to `.tool-versions`. Docker Compose is an independent
+    tool identity: executable `docker`, argument array `["compose","version","--short"]`, and
+    `tool_id=docker-compose`; it is never inferred from the Docker Engine version. Preflight derives requirements only from that lock. A parser may
     remove a documented vendor wrapper or platform suffix solely to compare the normalized core
     version, but evidence retains the complete observed version string. A missing pin is itself
     `BLOCKED_TOOLCHAIN`; no default or script-local version is permitted.
+13. `lock-images.mjs` mechanically reads Task 10's committed
+    `apps/control-plane/worker/src/test/resources/temporal/reconciliation-workflow-v1.provenance.json`.
+    For both Temporal roles it requires exact equality of coordinate, repository digest, and
+    linux/amd64 manifest digest with the four constants above before writing the lock. There is no
+    environment/CLI override or independently copied Temporal source table.
+14. The namespace is `accord-foundation-local-v1` with retention exactly `72h0m0s` and status
+    `Registered`. A distinct one-shot namespace admin uses only the admin client certificate/key/CA
+    over frontend mTLS: describe first; create with `72h` only on the normalized NOT_FOUND code;
+    describe again and verify name, status, and retention. Authentication, permission, timeout,
+    malformed output, conflicting existing retention, or any other error fails without create/update.
+15. Pulling through an approved mirror is allowed only when raw manifest bytes hash to the exact
+    canonical digest. Lock/provenance always retain the official coordinate/repository; mirror URLs,
+    credentials, redirects, and bearer challenges never become provenance.
+
+- [ ] **Independent toolchain maintenance checkpoint before Task 13**
+
+This is one atomic four-path maintenance commit because the executable toolchain declaration, package
+engine, bootstrap assertion, and dependent Web plan prerequisite must never disagree. Make exactly
+these synchronized edits:
+
+- `.tool-versions`: set `java temurin-21.0.11+10` and `nodejs 22.22.1` without changing another pin;
+- `package.json`: set only `engines.node` to `22.22.1`, preserving pnpm and dependency bytes;
+- `tests/bootstrap/verify-workspace.ps1`: set its expected-map Java value to
+  `temurin-21.0.11+10` and Node value to `22.22.1`;
+- `docs/superpowers/plans/2026-07-24-accord-web-experience-plan.md`: change both the foundation
+  prerequisite's Node version and its `root.engines.node` assertion to `22.22.1`, leaving
+  its pnpm/React/TypeScript/Vite pins and all Web implementation scope unchanged.
+
+Tasks 10-12 rely on the actual JDK 21 patch level and Task 13/Web scripts rely on the current Node 22
+LTS patch. Run the bootstrap and independent parsed package/tool assertions before staging:
+
+~~~powershell
+$env:JAVA_HOME='C:\Users\m1560\.jdks\jdk-21.0.11+10'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/bootstrap/verify-workspace.ps1
+@'
+const fs = require('node:fs');
+const root = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+if (root.engines?.node !== '22.22.1') throw new Error('package.json Node engine mismatch');
+const tools = Object.fromEntries(fs.readFileSync('.tool-versions', 'utf8')
+  .trim().split(/\r?\n/).map((line) => line.trim().split(/\s+/, 2)));
+if (tools.java !== 'temurin-21.0.11+10') throw new Error('.tool-versions Java mismatch');
+if (tools.nodejs !== '22.22.1') throw new Error('.tool-versions Node mismatch');
+const bootstrap = fs.readFileSync('tests/bootstrap/verify-workspace.ps1', 'utf8');
+if (!bootstrap.includes("java = 'temurin-21.0.11+10'") ||
+    !bootstrap.includes("nodejs = '22.22.1'")) {
+  throw new Error('bootstrap expected map mismatch');
+}
+const webPlan = fs.readFileSync(
+  'docs/superpowers/plans/2026-07-24-accord-web-experience-plan.md', 'utf8');
+if (!webPlan.includes('with Node `22.22.1`, pnpm `10.12.4`') ||
+    !webPlan.includes("assert.equal(root.engines.node, '22.22.1');") ||
+    /22[.]17[.]0/.test(webPlan)) {
+  throw new Error('Web plan Node prerequisite/assertion mismatch');
+}
+'@ | node -
+$toolchainPaths = @(
+  '.tool-versions'
+  'package.json'
+  'tests/bootstrap/verify-workspace.ps1'
+  'docs/superpowers/plans/2026-07-24-accord-web-experience-plan.md'
+)
+if ($toolchainPaths.Count -ne 4) { throw 'Toolchain maintenance manifest must contain exactly four paths' }
+git add -- $toolchainPaths
+$actual = @(git diff --cached --name-only | Sort-Object)
+$expected = @($toolchainPaths | Sort-Object)
+if (Compare-Object $expected $actual -SyncWindow 0) {
+  throw 'Toolchain maintenance index differs from the exact four-path manifest'
+}
+git commit -m "build: update Java and Node toolchains"
+~~~
+
+Expected: bootstrap and parsed assertions pass; exactly the four declared paths are committed with
+Temurin `21.0.11+10` and Node `22.22.1` consistent everywhere. This commit remains independent of
+Task 13's later 31-path manifest: Task 13 subsequently edits the already-maintained `.tool-versions`
+path only to add Docker, Buildx, Compose, and Git pins, and does not restage the other three paths.
 
 - [ ] **Step 1: Write RED image-lock and check-result contract tests**
 
@@ -5866,10 +6490,14 @@ schema, lock, renderer, and verifier exist. Cover:
 - a repository scan proving the only path matching `images*.lock.json` is
   `infra/images/images.lock.json`;
 - `verify-images.mjs` leaves the lock, Compose file, and rendered Dockerfiles byte-identical.
+- `lock-images.mjs` accepts only the closed `--mode`/`--role` pair, fixes its internal lock path, and
+  rejects `--output`, a positional/unknown option, `initialize` with a non-`all` role, or `refresh`
+  with `all`/an unknown role before registry access;
 - `.tool-versions` contains exactly the Task 13 core pins `docker 29.4.2`,
-  `docker-buildx 0.33.0`, and `git 2.52.0`; preflight tests cover exact match, allowed wrapper/platform
+  `docker-buildx 0.33.0`, `docker-compose 5.1.3`, and `git 2.52.0`; preflight tests cover exact match, allowed wrapper/platform
   suffix normalization with full observed-version evidence, mismatch, absent executable, and absent
-  pin as `BLOCKED_TOOLCHAIN`.
+  pin as `BLOCKED_TOOLCHAIN`; the Compose observation is independently keyed and uses executable
+  `docker` with argv `["compose","version","--short"]`.
 
 Create `check-result.schema.json` with this closed shape:
 
@@ -5878,7 +6506,7 @@ Create `check-result.schema.json` with this closed shape:
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "check_id", "status", "reason_code", "started_at", "finished_at", "evidence"],
+  "required": ["schema_version", "check_id", "status", "reason_code", "started_at", "finished_at", "evidence", "tool_observations"],
   "properties": {
     "schema_version": { "const": "1.0.0" },
     "check_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{2,95}$" },
@@ -5892,13 +6520,38 @@ Create `check-result.schema.json` with this closed shape:
       "type": "array",
       "items": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
       "uniqueItems": true
+    },
+    "tool_observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tool_id", "executable", "argv", "exit_code", "duration_ms", "observed_version", "normalized_version"],
+        "properties": {
+          "tool_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{1,63}$" },
+          "executable": { "type": "string", "minLength": 1, "maxLength": 4096 },
+          "argv": {
+            "type": "array",
+            "maxItems": 32,
+            "items": { "type": "string", "maxLength": 4096 }
+          },
+          "exit_code": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+          "duration_ms": { "type": "integer", "minimum": 0, "maximum": 300000 },
+          "observed_version": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "normalized_version": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      }
     }
   }
 }
 ~~~
 
 `check-result.mjs` validates `PASS -> reason_code=PASS`, `FAIL -> ASSERTION_FAILED`, and
-`BLOCKED -> BLOCKED_*` before atomically writing JSON outside the source tree.
+`BLOCKED -> BLOCKED_*` before atomically writing JSON outside the source tree. It emits one closed
+`tool_observations` item per attempted tool in deterministic invocation order and exactly `[]` when
+no tool was invoked. Unknown fields fail schema validation; raw stdout/stderr, environment, headers,
+credentials, secret values, or command strings are forbidden. `argv` is the already-redacted argument
+array and contains no password/token/key bytes.
 
 Run:
 
@@ -5915,7 +6568,9 @@ a shell, runs a bounded version command, and emits one result per required tool.
 parser may normalize only a documented vendor wrapper or platform suffix to the core token used for
 comparison; evidence always retains the complete observed version string. Docker Buildx is queried
 through an argument array equivalent to `docker buildx version` but is keyed by the independent
-`docker-buildx` pin. An absent pin/executable, unparsable output, or mismatch is
+`docker-buildx` pin. Docker Compose is separately queried with executable `docker`, argv
+`["compose","version","--short"]`, and `tool_id=docker-compose`; its normalized result must equal
+`5.1.3` independently of Engine and Buildx. An absent pin/executable, unparsable output, or mismatch is
 `BLOCKED_TOOLCHAIN`. It accepts repeated `--require name` arguments and never has `--skip`,
 `--best-effort`, `--allow-missing`, fallback pins, or script-local defaults.
 
@@ -5932,7 +6587,7 @@ exit $LASTEXITCODE
 Run:
 
 ~~~powershell
-node scripts/verification/preflight.mjs --check-id ft13-toolchain --require node --require docker --require docker-buildx --require git --require java
+node scripts/verification/preflight.mjs --check-id ft13-toolchain --require node --require docker --require docker-buildx --require docker-compose --require git --require java
 ~~~
 
 Expected GREEN on a configured local machine only when every required pin exists and the normalized
@@ -5942,21 +6597,37 @@ observed version when available, and exit 2.
 
 - [ ] **Step 3: Implement and populate the one authoritative image lock**
 
-`image-lock.schema.json` fixes `schema_version` to `1.0.0` and the exact ten role keys above.
-`lock-images.mjs` accepts only `--initialize` or `--refresh` followed by one exact lock role; for
-example, `--refresh temporal-server`. Initialization uses the reviewed versions already named in
-this plan for PostgreSQL 17.5, exact Temporal source `temporalio/server:1.28.1`, Temporal UI 2.39.0,
-WireMock 3.13.1, LocalStack 4.6.0, and OTel Collector 0.129.0. It does not invent MinIO tags. MinIO
+`image-lock.schema.json` fixes `schema_version` to `1.0.0` and the exact eleven role keys above.
+`lock-images.mjs` accepts exactly `--mode <initialize|refresh>` plus `--role <all|exact-role>` and no
+other option: `initialize` requires role `all`, while `refresh` requires one of the eleven exact lock
+roles. Its sole authoritative read/write path is internally fixed to
+`infra/images/images.lock.json`; there is no `--output`, alternate lock path, positional fallback, or
+environment override. For example, refresh is
+`node scripts/images/lock-images.mjs --mode refresh --role temporal-server`. Initialization uses the reviewed versions already named in
+this plan for PostgreSQL 17.5, exact Temporal schema-tool source
+`temporalio/admin-tools:1.28.1-tctl-1.18.4-cli-1.4.1`, exact server source
+`temporalio/server:1.28.1`, Temporal UI 2.39.0,
+WireMock 3.13.1, LocalStack 4.6.0, and OTel Collector 0.129.1. Java sources are fixed to official
+`eclipse-temurin:21.0.11_10-jdk-ubi9-minimal` and
+`eclipse-temurin:21.0.11_10-jre-ubi9-minimal`. It does not invent MinIO tags. MinIO
 sources are closed required inputs `ACCORD_MINIO_SERVER_SOURCE` and
 `ACCORD_MINIO_CLIENT_SOURCE`; each value must be an immutable-reviewed exact
 `registry/repository:source-tag`, and empty, `latest`, digest-only, tagless, or ambiguous values are
-rejected. The two Java source references remain required inputs `ACCORD_JAVA_BUILD_SOURCE` and
-`ACCORD_JAVA_RUNTIME_SOURCE` from the approved authenticated mirror.
+rejected. Before either MinIO source can enter the lock, evidence must independently verify its SPDX
+license, upstream support/EOS date, and raw linux/amd64 plus linux/arm64 manifests. Until all four
+facts are approved, initialization returns `BLOCKED_EXTERNAL_IMAGE_RESOLUTION`, writes no lock, and
+does not guess a public tag or digest.
+
+The Temporal sources are not copied from this paragraph. The script parses Task 10 provenance,
+requires the exact official coordinates and digest pairs stated in invariant 5, resolves raw
+manifests, and compares coordinate/repository/linux-amd64 digest before writing. The Java sources are
+the fixed official coordinates above. An approved mirror may supply any source only if its raw bytes
+produce the same digest; the lock records official canonical provenance, not the mirror.
 
 For every entry, invoke `docker buildx imagetools inspect --raw` with an argument array, hash raw
 manifest bytes locally, resolve each required platform manifest, reject redirects to an unapproved
 registry, and atomically write canonical key-sorted JSON. Missing or invalid required MinIO/Java
-source input, or any source (including the currently failing Temporal registry source) that cannot
+source input, or any source that cannot
 resolve to actual manifest bytes and digest, emits `BLOCKED_EXTERNAL_IMAGE_RESOLUTION` and writes no
 partial lock or temporary replacement. Never preserve registry credentials, response headers, or
 bearer challenges.
@@ -5964,31 +6635,57 @@ bearer challenges.
 Run:
 
 ~~~powershell
-node scripts/images/lock-images.mjs --initialize --output infra/images/images.lock.json
+node scripts/images/lock-images.mjs --mode initialize --role all
 node scripts/images/verify-images.mjs --scope local
 node --test tests/integration/image-lock.test.mjs
 ~~~
 
 Expected GREEN only when authenticated registry resolution returns actual digest evidence for every
-closed source. With the current registry failure, network disabled, a required MinIO/Java source
-missing/invalid, or any source unresolvable, leave no partial lock and emit
+closed source. With network disabled, a required MinIO/Java source missing/invalid, or any source
+unresolvable, leave no partial lock and emit
 `BLOCKED_EXTERNAL_IMAGE_RESOLUTION`; that result is not FT13 completion evidence.
 
 - [ ] **Step 4: Write RED Temporal topology, database-authority, and GitLab-facts tests**
 
 Create `temporal-mtls.test.mjs` and `local-foundation.test.mjs`. Parse Compose/server YAML and assert:
 
-- services are `postgres`, `temporal-schema`, `temporal-server`, `temporal-ui`, `minio`,
+- services are `postgres`, `temporal-schema`, `temporal-server`, `temporal-namespace`, `temporal-ui`, `minio`,
   `minio-init`, `mock-gitlab`, `mock-kms`, and `otel-collector`;
+- Compose contains no worker service, worker command, worker certificate mount, or application image;
+  `local-up.mjs` starts dependencies only;
 - no Compose image contains a tag or literal digest; every image comes from the rendered lock env;
 - Temporal schema is a one-shot dependency and server is not `auto-setup`/`start-dev`;
 - frontend TLS requires client auth, separate server/client CA paths, and name `temporal`;
 - UI mounts only its client material; worker material is not mounted into UI;
+- `temporal-schema` uses the locked admin-tools image and exact SQL-tool argv; `temporal-namespace`
+  uses only the distinct admin mTLS identity and the exact describe/create/describe state machine;
 - Temporal identities have no membership or CONNECT path into an Accord business database;
 - `mock-gitlab` exposes `/api/v4/projects/77831` and no `/repos/` route;
 - tracked files contain no generated PEM/private-key bytes.
+- start-only mode cannot call `check-result.mjs` or create `build/verification/ft13-local.json`;
+  it also cannot run `TemporalLocalTopologyIT` or create the supervised IT observation;
+- only `local-up.mjs --run-temporal-it` may launch the exact Gradle IT task. Direct Gradle execution,
+  a forged/old observation, finalize-before-supervision, missing/stale receipt, mismatched run
+  ID/hash/XML, and a receipt claiming PASS before the supervised Gradle process exits `0` all fail in
+  process-spawn fixtures. Structure tests reject a wrapper or documented command that bypasses this
+  Node mode;
+- process-spawn fixtures additionally prove: supervised success followed by a direct Gradle rerun
+  makes that rerun nonzero, deletes the old receipt/final result, invalidates the completed attempt
+  plus observation, and makes finalize fail; an old observation cannot accompany new receipt/XML;
+  byte-identical semantic receipt/XML from a different `it_attempt_id` fails; a run-state CAS race
+  cannot complete either attempt; and after a supervised failure removes its pending attempt, a new
+  supervision registers a different attempt and can pass;
+- two Gradle/Test processes launched concurrently with the same attempt and same raw supervisor
+  nonce produce exactly one PENDING-to-RUNNING winner under the cross-process lock. If the supervised
+  child loses, no COMPLETED state/PASS is possible; if it wins, the direct process exits nonzero and
+  writes no receipt. Separate fixtures reject a missing/malformed/wrong nonce, a RUNNING runner PID
+  outside the supervisor's recorded descendant set, lock timeout, symlink substitution, exact-byte
+  CAS race, and partial state write. A recursive evidence scan proves the raw nonce value occurs zero
+  times in receipt, XML, run-state, final result, logs, diagnostic output, and tracked/generated files.
 
-`TemporalLocalTopologyIT` uses Task 10's production `TemporalRuntimeConfiguration`,
+After the real dependencies are ready, `TemporalLocalTopologyIT` constructs Task 10's production
+`TemporalRuntimeConfiguration` and starts/stops the worker through the production
+`TemporalWorkerLifecycle` inside the single test JVM under test; Compose never owns the worker. It uses
 `ReadOnlyReconciliationActivity`, `ReconciliationWorkflowRef`, and production
 `FencedReconciliationObservation`. The test supplies only a bounded low-level
 `ProviderObservationPort`; it cannot implement or replace the high-level Temporal port. The
@@ -5997,7 +6694,24 @@ observation, and tx2 finalize boundary on every activity attempt. The low-level 
 first observation, the orchestrator atomically marks the acquired attempt unknown, then retries and
 atomically completes `CONVERGED` plus event/outbox using database snapshot scope. Assert exactly two
 claims/reloads, capability only in attempt memory, identifier-only heartbeats/history, and zero
-Provider mutation calls.
+Provider mutation calls. The same IT executes the trusted worker/UI cases and every plaintext,
+missing-client-cert, wrong-CA, wrong-name, and wrong-EKU case in the seven-row matrix below. Its
+`finally` always stops `TemporalWorkerLifecycle`, waits for worker/factory/stubs termination, and
+asserts no worker thread or child process survives.
+
+At test start the IT uses only the `run_id` and `it_attempt_id` already validated by the Gradle task's
+`doFirst`; it performs no evidence cleanup or run-state transition itself. Only after all seven cases,
+production reconciliation, mutation count `0`, lifecycle shutdown, and JUnit assertions succeed
+does it atomically write a canonical envelope with exactly `receipt` and `receipt_sha256`.
+`receipt_sha256` is the lowercase `sha256:<64 hex>` SHA-256 over the RFC 8785 canonical `receipt`
+object, never over the envelope or serialized file bytes. That closed object contains
+`schema_version=1.0.0`, the current run-state `run_id`, the same one-use `it_attempt_id`, fixed
+suite/class names, `status=PASS`, `test_count=7`, the seven closed case IDs,
+production configuration/lifecycle class names, `worker_started=true`, `worker_stopped=true`,
+`workflow_outcome=CONVERGED`, `mutation_calls=0`, JUnit tests/failures/errors/skips, and fixed exit
+semantics `PASS=0, FAIL=1, BLOCKED=2`. It contains no remote ref/URL/SHA, timestamp, hostname,
+absolute path, secret, certificate/key bytes, raw stdout/stderr, exception, Provider fact, or free
+text. Failure, skip, timeout, or shutdown leakage produces no PASS receipt.
 
 Run the Node tests before creating the topology.
 
@@ -6019,12 +6733,152 @@ Expected RED: Compose, Temporal config, GitLab facts, and local integration are 
 a server certificate, and distinct `worker`, `ui`, and `admin` client certificates under ignored
 `infra/local/state/pki`, plus an untrusted CA/client pair and a trusted-CA wrong-EKU certificate
 carrying only serverAuth. The server EKU is serverAuth; valid client EKUs are clientAuth. SANs are
-exact and private keys are owner-only where supported.
+exact. Its fixed `public static void main(String[] args)` accepts only
+`--output-root <canonical-path>` and rejects every other/missing argument before writing. Output is
+atomic and restricted to that exact ignored directory. On Windows it first removes inherited access
+from each generated private key and replaces it with the exact current service identity, SYSTEM, and
+Administrators ACL accepted by `WindowsTemporalSecretAclPolicy`; inheriting `%TEMP%` or parent rights
+is a test failure. POSIX private keys are owner-read-only and directories are owner-only.
+
+`tests/integration/build.gradle` owns this bounded launcher and no second PKI implementation:
+
+~~~groovy
+evaluationDependsOn(':apps:control-plane:worker')
+def workerProject = project(':apps:control-plane:worker')
+def temporalPkiOutput = rootProject.layout.projectDirectory.dir('infra/local/state/pki')
+
+tasks.register('generateTemporalLocalPki', JavaExec) {
+    group = 'verification'
+    description = 'Generate the ignored FT13 Temporal test PKI.'
+    dependsOn(workerProject.tasks.named('testClasses'))
+    javaLauncher.set(javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(21)
+    })
+    classpath = workerProject.sourceSets.test.runtimeClasspath
+    mainClass.set(
+        'com.inforvans.accord.controlplane.worker.temporal.LocalTemporalPki')
+    args('--output-root', temporalPkiOutput.asFile.absolutePath)
+    workingDir = rootProject.layout.projectDirectory.asFile
+    outputs.dir(temporalPkiOutput)
+    timeout.set(java.time.Duration.ofSeconds(30))
+}
+
+tasks.register('temporalLocalTopologyTest', Test) {
+    group = 'verification'
+    description = 'Run only the authoritative FT13 Temporal topology IT.'
+    dependsOn(workerProject.tasks.named('testClasses'))
+    testClassesDirs = workerProject.sourceSets.test.output.classesDirs
+    classpath = workerProject.sourceSets.test.runtimeClasspath
+    filter.includeTestsMatching(
+        'com.inforvans.accord.controlplane.worker.temporal.TemporalLocalTopologyIT')
+    maxParallelForks = 1
+    failFast = true
+    timeout.set(java.time.Duration.ofMinutes(3))
+    systemProperty(
+        'accord.ft13.run-state',
+        rootProject.layout.projectDirectory.file(
+            'infra/local/state/run-state.json').asFile.absolutePath)
+    reports.junitXml.required.set(true)
+    reports.junitXml.outputLocation.set(
+        layout.buildDirectory.dir('test-results/temporalLocalTopologyTest'))
+    reports.junitXml.includeSystemOutLog.set(false)
+    reports.junitXml.includeSystemErrLog.set(false)
+    testLogging {
+        events('failed')
+        showStandardStreams = false
+    }
+}
+~~~
+
+Structural tests require the exact main class, JDK 21 launcher, worker test runtime classpath, fixed
+output, and PT30S timeout. They also require the exact one-class `Test` filter, worker test runtime,
+single fork, PT3M task timeout, fixed run-state input, deterministic JUnit XML location,
+`includeSystemOutLog=false`, `includeSystemErrLog=false`, and suppressed standard streams.
+The JavaExec/Test `timeout.set(Duration)` calls are valid inherited
+`Task#getTimeout(): Property<Duration>` APIs in Gradle 8.14.3, but are only second-layer JVM/task
+watchdogs. They never prove subprocess death or replace the outer Node supervisor, which owns the
+complete Gradle process tree, both output readers, the monotonic deadline, and final-death checks.
+`local-up.mjs` runs
+`:tests:integration:generateTemporalLocalPki` with strict dependency verification before any Compose
+command. A timeout, nonzero Gradle exit, missing file, escaping output, or ACL validation failure
+prevents all container startup.
+
+The exact Test task requires one canonical UUID Gradle project property
+`accordFt13ItAttemptId` and receives raw high-entropy `ACCORD_FT13_SUPERVISOR_NONCE` only through the
+supervised child environment. In `doFirst` it performs only fail-closed format and current-state
+prechecks: the nonce must be exactly 32 random bytes encoded as 43 unpadded Base64URL characters, the
+property must equal the sole same-run `temporal_it_attempt.it_attempt_id`, state must
+be `PENDING`, the closed attempt must also contain one `supervisor_nonce_sha256`, and no completed
+observation may exist. It supplies only validated `run_id`, `it_attempt_id`, and the SHA-256 of the
+exact PENDING run-state bytes to the test JVM as fixed system properties. The raw nonce remains an
+environment value: `doFirst` forwards it only as the same named Test-worker environment entry. It is
+never a Gradle property/system property/argv value, and neither Gradle nor the IT may print or
+persist it.
+
+An absent PENDING attempt, a `RUNNING`/`COMPLETED` attempt, stale run, malformed/missing property or
+nonce, ID mismatch,
+duplicate attempt, or existing conflicting observation is an unauthorized direct Gradle run. Before
+throwing, `doFirst` deletes only the exact old `build/verification/ft13-temporal-it.json` and
+`build/verification/ft13-local.json`; when the same run contains an old `COMPLETED` attempt and its
+observation, it CAS-removes both atomically so the old PASS cannot be borrowed. It never converts a
+PENDING attempt to RUNNING/COMPLETED, records a process exit, or has a `doLast` evidence writer. A
+CAS race during invalidation still fails closed and finalize rejects the now-inconsistent state.
+
+The authorized IT has no static initializer with external effects. Its first `@BeforeAll` instruction,
+before certificate parsing, socket, database, container, Temporal, or worker action, recomputes
+`supervisor_nonce_sha256=sha256:<64 lowercase hex>` from the raw environment bytes, obtains a bounded
+`PT2S` cross-process file lock, and performs the true exact-byte CAS. The lock is the single fixed
+`infra/local/state/temporal-it-attempt.lock` sibling of run-state. Both the canonical state directory
+and existing lock/state files must resolve beneath the repository to regular no-symlink paths; a new
+lock file uses `CREATE_NEW`, and every later open revalidates real path, file key, owner, and
+no-follow attributes. Under that lock, the IT requires the raw state bytes to match the doFirst hash
+and exact closed `{run_id,it_attempt_id,state:PENDING,supervisor_nonce_sha256}`. It atomically replaces
+them through a same-directory temporary file plus sibling rename with
+`{run_id,it_attempt_id,state:RUNNING,supervisor_nonce_sha256,runner_pid}`, where `runner_pid` is
+`ProcessHandle.current().pid()` for that Test worker. Temp creation, full write/flush, rename, and
+post-rename parse are bounded; timeout, partial write, symlink/file-key/owner change, nonce mismatch,
+or CAS loss fails before any product side effect and writes no receipt. The lock makes two contenders
+for one attempt produce at most one RUNNING winner.
+
+Only the RUNNING winner may later atomically write its canonical attempt-bound receipt, and only after
+all assertions and lifecycle cleanup pass; JUnit XML excludes system out/err. Raw console output is never evidence. The
+Node supervisor may retain only a redacted 64 KiB diagnostic tail in process memory and print that
+bounded diagnostic on failure; it never writes the tail, exception, or raw stream into receipt,
+run-state, observation, or final result. Finalize rejects a run-state without exactly one
+hash-verified current-run COMPLETED attempt written by `local-up.mjs --run-temporal-it`.
 
 `server.yaml` configures PostgreSQL persistence, committed dynamic config, frontend server
-certificate/key, trusted client CA, mandatory client auth, and TLS 1.3. `temporal-schema` runs the
-pinned server image SQL tool as the schema login, then exits. `temporal-server` runs as the runtime
-login. UI uses its own certificate, CA, host verification, and server name.
+certificate/key, trusted client CA, mandatory client auth, and TLS 1.3. `00-roles-and-databases.sql`
+is the sole creator/owner/grant authority for `accord_temporal` and
+`accord_temporal_visibility`; the schema login cannot alter cross-database authority.
+`temporal-schema` runs from the locked admin-tools image, overrides the entrypoint with exact
+`/usr/local/bin/temporal-sql-tool`, and executes these fixed argument arrays without a shell:
+
+~~~text
+["/usr/local/bin/temporal-sql-tool","--endpoint","postgres","--port","5432","--user","accord_temporal_schema_login","--database","accord_temporal","--plugin","postgres12","setup-schema","-v","0.0"]
+["/usr/local/bin/temporal-sql-tool","--endpoint","postgres","--port","5432","--user","accord_temporal_schema_login","--database","accord_temporal","--plugin","postgres12","update-schema","-d","/etc/temporal/schema/postgresql/v12/temporal/versioned"]
+["/usr/local/bin/temporal-sql-tool","--endpoint","postgres","--port","5432","--user","accord_temporal_schema_login","--database","accord_temporal_visibility","--plugin","postgres12","setup-schema","-v","0.0"]
+["/usr/local/bin/temporal-sql-tool","--endpoint","postgres","--port","5432","--user","accord_temporal_schema_login","--database","accord_temporal_visibility","--plugin","postgres12","update-schema","-d","/etc/temporal/schema/postgresql/v12/visibility/versioned"]
+~~~
+
+The database password is supplied only through `SQL_PASSWORD`; it is absent from argv, Compose
+command text, logs, check-result, and evidence. The service first asserts the executable and both
+schema directories exist, requires each exit code `0`, and exits before `temporal-server` starts.
+The server runs from the independently locked server image as the runtime login.
+
+After frontend mTLS is healthy, `temporal-namespace` runs exact executable
+`/usr/local/bin/temporal` from the admin-tools image with the following redacted argument arrays and
+only the admin certificate files:
+
+~~~text
+["/usr/local/bin/temporal","--address","temporal-server:7233","--tls-ca-path","/run/accord/temporal/pki/client-ca.pem","--tls-cert-path","/run/accord/temporal/pki/admin.pem","--tls-key-path","/run/accord/temporal/pki/admin-key.pem","--tls-server-name","temporal","--command-timeout","10s","--output","json","operator","namespace","describe","--namespace","accord-foundation-local-v1"]
+["/usr/local/bin/temporal","--address","temporal-server:7233","--tls-ca-path","/run/accord/temporal/pki/client-ca.pem","--tls-cert-path","/run/accord/temporal/pki/admin.pem","--tls-key-path","/run/accord/temporal/pki/admin-key.pem","--tls-server-name","temporal","--command-timeout","10s","--output","json","operator","namespace","create","--namespace","accord-foundation-local-v1","--retention","72h"]
+~~~
+
+It executes describe first, executes create only for parsed NOT_FOUND, then always describes again.
+The final closed JSON parser requires name `accord-foundation-local-v1`, status `Registered`, and
+retention `72h0m0s`; unknown/missing fields needed for that proof, conflicting state, or nonzero exit
+fails. UI uses its own certificate, CA, host verification, and server name.
 
 The required Compose image form is:
 
@@ -6074,9 +6928,89 @@ Expected GREEN: schema, profile, GitLab facts, KMS alias, and MinIO policy tests
 
 - [ ] **Step 7: Add deterministic Node-owned start, TLS negative matrix, and stop**
 
-`local-up.mjs` runs preflight, verifies/renders images, generates fresh PKI, starts PostgreSQL,
-executes Temporal schema setup, starts the remaining services, runs all local checks, and writes
-`build/verification/ft13-local.json` only through `check-result.mjs`.
+Default `local-up.mjs` is start-only. It removes only stale ignored FT13 run-state/IT/final-result
+files, runs preflight and image verification/rendering, invokes bounded
+`:tests:integration:generateTemporalLocalPki`, and starts only the declared Compose dependency
+topology: PostgreSQL, schema setup, real Temporal server, admin namespace setup, Temporal UI, MinIO,
+GitLab mock, KMS mock, and collector. Compose has no worker. It performs bounded dependency readiness
+checks and atomically writes canonical non-verdict `infra/local/state/run-state.json` with a fresh
+UUID `run_id`, schema version, image-lock digest, Compose project, exact dependency service set,
+ready facts, and closed normalized Gradle/Compose tool observations. It cannot invoke
+`check-result.mjs`, start a worker, run `TemporalLocalTopologyIT`, or write
+`build/verification/ft13-local.json`.
+
+`local-up.mjs --run-temporal-it` is the only IT process supervisor. The CLI accepts exactly default
+start-only, exactly `--run-temporal-it`, or exactly `--finalize`; combined, repeated, positional, or
+unknown arguments fail before side effects. The IT mode never starts or stops infrastructure. It
+closed-parses the current run-state, rechecks that its exact dependency service set is still ready,
+and snapshots its canonical raw bytes and `run_id`. A run with a PENDING, RUNNING, or COMPLETED attempt cannot
+register another; at most one attempt exists in run-state at a time. It generates a one-use
+cryptographically random UUID `it_attempt_id` plus an independent 32-byte CSPRNG
+`supervisor_nonce`, computes `supervisor_nonce_sha256=sha256:<64 lowercase hex>`, deletes only the exact old
+`build/verification/ft13-temporal-it.json`, deterministic IT JUnit XML, and
+`build/verification/ft13-local.json`, then uses the snapshotted bytes as a CAS precondition to
+atomically add the exact closed
+`temporal_it_attempt={run_id,it_attempt_id,state:"PENDING",supervisor_nonce_sha256}` and remove any orphaned old
+`temporal_it_observation`. The registered PENDING bytes become the sole launch snapshot. A competing
+registration or changed run-state fails before launch and cannot overwrite the winner. A supervised
+failure CAS-removes its own PENDING attempt; only after that cleanup may a retry on the same run
+register a different `it_attempt_id`.
+
+The supervisor launches the repository Gradle Wrapper directly with `shell:false` and an argument
+array for exactly
+`["-PaccordFt13ItAttemptId=<it_attempt_id>",":tests:integration:temporalLocalTopologyTest","--rerun-tasks","--no-daemon","--dependency-verification=strict","--console=plain"]`.
+On every platform it uses the pinned JDK `java` plus `GradleWrapperMain`, rather than asking Windows
+to interpret `gradlew.bat`; the wrapper JAR, distribution URL/checksum, task name, and redacted
+repository-relative argv are fixed and structurally tested. Node adds the raw nonce only to the
+spawned Gradle process environment as `ACCORD_FT13_SUPERVISOR_NONCE`; it is absent from argv and every
+other child environment entry constructed by the script, and the parent clears its raw byte/string
+references immediately after successful spawn. Streaming diagnostics retain only the digest: every
+43-character Base64URL candidate is hashed and a digest match is replaced before tail retention, so
+redaction needs no surviving parent-side raw nonce. The supervisor continuously samples and records the
+complete Gradle/Test-worker descendant PID set for the full process lifetime, continuously drains stdout and
+stderr, retains at most one combined 64 KiB redacted diagnostic tail in memory, and applies one
+`System.nanoTime()`-equivalent `PT4M` deadline. On timeout or cancellation it terminates the complete
+Gradle/test-worker descendant tree with the platform kill-tree implementation, then waits for every
+process and both readers to reach final death. A surviving descendant/reader, cleanup error, signal,
+timeout, or nonzero exit is failure even if a receipt exists.
+
+Only after the whole Gradle process exits exactly `0` and all descendants/readers are dead does this
+mode re-read run-state. It accepts only the exact same attempt in state `RUNNING`, with
+`supervisor_nonce_sha256` equal to its retained digest and `runner_pid` present in the complete PID
+set continuously recorded from its own Gradle descendant tree. A PENDING state or a RUNNING PID
+outside that tree is never successful, even if every artifact looks valid. Only after that ownership
+proof does it closed-parse and verify the current-run receipt plus deterministic XML. It recomputes the exact
+receipt-object JCS digest defined in Step 4, requires the stored `receipt_sha256` to match, requires
+both the snapshotted `run_id` and `it_attempt_id`, and enforces exact class/suite/case/count equality,
+all seven cases, zero failure/error/skip, production worker start/stop, `CONVERGED`, and mutation
+count `0`. It hashes the XML's raw bytes exactly as written to
+`junit_xml_sha256=sha256:<64 lowercase hex>`; parsed semantic equality is necessary but never replaces
+that byte digest.
+
+The supervisor then re-reads run-state and performs one CAS against the exact RUNNING bytes it just
+validated. Only the same
+`{run_id,it_attempt_id,state:RUNNING,supervisor_nonce_sha256,runner_pid}` with unchanged dependency
+facts and an owned descendant PID may transition atomically to `state=COMPLETED` while adding exactly
+one closed `temporal_it_observation`. The COMPLETED attempt retains
+`supervisor_nonce_sha256` and `runner_pid`. Its observation envelope contains `run_id`,
+`it_attempt_id`, `supervisor_nonce_sha256`, `runner_pid`, `receipt_sha256`, `junit_xml_sha256`,
+`observation`, and `observation_sha256`. The nested observation repeats all six binding values, fixes
+`runner_descendant_verified=true`, and adds only
+`tool_id=gradle-temporal-it`, the redacted executable and exact attempt-bearing argv, exit `0`,
+monotonic duration below `240000`, the complete Gradle version already verified against the wrapper
+distribution, and normalized `8.14.3`. `observation_sha256` is SHA-256 over RFC 8785 canonical
+`{run_id,it_attempt_id,supervisor_nonce_sha256,runner_pid,receipt_sha256,junit_xml_sha256,observation}`; the hash field itself is not in
+its preimage.
+
+Any nonzero exit, timeout, receipt/XML/attempt/reader/final-death error, cleanup failure, or CAS race
+deletes this run's exact receipt, XML, IT observation, and final result, then compare-removes only its
+own nonce-digest/attempt PENDING state or a RUNNING state whose `runner_pid` belongs to its recorded
+descendant set before returning nonzero. It never removes a RUNNING state won by a foreign/direct
+PID and never clobbers a different run/attempt. If a direct contender won, or a concurrent state
+change prevents owned cleanup, the state remains non-finalizable and startup of a fresh run is
+required; no failure path can preserve usable PASS evidence. Raw output,
+the diagnostic tail, exceptions, secrets, environment values, and absolute paths never enter
+receipt, XML, run-state, observation, or final evidence.
 
 Prove this exact matrix:
 
@@ -6091,26 +7025,91 @@ Prove this exact matrix:
 | trusted-CA certificate with serverAuth-only EKU | TLS client-auth handshake fails |
 
 `local-down.mjs` preserves data/PKI unless `--purge-local-state` is present. Purge resolves and
-proves the target is exactly `infra/local/state` under the repository before removal.
+proves the target is exactly `infra/local/state` under the repository before removal. Normal and
+failure teardown stop the exact Compose project, terminate every owned child/output reader, and poll
+until `docker compose ps` is empty. A teardown timeout/nonzero exit removes any just-written PASS
+final result and makes the authoritative command fail.
 
-Run:
+`local-up.mjs --finalize` is a separate fail-closed mode and never starts services or a test. It
+requires the current run-state, exactly one same-run `temporal_it_attempt` in state `COMPLETED`, its
+single hash-closed `temporal_it_observation`, exact canonical
+`build/verification/ft13-temporal-it.json`, and deterministic
+`tests/integration/build/test-results/temporalLocalTopologyTest/TEST-com.inforvans.accord.controlplane.worker.temporal.TemporalLocalTopologyIT.xml`.
+It rejects unknown/missing/duplicate attempt or observation-envelope fields and requires byte-for-byte
+equality of `run_id`, `it_attempt_id`, `supervisor_nonce_sha256`, and `runner_pid` across COMPLETED
+state and both levels of the observation envelope, plus equality of run/attempt IDs with the receipt.
+It requires closed `runner_descendant_verified=true`; raw nonce is neither needed nor accepted.
+It independently re-reads the receipt, recomputes the Step 4 JCS
+`receipt_sha256`, hashes the current XML raw bytes to `junit_xml_sha256`, and requires both exact
+digests to equal the COMPLETED observation's outer and nested values. It recomputes
+`observation_sha256` over canonical
+`{run_id,it_attempt_id,supervisor_nonce_sha256,runner_pid,receipt_sha256,junit_xml_sha256,observation}` and requires the exact
+attempt-bearing Wrapper argv, complete observed Gradle version, normalized `8.14.3`, exit `0`, and
+duration below `PT4M`.
+
+Finalize also closed-parses receipt/XML semantics again: current IDs, `PASS`, seven cases/tests, zero
+failures/errors/skips, production configuration/lifecycle success facts, stopped worker,
+`CONVERGED`, mutation count `0`, exact class/name equality, and no system-out/system-err elements.
+A PENDING, RUNNING, absent, duplicate, stale, old-attempt, cross-attempt, foreign-runner,
+hash-mismatched, XML-mismatched, or secret/raw-output-bearing state/observation/receipt fails before
+result creation. Semantically
+identical bytes carrying another attempt ID still fail. A direct Gradle run either lacks PENDING
+authorization or invalidates the old COMPLETED attempt/observation, so it cannot borrow an earlier
+PASS.
+
+Only after that proof does finalize run the remaining image, namespace/UI, GitLab, KMS, MinIO,
+collector, database-authority, and structural checks. It merges the closed observations actually
+recorded by start-only mode with only the standard tool fields projected from the hash-verified
+attempt-bound observation inside the Node supervisor's current-run envelope; its run/attempt/receipt/
+XML binding fields remain verified provenance and are included through their evidence digests rather
+than violating the closed `tool_observations` schema. Gradle never self-attests its exit.
+Observations include normalized Gradle and Docker Compose versions, executable, redacted argv, exit
+code, and bounded duration, never raw output or secrets. It then writes final
+`build/verification/ft13-local.json` exclusively through
+`check-result.mjs`. Process-spawn tests prove start-only cannot create this file, direct Gradle plus
+finalize cannot create it, old observation plus new receipt/XML fails, cross-attempt identical
+semantics fail, a CAS race produces no COMPLETED state, failed supervision can register a fresh ID,
+and every finalize-before-current-supervision permutation fails closed.
+
+Run this authoritative sequence; the exact IT task is rerun even when Gradle outputs are otherwise
+up-to-date:
 
 ~~~powershell
-node scripts/local-up.mjs
-node --test tests/integration/temporal-mtls.test.mjs tests/integration/local-foundation.test.mjs
-./gradlew.bat :apps:control-plane:worker:test --tests '*TemporalLocalTopologyIT' --no-daemon --dependency-verification=strict
-node scripts/local-down.mjs
+$primaryFailure = $null
+$downExit = 0
+try {
+  node scripts/local-up.mjs
+  if ($LASTEXITCODE -ne 0) { throw "FT13 dependency startup failed with exit $LASTEXITCODE" }
+  node scripts/local-up.mjs --run-temporal-it
+  if ($LASTEXITCODE -ne 0) { throw "FT13 supervised TemporalLocalTopologyIT failed with exit $LASTEXITCODE" }
+  node scripts/local-up.mjs --finalize
+  if ($LASTEXITCODE -ne 0) { throw "FT13 finalize failed with exit $LASTEXITCODE" }
+} catch {
+  $primaryFailure = $_
+} finally {
+  node scripts/local-down.mjs
+  $downExit = $LASTEXITCODE
+}
+if ($null -ne $primaryFailure) { throw $primaryFailure }
+if ($downExit -ne 0) { throw "FT13 teardown failed with exit $downExit" }
 ~~~
 
-Expected GREEN: real server/UI/worker mTLS, database separation, GitLab facts, KMS, and local object
-capabilities pass; every negative TLS case fails for its named reason; no key appears in evidence.
+Every native process uses an argument array with `shell:false`, a monotonic deadline, continuous drain,
+and at most a 64 KiB redacted in-memory diagnostic tail. The Gradle JavaExec/Test task timeouts bound
+their JVM work only as second-layer watchdogs; `--run-temporal-it` owns the outer PT4M deadline,
+complete process-tree kill, reader drain, and final-death proof. Expected GREEN: start-only emits no
+verdict, the production worker runs only inside the supervised IT JVM, the receipt/XML/current-run
+attempt/nonce-digest/owned-runner/observation bindings agree, finalize proves all dependency/product checks, every negative TLS case
+fails for its named reason, no key/raw output appears in evidence, and teardown proves final
+container/process/reader death. A receipt, observation, XML, or PASS file alone is not completion
+evidence unless this entire wrapper returns `0`.
 
 - [ ] **Step 8: Verify and commit only FT13 paths**
 
 ~~~powershell
 node scripts/images/verify-images.mjs --scope local
 node --test tests/integration/image-lock.test.mjs tests/integration/local-foundation.test.mjs tests/integration/temporal-mtls.test.mjs
-./gradlew.bat :apps:control-plane:worker:test --tests '*TemporalLocalTopologyIT' --no-daemon --dependency-verification=strict
+corepack pnpm exec ajv validate --spec=draft2020 -c ajv-formats -s contracts/verification/check-result.schema.json -d build/verification/ft13-local.json
 git diff --check
 $task13Paths = @(
   'contracts/capabilities/object-storage-adapter.schema.json'
@@ -6141,18 +7140,23 @@ $task13Paths = @(
   'tests/integration/temporal-mtls.test.mjs'
   'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/LocalTemporalPki.java'
   'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/TemporalLocalTopologyIT.java'
-  'apps/control-plane/worker/build.gradle'
+  'tests/integration/build.gradle'
   '.tool-versions'
   '.gitignore'
 )
+if ($task13Paths.Count -ne 31) { throw 'Task 13 manifest must contain exactly 31 paths' }
 git add -- $task13Paths
-git diff --cached --name-only
+$actual = @(git diff --cached --name-only | Sort-Object)
+$expected = @($task13Paths | Sort-Object)
+if (Compare-Object $expected $actual -SyncWindow 0) {
+  throw 'Task 13 index differs from the exact 31-path manifest'
+}
 git commit -m "build: add digest-locked Temporal mTLS topology"
 ~~~
 
-Expected: the staged set contains the single image lock and `.tool-versions` core pins, no generated
+Expected: the sorted staged set contains exactly the declared 31 paths, including the single image lock and `.tool-versions` core pins, no generated
 PKI/state, no GitHub product mock, and no undeclared Task 12-or-earlier implementation or migration change. The shared
-`apps/control-plane/worker/build.gradle` is the only intentional pre-existing implementation path.
+`tests/integration/build.gradle` is the only intentional pre-existing build path.
 Missing external image resolution leaves FT13 `BLOCKED` and does not produce a partial commit.
 
 ### Task 14: Enforce Typed, Fail-Closed OpenTelemetry
@@ -7668,7 +8672,8 @@ Run read-only checks that assert:
 - Task 13-17 contain no unfinished marker or vague implementation instruction;
 - `infra/images/images.lock.json` is the sole image lock and every Compose/Dockerfile/tool image
   consumer is checked against it;
-- Task 13 mTLS negative cases and independent Temporal database identities are exhaustive;
+- Task 13 mTLS negative cases and independent Temporal database identities are exhaustive, and only
+  the Node supervisor can bind a successful current-run Gradle process to receipt/XML evidence;
 - Task 14 exposes no generic attribute map and guards automatic instrumentation at final export;
 - Task 15 identity/secret/role/subject/audience tuples are component-keyed and network/TLS evidence
   is not conflated;
@@ -7685,4 +8690,8 @@ this plan's intended implementation paths, and a mechanically complete Task 13-1
 - [x] All implementation paths, code shapes, Gradle files, commands, images, and runtime dependencies use Java 21/Groovy DSL, Python 3.12, React/TypeScript, and PostgreSQL coordination.
 - [x] Language consolidation does not consolidate authority: edge/security services remain independent deployables and the control plane never receives source access.
 - [x] Public mutations use `Idempotency-Key`, quoted `If-Match`, exact durable replay, generation/token/deadline fencing, CAS, and RFC 7807.
+- [x] Task 10 owns exactly 36 active paths, treats `7f973ae` as an immutable clean ancestor, fixes V003 fixture scope, renews an acquired PT8S claim by PT30S inside tx1, bounds six identifier-only heartbeats under `PT2M`/`PT30S`/`PT10S`, and closes observation plus post-tx2-response crash recovery without a production test hook.
+- [x] Task 11 closes application/loader/runtime archive bytes under exact resource budgets and proves all four database/projection readiness combinations with bounded output and final child/reader death.
+- [x] Task 12 backfills V003-era work into one fair three-channel directory, keeps unscoped SQL behind typed directory operations, persists both historical fences, and enforces directory-first duplicate-inbox locking.
+- [x] Task 13 owns exactly 31 paths, mechanically binds both Temporal digest pairs, uses admin-tools for SQL and admin-mTLS namespace setup, lets one nonce-authorized Test worker lock/CAS a one-use attempt from PENDING to RUNNING, and lets only the PT4M Node process-tree supervisor verify the owned runner before CAS completion with exact receipt/XML digests in the hash-closed observation; direct Gradle reruns invalidate old PASS evidence, and unverified MinIO sources remain blocked.
 - [x] Static scans, task/step numbering, fence balance, unfinished markers, repeated references, and architecture/runtime terms have been checked against this document.
