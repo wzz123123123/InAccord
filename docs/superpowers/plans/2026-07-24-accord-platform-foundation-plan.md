@@ -3431,3512 +3431,4184 @@ git commit -m "feat: add persistent command gate"
 ~~~
 ### Task 8: Add Transactional Domain Events, Outbox, Inbox, And External Intents
 
+**Goal:** Add tenant-isolated event, outbox, inbox, and external-intent persistence. Runtime roles
+mutate only through fixed-owner PostgreSQL routines; Provider I/O occurs after a committed claim;
+terminal intent, domain-event, and outbox changes remain one atomic database unit.
+
+**Exact 25-file implementation manifest:**
+- Modify: database/control-plane/build.gradle
+- Create: database/control-plane/migrations/V002__reliable_event_delivery.sql
+- Create: database/control-plane/src/test/java/com/inforvans/accord/database/ReliableDeliveryMigrationTest.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/DomainEvent.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExecutionClaim.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExecutionResolution.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExternalIntentDefinition.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExternalIntentRef.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExternalIntentRegistration.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExternalIntentSnapshot.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExternalIntentState.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExternalWritePermit.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/InboxAcceptance.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/InboxMessage.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/JooqExternalIntentStore.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/LostExternalIntentFence.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/OutboxMessage.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReconciliationClaim.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReconciliationLease.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReconciliationResolution.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReliabilityValues.java
+- Create: apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReliableEventStore.java
+- Create: apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/JooqExternalIntentStoreTest.java
+- Create: apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/PostgreSqlReliabilityTestSupport.java
+- Create: apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/ReliableEventStoreTest.java
+
+database/control-plane/build.gradle adds all four V002 tables to jOOQ generation.
+ReliableDeliveryMigrationTest owns schema/catalog/real-role proofs. PostgreSqlReliabilityTestSupport
+is the sole reusable PostgreSQL fixture. The nineteen main types and two behavior tests own the
+validated Java boundary and integration behavior; no second inline PostgreSQL fixture is allowed.
+
+**Authoritative invariants:**
+1. Both stores own no pool, transaction manager, Spring configuration, or clock; every operation
+   receives the caller's transaction DSLContext.
+2. accord_api and accord_worker have zero INSERT, UPDATE, and DELETE on all four V002 tables.
+   Runtime table DML is exactly zero.
+3. API SELECT is exactly domain_event and outbox_event. Worker SELECT is exactly domain_event,
+   outbox_event, and inbox_message. Both have zero table/column SELECT on external_call_intent.
+4. All four tables have ENABLE+FORCE RLS and the sole FOR ALL TO PUBLIC tenant_isolation policy,
+   using/checking tenant_id=accord_security.current_tenant_id().
+5. All fifteen runtime routines are accord_migrator-owned SECURITY DEFINER routines with exact
+   search_path=pg_catalog, pg_temp, schema-qualified objects, and explicit p_tenant_id/app.tenant_id
+   comparison. Every returned row has named columns/types; no table composite result is permitted.
+6. reject_reliability_row_change, guard_external_intent_successor, and
+   guard_external_intent_transition remain RETURNS trigger and grant no runtime EXECUTE.
+7. SAFE_REF is exactly result_tenant_id uuid, result_intent_id uuid, result_root_intent_id uuid,
+   result_attempt_ordinal integer, result_global_idempotency_key varchar, result_state varchar.
+8. SNAPSHOT is exactly tenant_id uuid, intent_id uuid, root_intent_id uuid,
+   predecessor_intent_id uuid, attempt_ordinal integer, scope_type varchar, scope_id varchar,
+   logical_action_key varchar,
+   global_idempotency_key varchar, state varchar, execution_generation bigint,
+   reconciliation_generation bigint, provider_request_id varchar, outcome_digest char(71),
+   last_error_code varchar, created_at timestamptz, updated_at timestamptz, terminal_at timestamptz.
+   Scope is non-sensitive event-routing context already bound to the intent definition. The snapshot
+   excludes owner, token, deadline, request digest, and Provider invocation bindings.
+9. Execution claim returns disposition text and state varchar, then nullable tenant/id,
+   execution owner/generation/token/deadline, global key, provider/installation/repository,
+   operation, request-reference type/id/version, and request digest, in that exact order/type.
+10. Reconciliation claim uses reconciliation owner/generation/token/deadline and appends nullable
+    provider_request_id. Missing, losing, active, repeated, and same-token outcomes disclose no
+    capability: missing yields no row; every capability/provider column in a non-winning row is null.
+11. Only the call changing RECORDED->EXECUTING or OUTCOME_UNKNOWN->RECONCILING with its candidate
+    token receives capability. Java rechecks owner/token. Renew requires the full prior capability,
+    returns only a replacement deadline, and Java copies all other caller-held fields.
+12. record exposes only disposition+SAFE_REF and null SAFE_REF on conflict; successor exposes only
+    SAFE_REF; load exposes only SNAPSHOT through load_external_intent_snapshot. No runtime direct
+    external_call_intent query is allowed.
+13. The state graph is RECORDED->EXECUTING->SUCCEEDED|CONFIRMED_NO_EFFECT|OUTCOME_UNKNOWN and
+    OUTCOME_UNKNOWN->RECONCILING->SUCCEEDED|CONFIRMED_NO_EFFECT|DIVERGED|OUTCOME_UNKNOWN.
+14. Successor creation requires CONFIRMED_NO_EFFECT, preserves root and immutable Provider/request
+    definition, increments ordinal, creates a new intent/global key, and is unique per predecessor.
+15. Append writes event+outbox atomically; inbox deduplicates by tenant/source/message and keeps
+    digest conflict payload-free. Execution/reconciliation terminal routines validate the complete
+    live fence and event binding. Commit, outer rollback, event-conflict rollback, and caught-stale
+    rollback are symmetric and leave no partial intent/event/outbox state.
+
+**Exact result/ACL matrix:**
+
+| Routine | Result | API | Worker |
+|---|---|---:|---:|
+| append_reliable_event | void | EXECUTE | EXECUTE |
+| accept_inbox_message | TABLE(disposition text, stored_digest text, stored_state text) | none | EXECUTE |
+| record_external_intent | TABLE(disposition text, SAFE_REF) | EXECUTE | none |
+| load_external_intent_snapshot | TABLE(SNAPSHOT) | EXECUTE | EXECUTE |
+| create_external_intent_successor | TABLE(SAFE_REF) | none | EXECUTE |
+| claim_external_intent_execution | TABLE(disposition, state, nullable execution capability) | none | EXECUTE |
+| renew_external_intent_execution | TABLE(execution_lease_until timestamptz) | none | EXECUTE |
+| mark_external_intent_execution_unknown | void | none | EXECUTE |
+| expire_external_intent_execution | boolean | none | EXECUTE |
+| complete_external_intent_execution | void | none | EXECUTE |
+| claim_external_intent_reconciliation | TABLE(disposition, state, nullable reconciliation capability) | none | EXECUTE |
+| renew_external_intent_reconciliation | TABLE(reconciliation_lease_until timestamptz) | none | EXECUTE |
+| mark_external_intent_reconciliation_unknown | void | none | EXECUTE |
+| expire_external_intent_reconciliation | boolean | none | EXECUTE |
+| complete_external_intent_reconciliation | void | none | EXECUTE |
+
+Revoke PUBLIC/API/worker first, then grant exactly this matrix. Catalog tests assert owner,
+SECURITY DEFINER, search path, result names/order/types, no SETOF external_call_intent, and exact
+ACL. record and successor map only ExternalIntentRef; load maps only ExternalIntentSnapshot.
+ReliableEventStore exposes append(tx,event,outbox) and acceptInbox(tx,message).
+JooqExternalIntentStore exposes record, createSuccessor, claim/renew/markUnknown/complete/expire for
+execution and reconciliation, plus load; all take DSLContext first. Claims are Acquired,
+NotExecutable/NotReconcilable, or Missing. Registration is Created, Duplicate, or payload-free
+Conflict. Inbox acceptance is Accepted, Duplicate(state), or payload-free DigestConflict.
+
+- [ ] **TDD Slice 1 of 6: Final schema, RLS, ownership, and ACL**
+
+Write ReliableDeliveryMigrationTest first for tables, constraints/FKs/indexes, ENABLE+FORCE RLS,
+policies, routine owner/search path, exact table/column/function ACL, and real API/worker SET ROLE
+denials for direct external SELECT and all DML.
+RED: ./gradlew.bat :database:control-plane:test --tests '*ReliableDeliveryMigrationTest' --no-daemon --rerun-tasks --dependency-verification=strict
+Expected RED: V002, four tables, routines, and generated-table include set are absent.
+GREEN responsibility: create constrained schema, RLS/triggers/revokes, fixed-owner routines, and
+the six-table jOOQ include/verification manifest. Re-run RED command; all checks pass.
+
+- [ ] **TDD Slice 2 of 6: Event, outbox, and inbox**
+
+Write ReliableEventStoreTest first for append commit/outer rollback, tenant/FK mismatch, duplicate
+inbox digest, changed-digest payload-free conflict, JSON/bounds, and routine access.
+RED: ./gradlew.bat :apps:control-plane:modules:reliability:test --tests '*ReliableEventStoreTest' --no-daemon --rerun-tasks --dependency-verification=strict
+Expected RED: event/inbox values, fixture, store, and append/accept routines are missing.
+GREEN responsibility: implement DomainEvent, OutboxMessage, InboxMessage, InboxAcceptance,
+ReliabilityValues, shared fixture/store, append_reliable_event, and accept_inbox_message. Re-run the
+focused reliability and migration tests.
+
+- [ ] **TDD Slice 3 of 6: Safe registration and snapshot**
+
+Add JooqExternalIntentStoreTest cases first for create/duplicate/conflict, generated key,
+cross-tenant denial, duplicate EXECUTING root exposing only safe ref, API+worker safe load, missing
+load, exact record components, and direct external SELECT denial.
+RED: ./gradlew.bat :apps:control-plane:modules:reliability:test --tests '*JooqExternalIntentStoreTest' --no-daemon --rerun-tasks --dependency-verification=strict
+Expected RED: intent values/store plus record/load routines are absent.
+GREEN responsibility: implement definition/ref/registration/snapshot/state, record_external_intent,
+load_external_intent_snapshot, and safe Java mapping. Re-run the focused test.
+
+- [ ] **TDD Slice 4 of 6: One-shot execution capability**
+
+Add tests first for simultaneous/repeated/same-token claims, losing raw null columns, candidate
+owner/token validation, database-time lease, full-fence renewal, select-then-complete attack,
+unknown/expiry, commit, outer rollback, event-conflict rollback, and caught-stale rollback.
+RED: ./gradlew.bat :apps:control-plane:modules:reliability:test --tests '*JooqExternalIntentStoreTest' --no-daemon --rerun-tasks --dependency-verification=strict
+Expected RED: execution values/methods and five lifecycle routines are absent.
+GREEN responsibility: implement claim, deadline-only renew, unknown, expiry, terminal completion,
+and full capability/provider binding; only the state-changing candidate receives it. Re-run focused
+Java and migration tests.
+
+- [ ] **TDD Slice 5 of 6: Reconciliation and successor**
+
+Add tests first for losing/repeated/same-token reconciliation, deadline-only renew, still-unknown,
+expiry recovery, forged/select-then-complete attacks, three terminal outcomes, symmetric atomicity,
+and one exact-definition successor only after CONFIRMED_NO_EFFECT.
+RED: ./gradlew.bat :apps:control-plane:modules:reliability:test --tests '*JooqExternalIntentStoreTest' --no-daemon --rerun-tasks --dependency-verification=strict
+Expected RED: reconciliation values/methods, successor, and lifecycle routines are absent.
+GREEN responsibility: implement claims/lease/resolutions, LostExternalIntentFence, successor,
+unknown/expiry, and atomic terminal routines. Re-run focused Java and migration tests.
+
+- [ ] **TDD Slice 6 of 6: Catalog and non-disclosure closure**
+
+Add exact pg_proc OUT-name/type/order and ACL tests, no-composite assertion, real-role SELECT
+attacks, raw non-winning null assertions, candidate mismatch checks, and paired execution/
+reconciliation commit, outer rollback, event-conflict rollback, and caught-stale rollback.
+RED: ./gradlew.bat :database:control-plane:test --tests '*ReliableDeliveryMigrationTest' :apps:control-plane:modules:reliability:test --tests '*JooqExternalIntentStoreTest' --no-daemon --rerun-tasks --dependency-verification=strict
+Expected RED: any broad SELECT, rowtype result, capability leak, or asymmetric rollback fails.
+GREEN responsibility: remove external SELECT, add narrow snapshot load, use exact claim/renew
+results, revalidate candidates, copy caller-held capabilities on renewal, and map the exact safe
+scope fields without exposing capability or Provider binding data. Re-run RED command.
+
+**Verification:**
+
+~~~powershell
+$env:JAVA_HOME='C:/Users/m1560/.jdks/jdk-21.0.11+10'
+./gradlew.bat :database:control-plane:test :apps:control-plane:modules:reliability:test --no-daemon --rerun-tasks --dependency-verification=strict
+./gradlew.bat check --no-daemon --rerun-tasks --dependency-verification=strict
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/bootstrap/verify-workspace.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/generate-control-plane-jooq.ps1 -Port 55532
+git diff --check
+~~~
+
+The disposable jOOQ run migrates through V002, generates/compiles all six table+record types,
+removes its pinned PostgreSQL 17.5 container, and leaves generated sources ignored. Fresh JUnit XML
+must have zero failures/errors/skips. Static review rejects a production database-control-plane
+import, owned pool/transaction/Spring configuration/JVM correctness clock, runtime external DML or
+SELECT, composite routine result, secret-like value, or capability disclosure.
+
+**Exact staging and commits:**
+
+Greenfield staging is exactly the 25 manifest paths:
+
+~~~powershell
+git add -- database/control-plane/build.gradle database/control-plane/migrations/V002__reliable_event_delivery.sql database/control-plane/src/test/java/com/inforvans/accord/database/ReliableDeliveryMigrationTest.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/DomainEvent.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExecutionClaim.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExecutionResolution.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExternalIntentDefinition.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExternalIntentRef.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExternalIntentRegistration.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExternalIntentSnapshot.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExternalIntentState.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExternalWritePermit.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/InboxAcceptance.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/InboxMessage.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/JooqExternalIntentStore.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/LostExternalIntentFence.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/OutboxMessage.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReconciliationClaim.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReconciliationLease.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReconciliationResolution.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReliabilityValues.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReliableEventStore.java apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/JooqExternalIntentStoreTest.java apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/PostgreSqlReliabilityTestSupport.java apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/ReliableEventStoreTest.java
+git diff --cached --name-only
+git commit -m "feat: add reliable event delivery primitives"
+~~~
+
+Keep a04bbe0 intact. Keep 96b2afb's exact eight-file review intact: ExecutionResolution.java,
+JooqExternalIntentStore.java, ReconciliationResolution.java, ReliabilityValues.java,
+ReliableEventStore.java, JooqExternalIntentStoreTest.java, V002__reliable_event_delivery.sql, and
+ReliableDeliveryMigrationTest.java. Do not amend or squash either commit. The final review is a
+separate exact four-file capability hardening:
+
+~~~powershell
+git add -- database/control-plane/migrations/V002__reliable_event_delivery.sql database/control-plane/src/test/java/com/inforvans/accord/database/ReliableDeliveryMigrationTest.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/JooqExternalIntentStore.java apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/JooqExternalIntentStoreTest.java
+git diff --cached --name-only
+git commit -m "fix: prevent external intent capability disclosure"
+~~~
+
+Task 10's first TDD substep owns one independent unpublished-V002 safe-scope follow-up without
+amending either prior commit. A reconciliation lease does not contain scope and must never be treated
+as sufficient event authority; Task 10 is blocked until that focused migration/catalog/store test is
+GREEN.
+
+### Task 9: Prove Enterprise HTTP Reliability At The Control API
+
+**Goal:** Expose `POST /v1/contract-validations/{validationId}` as a real PostgreSQL-backed
+mutation that proves strict HTTP parsing, trusted identity, browser-session CSRF, RFC 7807,
+persistent idempotent replay, ExpectedVersion CAS, transactional domain event/outbox emission, and
+full-fence rollback without performing any external Provider I/O in a database transaction.
+
 **Files:**
-- Create: `database/control-plane/migrations/V002__reliable_event_delivery.sql`
-- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/DomainEvent.java`
-- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/InboxAcceptance.java`
-- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReliableEventStore.java`
-- Create: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/ReliableEventStoreTest.java`
-- Modify: `apps/control-plane/modules/reliability/build.gradle`
+- Create: `database/control-plane/migrations/V003__foundation_http_reliability.sql`
+- Create: `database/control-plane/src/test/java/com/inforvans/accord/database/FoundationHttpReliabilityMigrationTest.java`
+- Create: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationVerifiedPrincipal.java`
+- Create: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationTenantTransactions.java`
+- Create: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationHttpRequestPolicy.java`
+- Create: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ContractValidationJson.java`
+- Create: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/HttpIdempotencyFingerprint.java`
+- Create: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationHttpConfiguration.java`
+- Create: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ContractValidationCommandService.java`
+- Create: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ContractValidationController.java`
+- Create: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationHttpSecurity.java`
+- Create: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ProblemAdvice.java`
+- Create: `apps/control-plane/api/src/test/java/com/inforvans/accord/controlplane/http/HttpIdempotencyFingerprintTest.java`
+- Create: `apps/control-plane/api/src/test/java/com/inforvans/accord/controlplane/http/ContractValidationApiTest.java`
+- Modify: `contracts/openapi/accord-control-api.yaml`
+- Modify: `contracts/json-schema/problem-details.schema.json`
+- Modify: `tests/contracts/openapi-contract.test.mjs`
 - Modify: `database/control-plane/src/test/java/com/inforvans/accord/database/PlatformMigrationTest.java`
+- Modify: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/JooqCommandGate.java`
+- Modify: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/JooqCommandGateTest.java`
+- Modify: `gradle/libs.versions.toml`
+- Modify: `apps/control-plane/api/build.gradle`
+- Modify: `apps/control-plane/api/gradle.lockfile`
+- Modify: `gradle/verification-metadata.xml`
+- Modify: `apps/control-plane/api/src/main/resources/application.yml`
 
-- [ ] **Step 1: Write the failing transaction and deduplication tests**
+Do not modify the worker configuration in this task. Task 10 owns the worker's baseline datasource,
+jOOQ, PostgreSQL, and Temporal wiring; Task 12 later reuses that baseline and adds only delivery
+scheduling/drain configuration. Do not add `contract_validation` to database jOOQ generation: the existing
+reliability boundary accepts the caller-owned transaction `DSLContext` and uses explicit bounded
+SQL, while generated database classes remain an ignored verification output.
 
-Create `ReliableEventStoreTest.java`:
+**Authoritative invariants:**
+
+1. Authentication, authorization, CSRF, route/header/media policy, raw JSON/I-JSON parsing, closed
+   request-shape parsing, and request fingerprint construction all finish before the idempotency
+   claim. A failure in this phase creates no `idempotency_result`, aggregate, validation, event, or
+   outbox row.
+2. An acquired command uses exactly two database transactions. Transaction 1 installs and verifies
+   tenant context, calls `JooqCommandGate.claim`, and commits `STARTED`. Local schema lookup and JSON
+   Schema evaluation may run after that commit but perform no network or database I/O. Transaction
+   2 installs tenant context again and commits either a fenced rejection or the entire business
+   result.
+3. Transaction 2 for success contains ExpectedVersion CAS, `contract_validation`, `domain_event`,
+   `outbox_event`, serialized HTTP response, and fenced command completion. A lost, expired, or
+   replaced claim fence rolls all of them back. No controller or service method has an outer
+   `@Transactional` annotation.
+4. Only deterministic business outcomes `404`, `412`, and `422` may complete without an aggregate
+   binding. They are stored through `completeRejection` and replay byte-for-byte. Protocol,
+   authentication, CSRF, `409`, `415`, and `406` results are not stored as completed commands.
+5. `Claim.RequestConflict` remains payload-free. Neither the stored request fingerprint nor any
+   secret/session/CSRF value appears in a response, Problem, log assertion, event, or outbox payload.
+6. `schema_id` is an identifier into a classpath allowlist. It is never dereferenced as a URL. This
+   proof has no Provider client. Future external work must record an FT8 external intent in a
+   business transaction, let a worker commit `claimExecution`, call the Provider after that commit,
+   and finish under the returned fence in another transaction.
+7. Early policy has one strict precedence and short-circuits at the first failure with zero claim:
+   trusted authentication; authorization; browser CSRF; correlation/query/visible-singleton-header
+   shape; Content-Type; Accept syntax/negotiation; Idempotency-Key; If-Match; then raw-body byte
+   limit, UTF-8, I-JSON, and closed JSON decoding. A malformed `X-Correlation-ID` is
+   `REQUEST_INVALID` only after security succeeds. Authentication/security Problem creation instead
+   generates a fresh UUID and never reflects malformed correlation input, preserving security
+   precedence.
+8. The application boundary is only the value enumeration visible through
+   `HttpServletRequest.getHeaders(name)`; it never claims to reconstruct container-merged physical
+   lines. Singleton-header count and missing-value behavior follow the Step 2 table exactly. Accept
+   is an RFC list header: all visible values combine under comma-list semantics with at most 2048
+   total visible UTF-8 bytes and 16 total ranges.
+9. The controller returns `ResponseEntity<byte[]>`. It strict-UTF-8 encodes
+   `StoredHttpResult.body()` exactly once, applies only the canonical persisted safe-header map, and
+   never routes the body through a String message converter or JSON reserialization. Replay compares
+   status, canonical persisted safe headers, and raw UTF-8 body bytes.
+
+**Authoritative Problem table:**
+
+Every endpoint Problem body has exactly base keys `type`, `title`, `status`, `code`,
+`correlation_id`, and `instance`, plus only the row's extensions. There is no `detail` key.
+`instance` is the request path without query. Type is the listed absolute URI and is never relative.
+
+| Code | Absolute type | Stable title | Status | Exact extensions |
+| --- | --- | --- | ---: | --- |
+| `REQUEST_INVALID` | `https://problems.accord.inforvans.com/request-invalid` | `Request is invalid` | 400 | none |
+| `JSON_INVALID` | `https://problems.accord.inforvans.com/json-invalid` | `JSON document is invalid` | 400 | none |
+| `AUTHENTICATION_REQUIRED` | `https://problems.accord.inforvans.com/authentication-required` | `Authentication is required` | 401 | none |
+| `AUTHORIZATION_DENIED` | `https://problems.accord.inforvans.com/authorization-denied` | `Authorization is denied` | 403 | none |
+| `CSRF_VALIDATION_FAILED` | `https://problems.accord.inforvans.com/csrf-validation-failed` | `CSRF validation failed` | 403 | none |
+| `SCHEMA_NOT_FOUND` | `https://problems.accord.inforvans.com/schema-not-found` | `Contract schema was not found` | 404 | none |
+| `CONTRACT_VALIDATION_NOT_FOUND` | `https://problems.accord.inforvans.com/contract-validation-not-found` | `Contract validation was not found` | 404 | none |
+| `NOT_ACCEPTABLE` | `https://problems.accord.inforvans.com/not-acceptable` | `Requested representation is not acceptable` | 406 | none |
+| `IDEMPOTENCY_KEY_REUSED` | `https://problems.accord.inforvans.com/idempotency-key-reused` | `Idempotency key was reused for a different request` | 409 | none |
+| `COMMAND_IN_PROGRESS` | `https://problems.accord.inforvans.com/command-in-progress` | `Command is already in progress` | 409 | `retry_after` |
+| `VERSION_CONFLICT` | `https://problems.accord.inforvans.com/version-conflict` | `Expected version does not match` | 412 | `expected_version`, `actual_version` |
+| `UNSUPPORTED_MEDIA_TYPE` | `https://problems.accord.inforvans.com/unsupported-media-type` | `Content type is not supported` | 415 | none |
+| `DOCUMENT_SCHEMA_INVALID` | `https://problems.accord.inforvans.com/document-schema-invalid` | `Document does not satisfy the schema` | 422 | `errors` |
+
+`expected_version` is a JSON integer in `0..9223372036854775807`; `actual_version` is either null or
+an integer in `1..9223372036854775807`; `retry_after` is integer seconds in `1..120`. `errors` contains
+`1..128` closed items with exactly `field` (string length `1..512`) and `reason` (stable uppercase
+keyword/code length `1..64`, pattern `^[A-Z][A-Z0-9_]{0,63}$`); validator prose is never copied.
+The JSON Schema retains `additionalProperties: true` only for generic RFC 7807 reuse, while the
+endpoint factory and tests assert the exact per-row key set. Persisted 404/412/422 Problems use this
+same table and byte representation, never a second stored variant.
+
+- [ ] **Step 1: Make the cumulative HTTP contract fail on the enterprise policy**
+
+Replace the current mutation-policy assertions in
+`tests/contracts/openapi-contract.test.mjs` with assertions that the foundation operation has both
+security alternatives, conditional browser CSRF metadata, the exact success response, and every
+explicit failure response:
+
+```javascript
+test('foundation mutation publishes the complete HTTP reliability policy', async () => {
+  const source = await readFile('contracts/openapi/accord-control-api.yaml', 'utf8');
+  const api = YAML.parse(source);
+  const operation = api.paths['/v1/contract-validations/{validationId}'].post;
+
+  assert.equal(operation.operationId, 'validateContract');
+  assert.deepEqual(operation.security, [{ browserSession: [] }, { oidc: [] }]);
+  assert.equal(operation['x-browser-csrf-required'], 'conditional');
+  assert.equal(operation['x-accept-policy'], 'application/json-or-wildcard');
+  assert.deepEqual(
+    Object.keys(operation.responses).sort(),
+    ['201', '400', '401', '403', '404', '406', '409', '412', '415', '422', 'default'],
+  );
+  assert.equal(operation.responses['201'].headers.ETag.required, true);
+  for (const status of ['400', '401', '403', '404', '406', '409', '412', '415', '422']) {
+    assert.equal(operation.responses[status].$ref, '#/components/responses/ProblemResponse');
+  }
+  const refs = operation.parameters.map((entry) => entry.$ref).filter(Boolean);
+  assert.ok(refs.includes('#/components/parameters/IdempotencyKey'));
+  assert.ok(refs.includes('#/components/parameters/ExpectedVersion'));
+  assert.ok(refs.includes('#/components/parameters/BrowserCsrfToken'));
+});
+```
+
+Update `contracts/openapi/accord-control-api.yaml` so the operation contains these exact policy
+fields and responses:
+
+```yaml
+    post:
+      summary: Validate a structured contract document
+      operationId: validateContract
+      security:
+        - browserSession: []
+        - oidc: []
+      x-browser-csrf-required: conditional
+      x-accept-policy: application/json-or-wildcard
+      parameters:
+        - name: validationId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/ExpectedVersion'
+        - $ref: '#/components/parameters/BrowserCsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContractValidationRequest'
+      responses:
+        '201':
+          description: Validation result persisted
+          headers:
+            ETag:
+              required: true
+              schema: { type: string, pattern: '^"(0|[1-9][0-9]*)"$' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContractValidationResponse'
+        '400': { $ref: '#/components/responses/ProblemResponse' }
+        '401': { $ref: '#/components/responses/ProblemResponse' }
+        '403': { $ref: '#/components/responses/ProblemResponse' }
+        '404': { $ref: '#/components/responses/ProblemResponse' }
+        '406': { $ref: '#/components/responses/ProblemResponse' }
+        '409': { $ref: '#/components/responses/ProblemResponse' }
+        '412': { $ref: '#/components/responses/ProblemResponse' }
+        '415': { $ref: '#/components/responses/ProblemResponse' }
+        '422': { $ref: '#/components/responses/ProblemResponse' }
+        default:
+          $ref: '#/components/responses/ProblemResponse'
+```
+
+Define the optional CSRF header and tighten `If-Match` without weakening the existing idempotency
+key contract:
+
+```yaml
+    ExpectedVersion:
+      name: If-Match
+      in: header
+      required: true
+      description: One canonical quoted non-negative aggregate sequence.
+      schema: { type: string, pattern: '^"(0|[1-9][0-9]*)"$' }
+    BrowserCsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: false
+      description: Required only for unsafe requests authenticated by browserSession.
+      schema: { type: string, minLength: 32, maxLength: 256, pattern: '^[A-Za-z0-9._~-]+$' }
+```
+
+Extend `contracts/json-schema/problem-details.schema.json` with the exact integer bounds and closed
+error-item shape from the authoritative table. Require base fields `type`, `title`, `status`, `code`,
+UUID `correlation_id`, and `instance`; forbid `detail` explicitly. Retain document-level
+`additionalProperties: true` only because the shared RFC 7807 schema permits extensions. Contract
+tests enumerate every table row and prove the endpoint factory emits exactly the six base keys plus
+that row's extensions, with byte-equal type/title/status/code for stored and unstored Problems.
+
+Run:
+
+```powershell
+corepack pnpm contracts:test
+corepack pnpm contracts:lint
+```
+
+Expected RED: the test reports missing conditional CSRF metadata and missing explicit status
+responses. Expected GREEN after the contract edit: both commands pass, the existing health and
+Problem reuse assertions remain green, and every mutation still references idempotency,
+ExpectedVersion, and the default Problem response.
+
+- [ ] **Step 2: Drive strict raw-request parsing and the JCS fingerprint from unit tests**
+
+Create `HttpIdempotencyFingerprintTest.java`. Its parameterized cases must prove all of the
+following without starting Spring or PostgreSQL:
+
+- Enumerate values only with `HttpServletRequest.getHeaders(name)` and enforce this exact visible
+  singleton table. The shape stage short-circuits only counts greater than one; zero values continue
+  to the named later stage. If a container has combined multiple wire occurrences into one visible singleton,
+  the corresponding value parser rejects comma-bearing or otherwise invalid syntax without claiming
+  knowledge of the original lines.
+
+  | Header | 0 visible values | 1 visible value | >1 visible values |
+  | --- | --- | --- | --- |
+  | `Content-Type` | flow to media stage, then `UNSUPPORTED_MEDIA_TYPE` 415 | parse at media stage | `REQUEST_INVALID` 400 at shape stage |
+  | `Idempotency-Key` | flow to its stage, then `REQUEST_INVALID` 400 | parse at its stage | `REQUEST_INVALID` 400 at shape stage |
+  | `If-Match` | flow to its stage, then `REQUEST_INVALID` 400 | parse at its stage | `REQUEST_INVALID` 400 at shape stage |
+  | `X-Correlation-ID` | generate a fresh UUID | parse canonical UUID | `REQUEST_INVALID` 400 at shape stage |
+  | browser `Origin` | `CSRF_VALIDATION_FAILED` 403 | validate during CSRF | `CSRF_VALIDATION_FAILED` 403 |
+  | browser `Sec-Fetch-Site` | `CSRF_VALIDATION_FAILED` 403 | validate during CSRF | `CSRF_VALIDATION_FAILED` 403 |
+  | browser `X-CSRF-Token` | `CSRF_VALIDATION_FAILED` 403 | validate during CSRF | `CSRF_VALIDATION_FAILED` 403 |
+
+- The one visible `Content-Type` value is case-insensitive `application/json` with no parameters;
+  `application/*+json`, `text/json`, charset, comma-combined, and other invalid variants return `415`.
+- The one visible `Idempotency-Key` value matches `[A-Za-z0-9._:-]{16,128}`; comma lists and invalid
+  syntax return `400` at its stage.
+- The one visible `If-Match` value is one canonical quoted decimal. Reject weak tags, lists,
+  wildcard, signs, whitespace, leading zeroes, overflow, missing quotes, and comma-combined syntax.
+- Accept is an RFC-combinable list header. Zero visible values normalize to `application/json`; one
+  or more visible values are combined using HTTP comma-list semantics and canonicalized together.
+  Bound total visible UTF-8 bytes to 2048 and total parsed ranges to 16. Cross-value and single-value
+  forms with equal list semantics produce the same fingerprint. Each range has lowercase-normalized
+  type/subtype and at most one optional `q`; all other parameters, duplicate media-ranges across any
+  visible values, malformed tokens/q, or excess ranges fail `400`. Quality accepts only
+  canonicalizable `0`, `1`, or values with at most three decimals; canonicalization omits `q=1`,
+  strips trailing zeroes otherwise, and lexicographically sorts the complete distinct range list.
+- Representation matching uses specificity `application/json` > `application/*` > `*/*`; the most
+  specific present matching range determines quality. Thus exact `q=0` overrides both positive
+  wildcards, and `application/*;q=0` overrides `*/*;q=1`. No matching range or selected `q=0` yields
+  `NOT_ACCEPTABLE` 406. The full canonical list enters the fingerprint, so ordering/q spelling may be
+  equivalent while any semantic list change changes the fingerprint.
+- This route rejects every non-empty query string because the OpenAPI operation declares no query
+  parameters.
+- The body limit is 1 MiB of raw bytes. Empty input, malformed UTF-8, duplicate object keys,
+  multiple top-level values, invalid I-JSON Unicode, an array top level, unknown request fields, a
+  non-object `document`, and an invalid `schema_id` fail before claim.
+- Whitespace, object-member order, Unicode escape spelling, and valid number spelling that RFC 8785
+  canonicalizes equivalently produce the same body digest and request fingerprint.
+- Changing method, route key, validation UUID, canonical body, expected version, normalized Accept,
+  API contract version, verified tenant, or verified actor changes the fingerprint.
+- A table-driven precedence test injects two simultaneous faults at every adjacent boundary and
+  proves the earlier result wins in this exact order: trusted authentication, authorization, browser
+  CSRF, correlation/query/visible-singleton-header shape, Content-Type, Accept, Idempotency-Key, If-Match, raw
+  byte limit/UTF-8/I-JSON/closed JSON. Every case performs zero claim/database writes. A malformed
+  correlation ID is reflected nowhere: authenticated requests get `REQUEST_INVALID`; authentication
+  or authorization failures generate a fresh correlation UUID and keep their security Problem.
+
+Use these public/package-private shapes consistently in the implementation:
 
 ```java
-package com.inforvans.accord.reliability;
+public sealed interface FoundationVerifiedPrincipal
+        permits FoundationVerifiedPrincipal.Bearer,
+                FoundationVerifiedPrincipal.BrowserSession {
+    UUID tenantId();
+    String actorId();
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+    record Bearer(UUID tenantId, String actorId)
+            implements FoundationVerifiedPrincipal {}
 
-import com.inforvans.accord.database.ControlPlaneTestRoles;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
-import java.time.OffsetDateTime;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.UUID;
-import org.flywaydb.core.Flyway;
-import org.jooq.DSLContext;
-import org.jooq.SQLDialect;
-import org.jooq.impl.DSL;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.TestInstance;
-import org.postgresql.ds.PGSimpleDataSource;
-import org.testcontainers.containers.PostgreSQLContainer;
-
-class ReliableEventStoreTest extends PostgreSqlReliabilityTest {
-    @Test
-    void eventAndOutboxCommitAndRollBackTogether() {
-        ReliableEventStore store = new ReliableEventStore();
-        dsl.transaction(configuration -> store.append(configuration.dsl(), event(1)));
-        assertEquals(1, count("domain_event"));
-        assertEquals(1, count("outbox_event"));
-
-        assertThrows(IllegalStateException.class, () ->
-            dsl.transaction(configuration -> {
-                store.append(configuration.dsl(), event(2));
-                throw new IllegalStateException("force rollback");
-            }));
-        assertEquals(1, count("domain_event"));
-        assertEquals(1, count("outbox_event"));
-    }
-
-    @Test
-    void inboxNaturalKeyDeduplicatesDigestAndRejectsChangedDigest() {
-        ReliableEventStore store = new ReliableEventStore();
-        UUID tenant = UUID.fromString("10000000-0000-0000-0000-000000000001");
-        InboxAcceptance first = dsl.transactionResult(configuration ->
-            store.acceptInbox(
-                configuration.dsl(), tenant, "git-provider", "delivery-17",
-                digest('a'), "git.reconcile", "git.signal/1.0", "{}"));
-        InboxAcceptance duplicate = dsl.transactionResult(configuration ->
-            store.acceptInbox(
-                configuration.dsl(), tenant, "git-provider", "delivery-17",
-                digest('a'), "git.reconcile", "git.signal/1.0", "{}"));
-        InboxAcceptance conflict = dsl.transactionResult(configuration ->
-            store.acceptInbox(
-                configuration.dsl(), tenant, "git-provider", "delivery-17",
-                digest('b'), "git.reconcile", "git.signal/1.0", "{}"));
-
-        assertInstanceOf(InboxAcceptance.Accepted.class, first);
-        assertInstanceOf(InboxAcceptance.Duplicate.class, duplicate);
-        assertInstanceOf(InboxAcceptance.DigestConflict.class, conflict);
-        assertEquals(1, count("inbox_message"));
-    }
-
-    private int count(String tableName) {
-        return dsl.fetchCount(DSL.table(DSL.name(tableName)));
-    }
+    record BrowserSession(
+        UUID tenantId,
+        String actorId,
+        String sessionId,
+        long sessionGeneration,
+        String csrfBindingDigest
+    ) implements FoundationVerifiedPrincipal {}
 }
 
-@TestInstance(TestInstance.Lifecycle.PER_CLASS)
-abstract class PostgreSqlReliabilityTest {
-    protected final UUID fixtureTenantId =
-        UUID.fromString("10000000-0000-0000-0000-000000000001");
+record ContractValidationRequest(URI schemaId, JsonNode document) {}
 
-    private PostgreSQLContainer<?> postgres;
-    protected DSLContext dsl;
+record FoundationMutationHeaders(
+    String idempotencyKey,
+    ExpectedVersion expectedVersion,
+    String requestMediaType,
+    String normalizedAccept
+) {}
+```
 
-    @BeforeAll
-    void startPostgres() {
-        postgres = new PostgreSQLContainer<>("postgres:17.5");
-        postgres.start();
-        ControlPlaneTestRoles.bootstrap(
-            postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+Keep `ContractValidationRequest` package-private in `ContractValidationJson.java` and
+`FoundationMutationHeaders` package-private in `FoundationHttpRequestPolicy.java`. The compact
+constructors of both principal records require a tenant, a bounded nonblank actor, and valid UTF-8;
+the browser record additionally requires a bounded opaque session ID, a positive generation, and a
+canonical `sha256:` binding digest.
 
-        Path migrations = Path.of(
-            System.getProperty("accord.repo-root"),
-            "database", "control-plane", "migrations");
-        Flyway.configure()
-            .dataSource(
-                postgres.getJdbcUrl(),
-                ControlPlaneTestRoles.MIGRATOR_LOGIN,
-                ControlPlaneTestRoles.MIGRATOR_PASSWORD)
-            .initSql("SET ROLE accord_migrator")
-            .locations("filesystem:" + migrations.toAbsolutePath())
-            .load()
-            .migrate();
+`FoundationHttpRequestPolicy` enumerates only servlet-visible values with `getHeaders`, owns the exact
+precedence, singleton table, media policy and combined Accept-list canonicalization, canonical
+ETag/correlation parsing, query rejection, and the raw-byte limit. It contains no raw-socket or
+wire-occurrence reconstruction claim. `ContractValidationJson` first calls
+`CanonicalJson.canonicalize(rawBody)` and `CanonicalJson.sha256(rawBody)`, then parses the canonical
+bytes with strict duplicate detection, `FAIL_ON_TRAILING_TOKENS`, and
+`FAIL_ON_UNKNOWN_PROPERTIES`. The closed DTO uses JSON property `schema_id`; the schema identifier
+must be an absolute HTTPS URI under `schemas.accord.inforvans.com`, and `document` must be an object.
 
-        PGSimpleDataSource dataSource = new PGSimpleDataSource();
-        dataSource.setURL(postgres.getJdbcUrl());
-        dataSource.setUser(postgres.getUsername());
-        dataSource.setPassword(postgres.getPassword());
-        dsl = DSL.using(dataSource, SQLDialect.POSTGRES);
-    }
+`HttpIdempotencyFingerprint` hashes RFC 8785 canonical JSON for exactly this envelope:
 
-    @BeforeEach
-    void resetReliabilityTables() {
-        dsl.execute("""
-            TRUNCATE TABLE inbox_message,outbox_event,domain_event,external_call_intent
-            CASCADE
-            """);
-    }
-
-    @AfterAll
-    void stopPostgres() {
-        dsl.close();
-        postgres.stop();
-    }
-
-    protected DomainEvent event(long sequence) {
-        return new DomainEvent(
-            UUID.nameUUIDFromBytes(
-                ("event-" + sequence).getBytes(StandardCharsets.UTF_8)),
-            fixtureTenantId,
-            "project",
-            "30000000-0000-0000-0000-000000000001",
-            "foundation-test",
-            UUID.fromString("40000000-0000-0000-0000-000000000001"),
-            sequence,
-            "foundation.tested",
-            "1.0.0",
-            UUID.fromString("50000000-0000-0000-0000-000000000001"),
-            UUID.fromString("60000000-0000-0000-0000-000000000001"),
-            "fixture",
-            "{}",
-            OffsetDateTime.parse("2026-07-24T09:59:00Z"),
-            "foundation-test");
-    }
-
-    protected List<UUID> insertPendingOutbox(int count) {
-        List<UUID> eventIds = new ArrayList<>();
-        for (int index = 1; index <= count; index++) {
-            DomainEvent event = event(index);
-            dsl.transaction(configuration ->
-                new ReliableEventStore().append(configuration.dsl(), event));
-            dsl.execute(
-                "UPDATE outbox_event SET available_at=? WHERE event_id=?",
-                OffsetDateTime.parse("2026-07-24T09:59:00Z"),
-                event.eventId());
-            eventIds.add(event.eventId());
-        }
-        return List.copyOf(eventIds);
-    }
-
-    protected void insertPendingInbox(String sourceMessageId) {
-        InboxAcceptance accepted = dsl.transactionResult(configuration ->
-            new ReliableEventStore().acceptInbox(
-                configuration.dsl(), fixtureTenantId, "foundation-test", sourceMessageId,
-                digest('a'), "foundation.handle", "foundation.message/1.0", "{}"));
-        if (!(accepted instanceof InboxAcceptance.Accepted)) {
-            throw new IllegalStateException("fixture inbox insert was not accepted");
-        }
-        dsl.execute("""
-            UPDATE inbox_message SET available_at=?
-            WHERE tenant_id=? AND source=? AND source_message_id=?
-            """,
-            OffsetDateTime.parse("2026-07-24T09:59:00Z"),
-            fixtureTenantId, "foundation-test", sourceMessageId);
-    }
-
-    protected void insertPendingInbox() {
-        insertPendingInbox("message-1");
-    }
-
-    protected static String digest(char value) {
-        return "sha256:" + String.valueOf(value).repeat(64);
-    }
+```json
+{
+  "accept":"application/json",
+  "actor_id":"actor-7",
+  "api_contract_version":"0.1.0",
+  "body_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "expected_version":"0",
+  "http_method":"POST",
+  "normalized_path":"/v1/contract-validations/20000000-0000-0000-0000-000000000001",
+  "normalized_query":"",
+  "request_media_type":"application/json",
+  "resource_id":"20000000-0000-0000-0000-000000000001",
+  "route_key":"contract-validations.create",
+  "tenant_id":"10000000-0000-0000-0000-000000000001"
 }
 ```
 
-- [ ] **Step 2: Run the test and verify the missing delivery tables**
+The implementation must not build a delimiter-concatenated string and must not serialize the DTO
+back to JSON before computing the body digest. It does not include authorization, cookie, CSRF,
+correlation, trace, claim-owner, or lease values.
 
-Run: `./gradlew :apps:control-plane:modules:reliability:test --tests '*ReliableEventStoreTest'`
+Run:
 
-Expected: FAIL because the jOOQ/Testcontainers test dependencies and `ReliableEventStore` are unresolved and `domain_event` does not exist.
-
-- [ ] **Step 3: Add append-only event and delivery tables**
-
-Add the exact production and test dependencies to `apps/control-plane/modules/reliability/build.gradle`:
-
-```groovy
-dependencies {
-    implementation project(':apps:control-plane:modules:platform-kernel')
-    implementation project(':database:control-plane')
-    implementation platform(libs.spring.modulith.bom)
-    implementation libs.spring.modulith.starter.core
-    implementation libs.spring.boot.jooq
-    implementation libs.jackson.databind
-    runtimeOnly libs.postgresql
-    testImplementation platform(libs.junit.bom)
-    testImplementation libs.junit.jupiter
-    testImplementation libs.assertj.core
-    testImplementation testFixtures(project(':database:control-plane'))
-    testImplementation libs.flyway.core
-    testImplementation libs.flyway.postgresql
-    testImplementation libs.postgresql
-    testImplementation libs.testcontainers.junit
-    testImplementation libs.testcontainers.postgresql
-}
-
-tasks.withType(Test).configureEach {
-    systemProperty 'accord.repo-root', rootProject.projectDir.absolutePath
-}
+```powershell
+./gradlew.bat :apps:control-plane:api:test --tests '*HttpIdempotencyFingerprintTest' --no-daemon
 ```
 
-Create `V002__reliable_event_delivery.sql`:
+Expected RED: the request-policy, strict decoder, and fingerprint types do not exist. Expected GREEN:
+the pure tests pass with no Docker dependency and the existing `CanonicalJsonTest` remains the
+single implementation of RFC 8785/I-JSON rules.
+
+- [ ] **Step 3: Add V003 with the business proof row and detached-result constraints**
+
+Create `V003__foundation_http_reliability.sql`. The migration must use the existing
+`accord_migrator` ownership, `accord_security.enforce_tenant_table`, and explicit privilege model.
+Create this exact durable row shape; raw contract documents are not persisted:
 
 ```sql
 SET lock_timeout = '5s';
 SET statement_timeout = '30s';
 
-CREATE TABLE domain_event (
-    event_id uuid PRIMARY KEY,
+CREATE TABLE public.contract_validation (
     tenant_id uuid NOT NULL,
-    scope_type varchar(16) NOT NULL CHECK (scope_type IN ('tenant', 'project', 'repository')),
-    scope_id varchar(255) NOT NULL,
-    aggregate_type varchar(64) NOT NULL,
-    aggregate_id uuid NOT NULL,
-    sequence bigint NOT NULL CHECK (sequence >= 1),
-    event_type varchar(128) NOT NULL,
-    schema_version varchar(32) NOT NULL,
-    causation_id uuid NOT NULL,
-    correlation_id uuid NOT NULL,
-    actor_id varchar(255) NOT NULL,
-    payload jsonb NOT NULL,
-    occurred_at timestamptz NOT NULL,
-    UNIQUE (tenant_id, event_id),
-    UNIQUE (tenant_id, aggregate_type, aggregate_id, sequence)
+    validation_id uuid NOT NULL,
+    aggregate_type varchar(64)
+        GENERATED ALWAYS AS ('contract-validation') STORED,
+    schema_id varchar(512) NOT NULL,
+    document_digest char(71) NOT NULL,
+    version bigint NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT pg_catalog.transaction_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT pg_catalog.transaction_timestamp(),
+    CONSTRAINT contract_validation_pkey PRIMARY KEY (tenant_id, validation_id),
+    CONSTRAINT contract_validation_head_fkey
+        FOREIGN KEY (tenant_id, aggregate_type, validation_id)
+        REFERENCES public.aggregate_head (tenant_id, aggregate_type, aggregate_id),
+    CONSTRAINT contract_validation_schema_id_known CHECK (
+        schema_id ~ '^https://schemas[.]accord[.]inforvans[.]com/[A-Za-z0-9._~:/-]{1,448}$'),
+    CONSTRAINT contract_validation_document_digest_format CHECK (
+        document_digest ~ '^sha256:[0-9a-f]{64}$'),
+    CONSTRAINT contract_validation_version_positive CHECK (version >= 1),
+    CONSTRAINT contract_validation_timestamps_ordered CHECK (updated_at >= created_at)
 );
 
-CREATE TABLE outbox_event (
-    event_id uuid PRIMARY KEY,
-    tenant_id uuid NOT NULL,
-    destination varchar(128) NOT NULL,
-    payload_schema varchar(255) NOT NULL,
-    payload jsonb NOT NULL,
-    state varchar(16) NOT NULL DEFAULT 'PENDING' CHECK (state IN ('PENDING', 'DELIVERING', 'DELIVERED', 'DEAD')),
-    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-    redrive_count integer NOT NULL DEFAULT 0 CHECK (redrive_count >= 0),
-    available_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
-    lease_owner varchar(255),
-    lease_until timestamptz,
-    delivered_at timestamptz,
-    dead_at timestamptz,
-    last_error_code varchar(128),
-    FOREIGN KEY (tenant_id, event_id) REFERENCES domain_event(tenant_id, event_id),
-    CHECK ((state = 'DELIVERING') = (lease_owner IS NOT NULL AND lease_until IS NOT NULL)),
-    CHECK ((state = 'DELIVERED') = (delivered_at IS NOT NULL)),
-    CHECK ((state = 'DEAD') = (dead_at IS NOT NULL AND last_error_code IS NOT NULL))
-);
-CREATE INDEX outbox_pending_idx ON outbox_event (state, available_at) WHERE state IN ('PENDING', 'DELIVERING');
-
-CREATE TABLE inbox_message (
-    tenant_id uuid NOT NULL,
-    source varchar(128) NOT NULL,
-    source_message_id varchar(255) NOT NULL,
-    request_digest char(71) NOT NULL CHECK (request_digest ~ '^sha256:[0-9a-f]{64}$'),
-    handler_key varchar(128) NOT NULL,
-    payload_schema varchar(255) NOT NULL,
-    payload jsonb NOT NULL,
-    state varchar(16) NOT NULL DEFAULT 'PENDING' CHECK (state IN ('PENDING', 'PROCESSING', 'COMPLETED', 'DEAD')),
-    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-    redrive_count integer NOT NULL DEFAULT 0 CHECK (redrive_count >= 0),
-    available_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
-    lease_owner varchar(255),
-    lease_until timestamptz,
-    received_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
-    completed_at timestamptz,
-    dead_at timestamptz,
-    last_error_code varchar(128),
-    PRIMARY KEY (tenant_id, source, source_message_id),
-    CHECK ((state = 'PROCESSING') = (lease_owner IS NOT NULL AND lease_until IS NOT NULL)),
-    CHECK ((state = 'COMPLETED') = (completed_at IS NOT NULL)),
-    CHECK ((state = 'DEAD') = (dead_at IS NOT NULL AND last_error_code IS NOT NULL))
-);
-CREATE INDEX inbox_pending_idx ON inbox_message (state, available_at)
-    WHERE state IN ('PENDING', 'PROCESSING');
-
-CREATE TABLE external_call_intent (
-    intent_id uuid PRIMARY KEY,
-    tenant_id uuid NOT NULL,
-    scope_type varchar(16) NOT NULL CHECK (scope_type IN ('tenant', 'project', 'repository')),
-    scope_id varchar(255) NOT NULL,
-    provider varchar(64) NOT NULL,
-    operation varchar(128) NOT NULL,
-    request_digest char(71) NOT NULL CHECK (request_digest ~ '^sha256:[0-9a-f]{64}$'),
-    provider_request_id varchar(255),
-    state varchar(24) NOT NULL CHECK (state IN ('RECORDED', 'SENT', 'SUCCEEDED', 'FAILED', 'RESULT_UNKNOWN')),
-    result_digest char(71) CHECK (result_digest ~ '^sha256:[0-9a-f]{64}$'),
-    created_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
-    updated_at timestamptz NOT NULL DEFAULT transaction_timestamp()
-);
-CREATE INDEX external_intent_reconcile_idx ON external_call_intent (provider, state, updated_at)
-    WHERE state IN ('SENT', 'RESULT_UNKNOWN');
-
-SELECT accord_security.enforce_tenant_table('public.domain_event'::regclass);
-SELECT accord_security.enforce_tenant_table('public.outbox_event'::regclass);
-SELECT accord_security.enforce_tenant_table('public.inbox_message'::regclass);
-SELECT accord_security.enforce_tenant_table('public.external_call_intent'::regclass);
-
-REVOKE ALL ON domain_event, outbox_event, inbox_message, external_call_intent
-  FROM PUBLIC, accord_api, accord_worker;
-GRANT SELECT, INSERT ON domain_event, outbox_event TO accord_api;
-GRANT SELECT, INSERT ON domain_event TO accord_worker;
-GRANT SELECT, INSERT, UPDATE ON outbox_event, inbox_message, external_call_intent TO accord_worker;
-GRANT SELECT, INSERT, UPDATE ON external_call_intent TO accord_api;
+ALTER TABLE public.idempotency_result
+    ADD CONSTRAINT idempotency_result_aggregate_binding_consistent CHECK (
+        (aggregate_type IS NULL AND aggregate_id IS NULL AND aggregate_version IS NULL)
+        OR
+        (aggregate_type IS NOT NULL AND aggregate_id IS NOT NULL
+          AND aggregate_version IS NOT NULL)
+    ),
+    ADD CONSTRAINT idempotency_result_detached_status_known CHECK (
+        state <> 'COMPLETED'
+        OR aggregate_type IS NOT NULL
+        OR response_status IN (404, 412, 422)
+    );
 ```
 
-V002 owns all four enforcement calls. They execute after every constraint and index and before the explicit grants. No runtime role receives `DELETE`; `domain_event` is append-only for both roles, API cannot mutate inbox state, and only the worker can advance outbox/inbox delivery state. Extend `PlatformMigrationTest` to assert exact `ENABLE`, `FORCE`, `FOR ALL TO PUBLIC`, `USING`, `WITH CHECK`, and exact `information_schema.role_table_grants` rows for all six V001/V002 tables. The test must fail on an extra privilege as well as a missing privilege.
+Install `accord_security.guard_contract_validation_version()` as a `SECURITY INVOKER` trigger.
+On insert it must require the matching `aggregate_head.version = NEW.version`. On update it must
+reject changes to tenant, validation ID, generated aggregate type, or creation time; require
+`NEW.version = OLD.version + 1`; require the matching head to equal the new version; and replace
+`NEW.updated_at` with `clock_timestamp()`. Revoke the function from `PUBLIC`, `accord_api`, and
+`accord_worker`; trigger execution does not require a direct function grant.
 
-- [ ] **Step 4: Implement the transactional event store**
+Finish the migration with this exact policy and privilege direction:
 
-Create `DomainEvent.java`, `InboxAcceptance.java`, and `ReliableEventStore.java`; each public type is stored in its matching file:
+```sql
+SELECT accord_security.enforce_tenant_table(
+    'public.contract_validation'::pg_catalog.regclass);
 
-```java
-// DomainEvent.java
-package com.inforvans.accord.reliability;
-
-import java.time.OffsetDateTime;
-import java.util.UUID;
-
-public record DomainEvent(
-    UUID eventId,
-    UUID tenantId,
-    String scopeType,
-    String scopeId,
-    String aggregateType,
-    UUID aggregateId,
-    long sequence,
-    String eventType,
-    String schemaVersion,
-    UUID causationId,
-    UUID correlationId,
-    String actorId,
-    String payload,
-    OffsetDateTime occurredAt,
-    String destination
-) {}
-
-// InboxAcceptance.java
-package com.inforvans.accord.reliability;
-
-public sealed interface InboxAcceptance
-        permits InboxAcceptance.Accepted,
-                InboxAcceptance.Duplicate,
-                InboxAcceptance.DigestConflict {
-    record Accepted() implements InboxAcceptance {}
-    record Duplicate(String state) implements InboxAcceptance {}
-    record DigestConflict(String storedDigest) implements InboxAcceptance {}
-}
-
-// ReliableEventStore.java
-package com.inforvans.accord.reliability;
-
-import java.util.UUID;
-import org.jooq.DSLContext;
-import org.jooq.JSONB;
-import org.jooq.Record;
-
-public final class ReliableEventStore {
-    public void append(DSLContext tx, DomainEvent event) {
-        tx.execute("""
-            INSERT INTO domain_event (
-              event_id,tenant_id,scope_type,scope_id,aggregate_type,aggregate_id,
-              sequence,event_type,schema_version,causation_id,correlation_id,
-              actor_id,payload,occurred_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            event.eventId(), event.tenantId(), event.scopeType(), event.scopeId(),
-            event.aggregateType(), event.aggregateId(), event.sequence(),
-            event.eventType(), event.schemaVersion(), event.causationId(),
-            event.correlationId(), event.actorId(), JSONB.valueOf(event.payload()),
-            event.occurredAt());
-        tx.execute("""
-            INSERT INTO outbox_event (
-              event_id,tenant_id,destination,payload_schema,payload
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            event.eventId(), event.tenantId(), event.destination(),
-            event.schemaVersion(), JSONB.valueOf(event.payload()));
-    }
-
-    public InboxAcceptance acceptInbox(
-            DSLContext tx,
-            UUID tenantId,
-            String source,
-            String messageId,
-            String digest,
-            String handlerKey,
-            String payloadSchema,
-            String payload) {
-        int inserted = tx.execute("""
-            INSERT INTO inbox_message (
-              tenant_id,source,source_message_id,request_digest,handler_key,
-              payload_schema,payload,state
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING')
-            ON CONFLICT DO NOTHING
-            """,
-            tenantId, source, messageId, digest, handlerKey,
-            payloadSchema, JSONB.valueOf(payload));
-        if (inserted == 1) {
-            return new InboxAcceptance.Accepted();
-        }
-
-        Record existing = tx.fetchOne("""
-            SELECT request_digest,state
-            FROM inbox_message
-            WHERE tenant_id=? AND source=? AND source_message_id=?
-            FOR UPDATE
-            """, tenantId, source, messageId);
-        if (existing == null) {
-            throw new IllegalStateException("inbox row disappeared");
-        }
-        String storedDigest = existing.get("request_digest", String.class);
-        if (storedDigest.equals(digest)) {
-            return new InboxAcceptance.Duplicate(existing.get("state", String.class));
-        }
-        return new InboxAcceptance.DigestConflict(storedDigest);
-    }
-}
+REVOKE ALL ON public.contract_validation
+    FROM PUBLIC, accord_api, accord_worker;
+GRANT SELECT, INSERT ON public.contract_validation TO accord_api;
+GRANT UPDATE (schema_id, document_digest, version)
+    ON public.contract_validation TO accord_api;
 ```
 
-`ReliableEventStore` has no pool-level `DSLContext`; callers can invoke it only with the transaction context that also persists the aggregate mutation. Extend `PlatformMigrationTest` with assertions that `domain_event`, `outbox_event`, `inbox_message`, and `external_call_intent` exist, that `domain_event` has a unique constraint over tenant, aggregate type, aggregate ID, and sequence, and that the outbox foreign key contains both `tenant_id` and `event_id`. Insert a deliberately mismatched tenant/event pair and assert SQLSTATE `23503`.
+Create `FoundationHttpReliabilityMigrationTest.java` before the migration and assert:
 
-- [ ] **Step 5: Run transaction, rollback, and inbox tests**
+1. the exact eight columns, types, nullability, primary key, composite foreign key, checks, trigger,
+   owner, and indexes;
+2. forced RLS with the sole canonical `tenant_isolation` policy;
+3. the exact API table/column privileges above and zero worker/PUBLIC privileges;
+4. cross-tenant reads and writes are concealed, identity columns cannot be updated, and no runtime
+   role can delete;
+5. direct inserts/updates with a missing or mismatched aggregate head/version fail;
+6. completed detached 404/412/422 rows satisfy V003, while detached 201/400/409/415/500 rows fail;
+7. aggregate binding is either all null or all non-null.
+
+Because `PlatformMigrationTest` compares the exact V001 constraint set, add the two V003
+`idempotency_result` constraints to its expected catalog rows and add negative inserts for partial
+aggregate bindings and an unapproved detached status.
 
 Run:
 
-```bash
-./gradlew :database:control-plane:test
-./gradlew :apps:control-plane:modules:reliability:test --tests '*ReliableEventStoreTest'
+```powershell
+./gradlew.bat :database:control-plane:test --tests '*FoundationHttpReliabilityMigrationTest' --no-daemon
+./gradlew.bat :database:control-plane:test --tests '*PlatformMigrationTest' --no-daemon
 ```
 
-Expected: PASS. The forced rollback leaves both event tables at one row; the same inbox natural key and digest returns `Duplicate`; a changed digest returns `DigestConflict` without changing the original row; and a cross-tenant outbox/event link is rejected by PostgreSQL.
+Expected RED: V003 and `contract_validation` are absent. Expected GREEN: both suites pass against
+PostgreSQL 17.5, including exact RLS/grant comparisons and every direct-SQL rejection.
 
-- [ ] **Step 6: Commit reliable delivery primitives**
+- [ ] **Step 4: Extend the command gate with fenced persistent rejections**
 
-```bash
-git add database/control-plane/migrations/V002__reliable_event_delivery.sql database/control-plane/src/test/java/com/inforvans/accord/database/PlatformMigrationTest.java apps/control-plane/modules/reliability/build.gradle apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/DomainEvent.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/InboxAcceptance.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReliableEventStore.java apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/ReliableEventStoreTest.java
-git commit -m "feat: add transactional outbox and inbox"
-```
-
-### Task 9: Prove RFC 7807, Idempotency, And CAS Through The HTTP API
-
-**Files:**
-- Create: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ContractValidationController.java`
-- Create: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/HttpIdempotencyFingerprint.java`
-- Create: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ProblemAdvice.java`
-- Create: `apps/control-plane/api/src/test/java/com/inforvans/accord/controlplane/http/ContractValidationApiTest.java`
-- Modify: `apps/control-plane/api/src/main/resources/application.yml`
-- Modify: `apps/control-plane/worker/src/main/resources/application.yml`
-- Modify: `apps/control-plane/api/build.gradle`
-
-- [ ] **Step 1: Write the failing HTTP behavior test**
-
-Create `ContractValidationApiTest.java`:
+Add this public API to `JooqCommandGate` without changing `Claim.RequestConflict`:
 
 ```java
-package com.inforvans.accord.controlplane.http;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.inforvans.accord.database.ControlPlaneTestRoles;
-import com.inforvans.accord.reliability.JooqCommandGate;
-import java.nio.file.Path;
-import java.sql.DriverManager;
-import java.time.Clock;
-import java.util.List;
-import java.util.UUID;
-import org.flywaydb.core.Flyway;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.jooq.DSLContext;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Import;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
-import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
-import org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
-import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.test.web.servlet.RequestBuilder;
-import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
-import org.testcontainers.containers.PostgreSQLContainer;
-
-@SpringBootTest
-@AutoConfigureMockMvc
-@Import(ContractValidationTestConfiguration.class)
-class ContractValidationApiTest {
-    private static final UUID TENANT_A =
-        UUID.fromString("10000000-0000-0000-0000-000000000001");
-    private static final UUID TENANT_B =
-        UUID.fromString("10000000-0000-0000-0000-000000000002");
-    private static final String PATH =
-        "/v1/contract-validations/20000000-0000-0000-0000-000000000001";
-    private static final String BODY = """
-        {"schema_id":"https://schemas.accord.inforvans.com/events/domain-event/1-0-0",
-         "document":{}}
-        """;
-    private static final PostgreSQLContainer<?> POSTGRES =
-        new PostgreSQLContainer<>("postgres:17.5");
-
-    @Autowired
-    private MockMvc mvc;
-
-    @DynamicPropertySource
-    static void database(DynamicPropertyRegistry registry) {
-        POSTGRES.start();
-        ControlPlaneTestRoles.bootstrap(
-            POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
-        Path migrations = Path.of(
-            System.getProperty("accord.repo-root"),
-            "database", "control-plane", "migrations");
-        Flyway.configure()
-            .dataSource(
-                POSTGRES.getJdbcUrl(),
-                ControlPlaneTestRoles.MIGRATOR_LOGIN,
-                ControlPlaneTestRoles.MIGRATOR_PASSWORD)
-            .initSql("SET ROLE accord_migrator")
-            .locations("filesystem:" + migrations.toAbsolutePath())
-            .load()
-            .migrate();
-        registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
-        registry.add(
-            "spring.datasource.username",
-            () -> ControlPlaneTestRoles.API_LOGIN);
-        registry.add(
-            "spring.datasource.password",
-            () -> ControlPlaneTestRoles.API_PASSWORD);
-        registry.add(
-            "spring.datasource.hikari.connection-init-sql",
-            () -> "SET ROLE accord_api");
-    }
-
-    @BeforeEach
-    void clearCommandState() throws Exception {
-        try (var connection = DriverManager.getConnection(
-                POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
-             var statement = connection.createStatement()) {
-            statement.execute(
-                "TRUNCATE TABLE idempotency_result,aggregate_head CASCADE");
-        }
-    }
-
-    @AfterAll
-    static void stopPostgres() {
-        POSTGRES.stop();
-    }
-
-    @Test
-    void identicalRetryReplaysAndChangedBodyReturnsProblemDetails()
-            throws Exception {
-        String first = mvc.perform(postRequest(
-                BODY, "idem-000000000001", "\"0\"", PATH))
-            .andExpect(status().isCreated())
-            .andReturn().getResponse().getContentAsString();
-
-        mvc.perform(postRequest(BODY, "idem-000000000001", "\"0\"", PATH))
-            .andExpect(status().isCreated())
-            .andExpect(content().string(first));
-        mvc.perform(postRequest(
-                BODY.replace("{}", "{\"changed\":true}"),
-                "idem-000000000001", "\"0\"", PATH))
-            .andExpect(status().isConflict())
-            .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON))
-            .andExpect(jsonPath("$.code").value("IDEMPOTENCY_KEY_REUSED"));
-    }
-
-    @Test
-    void staleExpectedVersionReturnsCurrentVersion() throws Exception {
-        mvc.perform(postRequest(BODY, "idem-000000000002", "\"0\"", PATH))
-            .andExpect(status().isCreated());
-        mvc.perform(postRequest(BODY, "idem-000000000003", "\"0\"", PATH))
-            .andExpect(status().isConflict())
-            .andExpect(jsonPath("$.code").value("VERSION_CONFLICT"))
-            .andExpect(jsonPath("$.actual_version").value(1));
-    }
-
-    @Test
-    void sameKeyCannotReplayAcrossResourcesOrCasPreconditions() throws Exception {
-        String key = "idem-fingerprint-000001";
-        mvc.perform(postRequest(BODY, key, "\"0\"", PATH))
-            .andExpect(status().isCreated());
-        mvc.perform(postRequest(
-                BODY, key, "\"0\"",
-                "/v1/contract-validations/20000000-0000-0000-0000-000000000002"))
-            .andExpect(status().isConflict())
-            .andExpect(jsonPath("$.code").value("IDEMPOTENCY_KEY_REUSED"));
-        mvc.perform(postRequest(BODY, key, "\"1\"", PATH))
-            .andExpect(status().isConflict())
-            .andExpect(jsonPath("$.code").value("IDEMPOTENCY_KEY_REUSED"));
-    }
-
-    @Test
-    void reorderedQueriesReplayButLiteralPlusDiffersFromSpace() throws Exception {
-        String first = mvc.perform(postRequest(
-                BODY, "idem-fingerprint-000002", "\"0\"",
-                PATH + "?mode=strict&locale=en"))
-            .andExpect(status().isCreated())
-            .andReturn().getResponse().getContentAsString();
-        mvc.perform(postRequest(
-                BODY, "idem-fingerprint-000002", "\"0\"",
-                PATH + "?locale=en&mode=strict"))
-            .andExpect(status().isCreated())
-            .andExpect(content().string(first));
-
-        mvc.perform(postRequest(
-                BODY, "idem-fingerprint-000003", "\"1\"", PATH + "?q=a+b"))
-            .andExpect(status().isCreated());
-        mvc.perform(postRequest(
-                BODY, "idem-fingerprint-000003", "\"1\"", PATH + "?q=a%20b"))
-            .andExpect(status().isConflict())
-            .andExpect(jsonPath("$.code").value("IDEMPOTENCY_KEY_REUSED"));
-    }
-
-    @Test
-    void queryNormalizationRejectsMalformedEscapesAndInvalidUtf8() {
-        HttpIdempotencyFingerprint fingerprints =
-            new HttpIdempotencyFingerprint(new ObjectMapper());
-        assertThrows(
-            IllegalArgumentException.class,
-            () -> fingerprints.normalizeQuery("q=%"));
-        assertThrows(
-            IllegalArgumentException.class,
-            () -> fingerprints.normalizeQuery("q=%C3%28"));
-    }
-
-    @Test
-    void verifiedPrincipalWinsOverForgedTenantHeader() throws Exception {
-        mvc.perform(postRequest(
-                BODY, "idem-tenant-000001", "\"0\"", PATH)
-                .header("X-Accord-Tenant", TENANT_B.toString()))
-            .andExpect(status().isCreated());
-
-        try (var connection = DriverManager.getConnection(
-                POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
-             var statement = connection.prepareStatement(
-                 "SELECT tenant_id FROM aggregate_head")) {
-            try (var rows = statement.executeQuery()) {
-                rows.next();
-                assertEquals(TENANT_A, rows.getObject(1, UUID.class));
-            }
-        }
-    }
-
-    @Test
-    void rawBearerValueWithoutVerifiedPrincipalIsUnauthorized() throws Exception {
-        mvc.perform(post(PATH)
-                .header(HttpHeaders.AUTHORIZATION, "Bearer test-user-7")
-                .header("Idempotency-Key", "idem-auth-000001")
-                .header("If-Match", "\"0\"")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(BODY))
-            .andExpect(status().isUnauthorized());
-    }
-
-    @Test
-    void productionHealthHandlersMatchOpenApiPaths() throws Exception {
-        mvc.perform(get("/actuator/health/liveness"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.status").value("UP"));
-        mvc.perform(get("/actuator/health/readiness"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.status").value("UP"));
-        mvc.perform(get("/health/ready"))
-            .andExpect(status().isNotFound());
-    }
-
-    private static MockHttpServletRequestBuilder postRequest(
-            String body,
-            String key,
-            String version,
-            String uri) {
-        return post(uri)
-            .with(authentication(
-                UsernamePasswordAuthenticationToken.authenticated(
-                    new FoundationTestPrincipal(TENANT_A, "test-user-7"),
-                    "test-only-no-credential",
-                    List.of())))
-            .header("Idempotency-Key", key)
-            .header("If-Match", version)
-            .contentType(MediaType.APPLICATION_JSON)
-            .accept(MediaType.APPLICATION_JSON)
-            .content(body);
-    }
-}
-
-record FoundationTestPrincipal(
-    UUID tenantId,
-    String actorId
-) implements FoundationVerifiedPrincipal {}
-
-@TestConfiguration(proxyBeanMethods = false)
-class ContractValidationTestConfiguration {
-    @Bean
-    JooqCommandGate commandGate(ObjectMapper mapper) {
-        return new JooqCommandGate(Clock.systemUTC(), mapper);
-    }
-}
+public void completeRejection(
+        DSLContext tx,
+        CommandKey key,
+        ClaimLease lease,
+        StoredHttpResult result,
+        Duration resultTtl)
 ```
 
-Add two negative cases to this test: a request with a valid tenant-A `FoundationTestPrincipal` plus `X-Accord-Tenant: <tenant-B>` still writes only under tenant A, and a request carrying only `Authorization: Bearer test-user-7` receives 401. The test helper above is the only Foundation authentication converter; it constructs a server-side `Authentication` object and never parses request headers.
+It accepts only status `404`, `412`, or `422`. It performs the same input validation, row lock,
+database `clock_timestamp()`, live owner/generation/token/exact-deadline fence, expiry calculation,
+and one-row completion check as `complete`. It clears owner/token/deadline, stores exact status,
+canonical safe headers and exact body, sets all aggregate binding columns to null, and has no
+aggregate `EXISTS` clause. A zero-row update throws `IllegalStateException`, causing the caller's
+transaction to roll back. Keep `complete` as the only API for success and retain its aggregate-head
+`EXISTS` requirement.
 
-- [ ] **Step 2: Run the API test and verify the route is missing**
+Add focused tests to `JooqCommandGateTest` before implementation:
 
-Run: `./gradlew :apps:control-plane:api:test --tests '*ContractValidationApiTest'`
+- each allowed status completes and reclaims as an exact `Claim.Replay`;
+- status 201, 400, 401, 403, 406, 409, 415, and 500 is rejected before SQL;
+- a partial aggregate binding cannot be persisted through raw SQL;
+- natural expiry and takeover invalidate `completeRejection`;
+- a rejected completion attempted with a stale fence rolls back a preceding transaction-local
+  marker insert;
+- two simultaneous rejection completions using the same lease allow exactly one commit.
 
-Expected: FAIL because both requests return HTTP 404.
+Run:
 
-- [ ] **Step 3: Implement a committed claim followed by one fenced business transaction**
-
-Create `HttpIdempotencyFingerprint.java`:
-
-```java
-package com.inforvans.accord.controlplane.http;
-
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.inforvans.accord.platformkernel.CanonicalJson;
-import java.io.ByteArrayOutputStream;
-import java.net.URI;
-import java.net.URLEncoder;
-import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
-import java.nio.charset.CodingErrorAction;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.UUID;
-
-final class HttpIdempotencyFingerprint {
-    private static final Comparator<QueryPair> QUERY_ORDER =
-        Comparator.comparing(QueryPair::name).thenComparing(QueryPair::value);
-
-    private final ObjectMapper mapper;
-
-    HttpIdempotencyFingerprint(ObjectMapper mapper) {
-        this.mapper = mapper;
-    }
-
-    String create(
-            String method,
-            String path,
-            String rawQuery,
-            String routeKey,
-            UUID resourceId,
-            String canonicalBodyDigest,
-            long expectedVersion,
-            String requestMediaType,
-            String responseMediaType,
-            String apiContractVersion,
-            UUID tenantId,
-            String actorId) {
-        String normalizedPath = URI.create(path).normalize().getRawPath();
-        if (normalizedPath == null || !normalizedPath.startsWith("/")) {
-            throw new IllegalArgumentException("idempotency path must be absolute");
-        }
-
-        Map<String, Object> envelope = new LinkedHashMap<>();
-        envelope.put("actor_id", actorId);
-        envelope.put("api_contract_version", apiContractVersion);
-        envelope.put("body_digest", canonicalBodyDigest);
-        envelope.put("expected_version", Long.toString(expectedVersion));
-        envelope.put("http_method", method.toUpperCase(Locale.ROOT));
-        envelope.put("normalized_path", normalizedPath);
-        envelope.put("normalized_query", normalizeQuery(rawQuery));
-        envelope.put("request_media_type", requestMediaType.toLowerCase(Locale.ROOT));
-        envelope.put("resource_id", resourceId.toString().toLowerCase(Locale.ROOT));
-        envelope.put("response_media_type", responseMediaType.toLowerCase(Locale.ROOT));
-        envelope.put("route_key", routeKey);
-        envelope.put("tenant_id", tenantId.toString().toLowerCase(Locale.ROOT));
-        try {
-            return CanonicalJson.sha256(mapper.writeValueAsBytes(envelope));
-        } catch (JsonProcessingException error) {
-            throw new IllegalStateException("cannot encode idempotency envelope", error);
-        }
-    }
-
-    String normalizeQuery(String rawQuery) {
-        if (rawQuery == null || rawQuery.isEmpty()) {
-            return "";
-        }
-        List<QueryPair> pairs = new ArrayList<>();
-        for (String pair : rawQuery.split("&", -1)) {
-            if (pair.isEmpty()) {
-                continue;
-            }
-            int separator = pair.indexOf('=');
-            String name = separator < 0 ? pair : pair.substring(0, separator);
-            String value = separator < 0 ? "" : pair.substring(separator + 1);
-            pairs.add(new QueryPair(percentDecode(name), percentDecode(value)));
-        }
-        pairs.sort(QUERY_ORDER);
-        return pairs.stream()
-            .map(pair -> encode(pair.name()) + "=" + encode(pair.value()))
-            .reduce((left, right) -> left + "&" + right)
-            .orElse("");
-    }
-
-    private String percentDecode(String value) {
-        ByteArrayOutputStream decoded = new ByteArrayOutputStream(value.length());
-        for (int index = 0; index < value.length();) {
-            if (value.charAt(index) == '%') {
-                if (index + 2 >= value.length()) {
-                    throw new IllegalArgumentException("truncated percent escape in query");
-                }
-                int high = Character.digit(value.charAt(index + 1), 16);
-                int low = Character.digit(value.charAt(index + 2), 16);
-                if (high < 0 || low < 0) {
-                    throw new IllegalArgumentException("invalid percent escape in query");
-                }
-                decoded.write((high << 4) | low);
-                index += 3;
-            } else {
-                int codePoint = value.codePointAt(index);
-                decoded.writeBytes(
-                    new String(Character.toChars(codePoint))
-                        .getBytes(StandardCharsets.UTF_8));
-                index += Character.charCount(codePoint);
-            }
-        }
-        try {
-            return StandardCharsets.UTF_8.newDecoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT)
-                .decode(ByteBuffer.wrap(decoded.toByteArray()))
-                .toString();
-        } catch (CharacterCodingException error) {
-            throw new IllegalArgumentException("query is not valid UTF-8", error);
-        }
-    }
-
-    private String encode(String value) {
-        return URLEncoder.encode(value, StandardCharsets.UTF_8)
-            .replace("+", "%20")
-            .replace("%7E", "~");
-    }
-
-    private record QueryPair(String name, String value) {}
-}
+```powershell
+./gradlew.bat :apps:control-plane:modules:reliability:test --tests '*JooqCommandGateTest' --no-daemon
 ```
 
-The envelope itself is RFC 8785-canonicalized by `CanonicalJson.sha256`; it is not a delimiter-based
-concatenation. Query names and values use strict percent-decoding as UTF-8 (literal `+` remains plus),
-are sorted as decoded `(name, value)` pairs with duplicates preserved, and are re-encoded with RFC
-3986 space and unreserved-character spelling.
-Thus reordered equivalent pairs replay, while a changed method, path, resource, query value, body,
-CAS precondition, representation, API version, tenant, or actor conflicts.
+Expected RED: `completeRejection` does not compile. Expected GREEN: all prior claim, renewal, CAS,
+success completion, replay-header, Unicode-bound, and race tests remain green, and the new detached
+completion cases pass.
 
-Create `ContractValidationController.java`:
+- [ ] **Step 5: Make trusted identity, conditional CSRF, and every early Problem fail closed**
 
-```java
-package com.inforvans.accord.controlplane.http;
+Add the API dependencies through catalog aliases rather than unversioned scattered coordinates:
 
-import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.inforvans.accord.platformkernel.CanonicalJson;
-import com.inforvans.accord.reliability.Claim;
-import com.inforvans.accord.reliability.ClaimLease;
-import com.inforvans.accord.reliability.CommandKey;
-import com.inforvans.accord.reliability.ExpectedVersion;
-import com.inforvans.accord.reliability.JooqCommandGate;
-import com.inforvans.accord.reliability.StoredHttpResult;
-import jakarta.servlet.http.HttpServletRequest;
-import java.time.Duration;
-import java.time.OffsetDateTime;
-import java.util.UUID;
-import java.util.function.Function;
-import org.jooq.DSLContext;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
-import org.springframework.security.authorization.AuthorizationDecision;
-import org.springframework.security.config.annotation.web.builders.HttpSecurity;
-import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.security.web.authentication.HttpStatusEntryPoint;
-import org.springframework.security.web.SecurityFilterChain;
-import org.springframework.stereotype.Component;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestHeader;
-import org.springframework.web.bind.annotation.RestController;
-
-record ValidationRequest(
-    @JsonProperty("schema_id") String schemaId,
-    JsonNode document
-) {}
-
-record ValidationResponse(
-    @JsonProperty("validation_id") UUID validationId,
-    boolean valid,
-    @JsonProperty("document_digest") String documentDigest,
-    long version
-) {}
-
-interface FoundationVerifiedPrincipal {
-    UUID tenantId();
-    String actorId();
-}
-
-@Component
-final class FoundationTenantTransactions {
-    private final DSLContext dsl;
-
-    FoundationTenantTransactions(DSLContext dsl) {
-        this.dsl = dsl;
-    }
-
-    <T> T write(UUID tenantId, Function<DSLContext, T> block) {
-        return dsl.transactionResult(configuration -> {
-            DSLContext tx = configuration.dsl();
-            tx.execute(
-                "SELECT set_config('app.tenant_id', ?, true)", tenantId.toString());
-            UUID effectiveTenant = tx.fetchOne(
-                "SELECT accord_security.current_tenant_id()").get(0, UUID.class);
-            if (!tenantId.equals(effectiveTenant)) {
-                throw new IllegalStateException("tenant transaction context was not installed");
-            }
-            return block.apply(tx);
-        });
-    }
-}
-
-@Configuration(proxyBeanMethods = false)
-class FoundationMutationSecurity {
-    @Bean
-    SecurityFilterChain foundationSecurity(HttpSecurity http) throws Exception {
-        return http
-            .csrf(csrf -> csrf.disable())
-            .authorizeHttpRequests(rules -> rules
-                .requestMatchers("/v1/contract-validations/**")
-                .access((authentication, context) -> new AuthorizationDecision(
-                    authentication.get().getPrincipal()
-                        instanceof FoundationVerifiedPrincipal))
-                .anyRequest().permitAll())
-            .exceptionHandling(errors -> errors.authenticationEntryPoint(
-                new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)))
-            .build();
-    }
-}
-
-@RestController
-public class ContractValidationController {
-    private static final String ROUTE_KEY = "contract-validations.create";
-
-    private final JooqCommandGate gate;
-    private final FoundationTenantTransactions transactions;
-    private final ObjectMapper mapper;
-    private final String commandOwner;
-    private final HttpIdempotencyFingerprint fingerprints;
-
-    public ContractValidationController(
-            JooqCommandGate gate,
-            FoundationTenantTransactions transactions,
-            ObjectMapper mapper,
-            @Value("$" + "{accord.process.instance-id}") String commandOwner) {
-        this.gate = gate;
-        this.transactions = transactions;
-        this.mapper = mapper;
-        this.commandOwner = commandOwner;
-        this.fingerprints = new HttpIdempotencyFingerprint(mapper);
-    }
-
-    @PostMapping("/v1/contract-validations/{validationId}")
-    public ResponseEntity<String> validate(
-            @AuthenticationPrincipal FoundationVerifiedPrincipal principal,
-            @PathVariable UUID validationId,
-            @RequestHeader("Idempotency-Key") String idempotencyKey,
-            @RequestHeader("If-Match") String ifMatch,
-            @RequestBody ValidationRequest request,
-            HttpServletRequest servletRequest) throws JsonProcessingException {
-        ExpectedVersion expected = parseExpectedVersion(ifMatch);
-        String requestMediaType = normalizedMediaType(servletRequest.getContentType());
-        String bodyDigest = CanonicalJson.sha256(mapper.writeValueAsBytes(request));
-        String fingerprint = fingerprints.create(
-            servletRequest.getMethod(),
-            "/v1/contract-validations/" + validationId,
-            servletRequest.getQueryString(),
-            ROUTE_KEY,
-            validationId,
-            bodyDigest,
-            expected.value(),
-            requestMediaType,
-            MediaType.APPLICATION_JSON_VALUE,
-            "0.1.0",
-            principal.tenantId(),
-            principal.actorId());
-
-        CommandKey key = new CommandKey(
-            principal.tenantId(), principal.actorId(), ROUTE_KEY, idempotencyKey);
-        Claim claim = transactions.write(
-            principal.tenantId(),
-            tx -> gate.claim(
-                tx, key, fingerprint, commandOwner, Duration.ofMinutes(2)));
-
-        if (claim instanceof Claim.Replay replay) {
-            HttpHeaders headers = new HttpHeaders();
-            replay.result().headers().forEach(headers::set);
-            return ResponseEntity
-                .status(replay.result().status())
-                .headers(headers)
-                .body(replay.result().body());
-        }
-        if (claim instanceof Claim.RequestConflict conflict) {
-            throw new IdempotencyKeyReused(conflict.originalFingerprint());
-        }
-        if (claim instanceof Claim.InProgress inProgress) {
-            throw new CommandInProgress(inProgress.leaseUntil());
-        }
-        ClaimLease lease = ((Claim.Acquired) claim).lease();
-
-        return transactions.write(principal.tenantId(), tx -> {
-            long version = gate.advance(
-                tx,
-                principal.tenantId(),
-                "contract-validation",
-                validationId,
-                expected);
-            String documentDigest = CanonicalJson.sha256(
-                serialize(request.document()));
-            ValidationResponse response = new ValidationResponse(
-                validationId, true, documentDigest, version);
-            String body = serializeToString(response);
-            StoredHttpResult stored = new StoredHttpResult(
-                201,
-                java.util.Map.of(
-                    "ETag", "\"" + version + "\"",
-                    "Content-Type", MediaType.APPLICATION_JSON_VALUE),
-                body);
-            gate.complete(
-                tx,
-                key,
-                lease,
-                stored,
-                "contract-validation",
-                validationId,
-                version,
-                Duration.ofHours(24));
-            return ResponseEntity.status(201)
-                .eTag(Long.toString(version))
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(body);
-        });
-    }
-
-    private static ExpectedVersion parseExpectedVersion(String ifMatch) {
-        if (ifMatch == null || ifMatch.length() < 3
-                || ifMatch.charAt(0) != '"'
-                || ifMatch.charAt(ifMatch.length() - 1) != '"') {
-            throw new IllegalArgumentException("If-Match must be one quoted integer ETag");
-        }
-        try {
-            return new ExpectedVersion(
-                Long.parseLong(ifMatch.substring(1, ifMatch.length() - 1)));
-        } catch (NumberFormatException error) {
-            throw new IllegalArgumentException(
-                "If-Match must be one quoted integer ETag", error);
-        }
-    }
-
-    private static String normalizedMediaType(String value) {
-        MediaType mediaType = MediaType.parseMediaType(value);
-        return mediaType.getType() + "/" + mediaType.getSubtype();
-    }
-
-    private byte[] serialize(Object value) {
-        try {
-            return mapper.writeValueAsBytes(value);
-        } catch (JsonProcessingException error) {
-            throw new IllegalStateException("cannot serialize canonical response input", error);
-        }
-    }
-
-    private String serializeToString(Object value) {
-        try {
-            return mapper.writeValueAsString(value);
-        } catch (JsonProcessingException error) {
-            throw new IllegalStateException("cannot serialize response", error);
-        }
-    }
-}
-
-final class IdempotencyKeyReused extends RuntimeException {
-    private final String originalFingerprint;
-
-    IdempotencyKeyReused(String originalFingerprint) {
-        this.originalFingerprint = originalFingerprint;
-    }
-
-    String originalFingerprint() {
-        return originalFingerprint;
-    }
-}
-
-final class CommandInProgress extends RuntimeException {
-    private final OffsetDateTime retryAfter;
-
-    CommandInProgress(OffsetDateTime retryAfter) {
-        this.retryAfter = retryAfter;
-    }
-
-    OffsetDateTime retryAfter() {
-        return retryAfter;
-    }
-}
+```toml
+spring-boot-security = { module = "org.springframework.boot:spring-boot-starter-security" }
+spring-security-test = { module = "org.springframework.security:spring-security-test" }
 ```
 
-- [ ] **Step 4: Map every foundation conflict to RFC 7807**
-
-Create `ProblemAdvice.java`:
-
-```java
-package com.inforvans.accord.controlplane.http;
-
-import com.inforvans.accord.reliability.VersionConflict;
-import jakarta.servlet.http.HttpServletRequest;
-import java.net.URI;
-import java.util.UUID;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ProblemDetail;
-import org.springframework.web.bind.annotation.ExceptionHandler;
-import org.springframework.web.bind.annotation.RestControllerAdvice;
-
-@RestControllerAdvice
-public class ProblemAdvice {
-    @ExceptionHandler(IdempotencyKeyReused.class)
-    ProblemDetail idempotency(
-            IdempotencyKeyReused error,
-            HttpServletRequest request) {
-        ProblemDetail detail = problem(
-            HttpStatus.CONFLICT,
-            "IDEMPOTENCY_KEY_REUSED",
-            "Idempotency key was used with a different request",
-            request);
-        detail.setProperty(
-            "original_request_fingerprint", error.originalFingerprint());
-        return detail;
-    }
-
-    @ExceptionHandler(CommandInProgress.class)
-    ProblemDetail inProgress(
-            CommandInProgress error,
-            HttpServletRequest request) {
-        ProblemDetail detail = problem(
-            HttpStatus.CONFLICT,
-            "COMMAND_IN_PROGRESS",
-            "The original command is still running",
-            request);
-        detail.setProperty("retry_after", error.retryAfter().toString());
-        return detail;
-    }
-
-    @ExceptionHandler(VersionConflict.class)
-    ProblemDetail version(
-            VersionConflict error,
-            HttpServletRequest request) {
-        ProblemDetail detail = problem(
-            HttpStatus.CONFLICT,
-            "VERSION_CONFLICT",
-            error.getMessage(),
-            request);
-        detail.setProperty("expected_version", error.expected());
-        detail.setProperty("actual_version", error.actual());
-        return detail;
-    }
-
-    @ExceptionHandler(IllegalArgumentException.class)
-    ProblemDetail invalidRequest(
-            IllegalArgumentException error,
-            HttpServletRequest request) {
-        return problem(
-            HttpStatus.BAD_REQUEST,
-            "INVALID_REQUEST",
-            error.getMessage(),
-            request);
-    }
-
-    private ProblemDetail problem(
-            HttpStatus status,
-            String code,
-            String detail,
-            HttpServletRequest request) {
-        ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, detail);
-        problem.setType(
-            URI.create("https://errors.accord.inforvans.com/" + code));
-        problem.setTitle(status.getReasonPhrase());
-        problem.setInstance(URI.create(request.getRequestURI()));
-        problem.setProperty("code", code);
-        String correlationId = request.getHeader("X-Correlation-ID");
-        problem.setProperty(
-            "correlation_id",
-            correlationId == null || correlationId.isBlank()
-                ? UUID.randomUUID().toString()
-                : correlationId);
-        return problem;
-    }
-}
-```
-
-Replace API `application.yml` while preserving the module-detection invariant established in Task 5:
-
-```yaml
-spring:
-  application.name: accord-control-api
-  modulith.detection-strategy: explicitly-annotated
-  datasource:
-    url: ${ACCORD_DB_URL:jdbc:postgresql://localhost:5432/accord}
-    username: ${ACCORD_API_DB_USER:accord_api_login}
-    password: ${ACCORD_API_DB_PASSWORD:local-api-only}
-    hikari.connection-init-sql: SET ROLE ${ACCORD_DB_SESSION_ROLE:accord_api}
-  flyway.enabled: false
-server:
-  port: 8080
-  error.include-stacktrace: never
-management:
-  endpoints.web.exposure.include: health,prometheus
-  endpoint.health.probes.enabled: true
-accord:
-  process-role: control-api
-  process.instance-id: ${ACCORD_PROCESS_INSTANCE_ID:${random.uuid}}
-```
-
-Replace worker `application.yml` while preserving the module-detection invariant established in Task 5:
-
-```yaml
-spring:
-  application.name: accord-control-worker
-  modulith.detection-strategy: explicitly-annotated
-  main.web-application-type: none
-  datasource:
-    url: ${ACCORD_DB_URL:jdbc:postgresql://localhost:5432/accord}
-    username: ${ACCORD_WORKER_DB_USER:accord_worker_login}
-    password: ${ACCORD_WORKER_DB_PASSWORD:local-worker-only}
-    hikari.connection-init-sql: SET ROLE ${ACCORD_DB_SESSION_ROLE:accord_worker}
-  flyway.enabled: false
-management:
-  endpoints.web.exposure.include: health,prometheus
-  endpoint.health.probes.enabled: true
-accord:
-  process-role: control-worker
-  process.instance-id: ${ACCORD_PROCESS_INSTANCE_ID:${random.uuid}}
-```
-
-Add these exact dependencies to `apps/control-plane/api/build.gradle`:
+In `apps/control-plane/api/build.gradle`, add:
 
 ```groovy
 implementation libs.spring.boot.jooq
-implementation 'org.springframework.boot:spring-boot-starter-security'
+implementation libs.spring.boot.security
+implementation libs.json.schema.validator
 runtimeOnly libs.postgresql
-testImplementation 'org.springframework.security:spring-security-test'
+testImplementation libs.spring.security.test
 testImplementation testFixtures(project(':database:control-plane'))
 testImplementation libs.flyway.core
 testImplementation libs.flyway.postgresql
 testImplementation libs.testcontainers.junit
 testImplementation libs.testcontainers.postgresql
 
-tasks.withType(Test).configureEach {
-    systemProperty 'accord.repo-root', rootProject.projectDir.absolutePath
+tasks.named('processResources') {
+    from(rootProject.file('contracts/json-schema/domain-event.schema.json')) {
+        into 'accord/contracts'
+    }
 }
 ```
 
-The `DynamicPropertySource` starts PostgreSQL, bootstraps the exact roles, and migrates as `accord_migrator_login` with `SET ROLE accord_migrator` before Spring creates its pool. The pool then connects as `accord_api_login`; Hikari initializes every physical connection with `SET ROLE accord_api`, and the production defaults follow the same session-user/current-user split. The API build consumes the database test fixtures explicitly. `FoundationVerifiedPrincipal` is a narrow temporary port, not an early copy of the Identity domain model: production has no request-header converter for it, the Foundation route fails closed unless a trusted server-side `Authentication` supplies it, and Identity Task 5 replaces the port and security chain with `VerifiedRequestIdentity`. Neither `X-Accord-Tenant` nor a raw bearer value is ever parsed into tenant or actor. Do not substitute H2 because JSONB, forced RLS, grants, and row-lock behavior are part of the contract.
+`ContractValidationJson` must build an immutable registry containing only the packaged
+`/accord/contracts/domain-event.schema.json`, verify its checked-in `$id`, compile it as JSON Schema
+2020-12 with format assertions enabled, and return `SCHEMA_NOT_FOUND` for every other URI. Network
+fallback, redirects, filesystem lookup, and production use of `accord.repo-root` are forbidden.
+Project schema failures into executable stable `errors[{field,reason}]` without copying validator
+prose. Convert each validator instance location to an RFC 6901 pointer by escaping `~` as `~0` and
+`/` as `~1`; represent the root as `$`. If the full pointer exceeds 512 Unicode code points, `field`
+is its first 440 complete code points plus `#sha256:` plus the 64-character uppercase hexadecimal
+SHA-256 of the full pointer's UTF-8 bytes, totaling exactly 512 code points.
 
-The claim transaction commits before the controller starts the aggregate transaction. The acquired
-lease handle is carried into the second transaction, where CAS, response construction, every
-domain/audit/outbox write for the command, and fenced completion commit or roll back together. The API never
-discards the generation/token fence and never performs business writes in the claim transaction.
+Normalize the validator keyword to `reason` by inserting ASCII camel-case and punctuation
+boundaries, collapsing them to underscores, uppercasing with locale-independent ASCII rules, and
+prefixing `SCHEMA_`. If the keyword is empty or the prefixed result exceeds 64 characters, use
+`SCHEMA_RULE_` plus the first 52 uppercase hexadecimal characters of the keyword UTF-8 SHA-256,
+totaling exactly 64. Sort projected pairs by `field`, then `reason`; deduplicate exact pairs; then
+take the first 128. Zero validator failures is never a 422. Tests cover root, `~`/`/` escaping,
+supplementary Unicode/code-point truncation, both reason branches, sort/dedup/cap, and prove no
+validator message/prose appears.
 
-- [ ] **Step 5: Run HTTP and OpenAPI policy tests**
+`FoundationHttpSecurity` must expose no request-header authentication converter. It accepts the
+route only when Spring Security already holds a `FoundationVerifiedPrincipal`. A raw bearer header,
+raw session cookie, forged tenant header, or ordinary string principal returns `401` or `403` and
+cannot supply tenant/actor identity. The Foundation route therefore fails closed in production
+until the Identity plan replaces this narrow port; only tests construct these principals directly.
+
+For `FoundationVerifiedPrincipal.BrowserSession`, require one exact configured HTTPS `Origin`,
+`Sec-Fetch-Site: same-origin`, and one `X-CSRF-Token`. Hash the submitted token, then JCS-hash the
+closed binding `{tenant_id,actor_id,session_id,session_generation,token_digest}` and compare it to
+`csrfBindingDigest` with `MessageDigest.isEqual`. For `Bearer`, CSRF is exempt only because the
+trusted principal subtype proves the authentication channel. Configure Spring CSRF to ignore this
+single route because the stronger binding filter owns it; do not globally disable Spring CSRF.
+The route filter runs only after trusted authentication and authorization have succeeded, then
+performs browser CSRF before any generic header/media/body policy or controller entry. Authentication
+and access-denied handlers therefore retain precedence over malformed CSRF/correlation input.
+
+`ProblemAdvice` and the security `AuthenticationEntryPoint`/`AccessDeniedHandler` use one
+`FoundationProblemFactory`. It emits `application/problem+json` with absolute type URI, stable title,
+status/code, request path without query, and a UUID correlation ID exactly from the authoritative
+Problem table. The factory has one constructor/factory path per table row and asserts its exact key
+set; it never emits `detail`. After security succeeds, accept one canonical `X-Correlation-ID` UUID
+or return `REQUEST_INVALID`; security handlers presented with malformed input generate a new UUID
+and never reflect it. Persisted 404/412/422 use the same factory bytes.
+
+Keep `FoundationProblemFactory` and the closed exception types package-private in
+`ProblemAdvice.java`; security handlers receive the factory as a bean and never duplicate Problem
+serialization.
+
+Add security/protocol cases first to `ContractValidationApiTest`. Parameterize browser and bearer
+authentication, then assert missing/wrong Origin, missing/wrong/session-generation CSRF, stale
+session binding, malformed headers, unsupported media, unacceptable representation, malformed JSON,
+duplicate JSON keys, raw bearer, raw cookie, and forged tenant all return the exact Problem. After
+each case query as administrator and assert zero rows in `idempotency_result`, `aggregate_head`,
+`contract_validation`, `domain_event`, and `outbox_event`. A current same-origin browser token and a
+trusted bearer principal reach the command service; bearer requires no CSRF header.
+
+The stale-session test constructs a trusted principal with a new positive `sessionGeneration` but
+the old generation's `csrfBindingDigest`; the otherwise valid old token must return exact
+`CSRF_VALIDATION_FAILED` 403 with zero claim. Task 9 does not claim logout, revocation-list, or session
+authority.
 
 Run:
 
-```bash
-./gradlew :apps:control-plane:api:test --tests '*ContractValidationApiTest'
-pnpm contracts:test
+```powershell
+./gradlew.bat :apps:control-plane:api:test --tests '*ContractValidationApiTest' --no-daemon
 ```
 
-Expected: PASS. The replay body and status are identical; changed input returns `application/problem+json` with `IDEMPOTENCY_KEY_REUSED`; the same key/body cannot replay across resource IDs or a changed `If-Match`; reordered equivalent query pairs do replay while literal `+` remains distinct from percent-encoded space; malformed percent escapes and invalid UTF-8 are rejected instead of being canonicalized through replacement characters; a distinct key with stale `If-Match` returns `actual_version: 1`; a forged tenant header cannot change scope; a raw bearer string without the test-only verified principal receives 401; `/actuator/health/liveness` and `/actuator/health/readiness` return the declared `UP` shape; and legacy `/health/ready` is 404.
+Expected RED: the route/security handlers are absent. The first GREEN checkpoint is reached when
+all early-failure cases return the declared Problem and create no durable row, even before success
+behavior is implemented.
 
-- [ ] **Step 6: Commit the API safety slice**
+- [ ] **Step 6: Implement the two-transaction command and prove replay, CAS, and rollback**
 
-```bash
-git add apps/control-plane/api/build.gradle apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ContractValidationController.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/HttpIdempotencyFingerprint.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ProblemAdvice.java apps/control-plane/api/src/test/java/com/inforvans/accord/controlplane/http/ContractValidationApiTest.java apps/control-plane/api/src/main/resources/application.yml apps/control-plane/worker/src/main/resources/application.yml
-git commit -m "feat: expose idempotent CAS command endpoint"
+`FoundationTenantTransactions.write` is the only transaction helper. For every invocation it calls
+`DSLContext.transactionResult`, executes
+`SELECT set_config('app.tenant_id', ?, true)`, reads
+`accord_security.current_tenant_id()`, compares it to the trusted principal tenant, and only then
+invokes the supplied function with `configuration.dsl()`.
+
+`FoundationHttpConfiguration` supplies singleton `JooqCommandGate` and `ReliableEventStore` beans.
+Neither bean owns a datasource or transaction manager. `ContractValidationController` receives the
+trusted principal, path UUID, raw body bytes, and servlet request; it applies request policy and
+strict decoding, creates the fingerprint, and delegates. Its endpoint return type is exactly
+`ResponseEntity<byte[]>`. It applies the persisted canonical safe-header map explicitly, encodes
+`StoredHttpResult.body()` once with a strict UTF-8 encoder configured to report malformed/unmappable
+input, and returns those bytes. No String converter, JSON converter, platform-default charset, or
+reserialization may touch stored or replayed bodies.
+
+Keep this response record package-private in `ContractValidationController.java` so its JSON names
+remain explicit and independent of Java parameter naming:
+
+```java
+record ContractValidationResponse(
+    @JsonProperty("validation_id") UUID validationId,
+    boolean valid,
+    @JsonProperty("document_digest") String documentDigest,
+    long version
+) {}
 ```
 
-### Task 10: Constrain Temporal To Durable Orchestration
+`ContractValidationCommandService` uses this exact order:
+
+1. Construct `CommandKey(tenant, actor, "contract-validations.create", idempotencyKey)`.
+2. Run transaction 1 and call `gate.claim` with the JCS fingerprint, configured process instance ID,
+   and a two-minute lease; return exact replay immediately, map payload-free conflict to nonstored
+   `IDEMPOTENCY_KEY_REUSED` 409, and map live claim to nonstored `COMMAND_IN_PROGRESS` 409 with the
+   stable bounded `retry_after: 1` integer extension.
+3. For `Claim.Acquired`, resolve the schema and evaluate the object locally outside a database
+   transaction. Build the final 404 or 422 Problem body before transaction 2.
+4. Run transaction 2. For schema 404 or document 422 call `completeRejection` and return the stored
+   Problem. No aggregate version changes.
+5. For a valid document call `gate.advance` with aggregate type `contract-validation`. If
+   `VersionConflict.actual()` is null, build and persist 404; otherwise build and persist 412 with
+   `expected_version` and `actual_version`. Catch only this domain exception inside transaction 2;
+   SQL, serialization, fence, and invariant failures escape and roll back.
+6. After successful CAS, insert version 1 or update exactly the prior expected validation version.
+   Store only tenant, ID, canonical schema ID, document JCS digest, and new version; require exactly
+   one affected row.
+7. Append one `DomainEvent` and matching `OutboxMessage` with aggregate sequence equal to the new
+   version, stable event type `contract-validation.completed`, schema version `1.0.0`, trusted actor,
+   correlation/causation IDs, and canonical payload containing validation ID, schema ID, document
+   digest, and version. The payload contains no document body, credential, token, or fingerprint.
+8. Serialize `ContractValidationResponse(validation_id, true, document_digest, version)` once.
+   Complete with status 201 and replay-safe headers `Content-Type: application/json` and quoted
+   numeric `ETag`; return those same bytes only after transaction 2 commits.
+
+Add the remaining integration and concurrency tests:
+
+- create at `If-Match: "0"` returns 201, quoted ETag `"1"`, one validation/head/event/outbox row,
+  and a completed command row;
+- an identical retry returns byte-identical status, safe headers, and body without another business
+  write; the assertion compares status, the canonical persisted safe-header map, and raw UTF-8 body
+  bytes captured from `ResponseEntity<byte[]>`. Changed body, resource ID, expected version, or Accept under the same tenant/actor/key
+  returns nonstored 409 and reveals no original fingerprint; another tenant or actor using the same
+  key is isolated by `CommandKey`, never receives the first result, and owns an independent command;
+- unknown local schema, missing positive-version target, stale target, and invalid document produce
+  stored 404/404/412/422 respectively; after unrelated state advances, the original key still
+  replays the original exact Problem bytes;
+- invalid document never advances an aggregate or emits an event;
+- 32 distinct keys racing on the same expected version yield one 201 and 31 stored 412 results, one
+  aggregate increment, one validation mutation, and one event/outbox pair;
+- 32 identical-key requests produce at most one business execution; concurrent observers may see
+  nonstored `COMMAND_IN_PROGRESS`, and every retry after completion replays the winner;
+- a blocking test schema evaluator lets an independent connection observe committed `STARTED`
+  before transaction 2 and zero business rows, proving the transactions are not nested;
+- expiry or takeover before `complete` causes the HTTP execution to fail closed and rolls back the
+  validation row, aggregate CAS, domain event, and outbox together;
+- an unregistered URI under the allowed schema host returns stored `SCHEMA_NOT_FOUND`; an
+  architecture assertion proves the HTTP package has no dependency on `HttpClient`, `RestClient`,
+  `WebClient`, a Provider client, or any FT8 execution-claim API.
+
+Run:
+
+```powershell
+./gradlew.bat :apps:control-plane:api:test --tests '*ContractValidationApiTest' --no-daemon
+./gradlew.bat :apps:control-plane:modules:reliability:test --no-daemon
+./gradlew.bat :database:control-plane:test --no-daemon
+corepack pnpm contracts:test
+corepack pnpm contracts:lint
+```
+
+Expected GREEN: every protocol/security failure is pre-claim, all four acquired business outcomes
+are durable and replayable as specified, only success changes aggregate/business/event state, CAS
+races have one winner, and a lost fence rolls the full transaction back.
+
+- [ ] **Step 7: Configure production defaults and verify locked dependencies**
+
+Expand API `application.yml` while retaining explicitly annotated Modulith detection:
+
+```yaml
+spring:
+  application:
+    name: accord-control-api
+  modulith:
+    detection-strategy: explicitly-annotated
+  datasource:
+    url: ${ACCORD_DB_URL:jdbc:postgresql://localhost:5432/accord}
+    username: ${ACCORD_API_DB_USER:accord_api_login}
+    password: ${ACCORD_API_DB_PASSWORD:local-api-only}
+    hikari:
+      connection-init-sql: SET ROLE ${ACCORD_DB_SESSION_ROLE:accord_api}
+  flyway:
+    enabled: false
+server:
+  port: 8080
+  error:
+    include-message: never
+    include-binding-errors: never
+    include-stacktrace: never
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+accord:
+  process:
+    role: control-api
+    instance-id: ${ACCORD_PROCESS_INSTANCE_ID:${random.uuid}}
+  http:
+    api-contract-version: 0.1.0
+    command-result-ttl: PT24H
+  security:
+    allowed-origin: ${ACCORD_BROWSER_ORIGIN:https://app.accord.example}
+```
+
+Bootstrap the focused API lock and verification metadata together before any strict resolution,
+because the new executable closure is not trusted yet. This first command is intentionally focused
+and non-strict; immediately inspect only the newly introduced Spring Security, JDBC/Hikari,
+PostgreSQL, JSON Schema, Flyway, and Testcontainers artifacts/signatures. Any unrelated coordinate or
+unverifiable artifact stops the task. Only after that review may the repository-wide strict lock
+writer run; then rerun the exact focused lock/metadata writer and require no byte change before the
+read-only strict check:
+
+```powershell
+./gradlew.bat :apps:control-plane:api:dependencies --write-locks --write-verification-metadata sha256,pgp --no-configuration-cache --no-daemon
+git diff -- apps/control-plane/api/gradle.lockfile gradle/verification-metadata.xml
+./gradlew.bat resolveAndLockAll --write-locks --no-configuration-cache --no-daemon --dependency-verification=strict
+$beforeRepeat = @(
+  (Get-FileHash apps/control-plane/api/gradle.lockfile -Algorithm SHA256).Hash
+  (Get-FileHash gradle/verification-metadata.xml -Algorithm SHA256).Hash
+)
+./gradlew.bat :apps:control-plane:api:dependencies --write-locks --write-verification-metadata sha256,pgp --no-configuration-cache --no-daemon
+$afterRepeat = @(
+  (Get-FileHash apps/control-plane/api/gradle.lockfile -Algorithm SHA256).Hash
+  (Get-FileHash gradle/verification-metadata.xml -Algorithm SHA256).Hash
+)
+if (Compare-Object $beforeRepeat $afterRepeat -SyncWindow 0) { throw 'API lock/metadata writer is not stable' }
+./gradlew.bat resolveAndLockAll --no-configuration-cache --no-daemon --dependency-verification=strict
+./gradlew.bat :apps:control-plane:api:check :apps:control-plane:modules:reliability:check :database:control-plane:check --no-daemon --dependency-verification=strict
+corepack pnpm contracts:test
+corepack pnpm contracts:lint
+```
+
+Expected: only the API lock and genuinely new verification entries change; reliability does not gain
+a Spring datasource or security dependency; the API executable still passes the control-plane
+runtime boundary; the focused metadata bootstrap precedes every strict command; repeating that same
+focused lock/metadata writer after the strict global lock produces no byte change; and all Task 9
+tests pass.
+
+- [ ] **Step 8: Commit the complete HTTP reliability proof**
+
+Review the staged manifest so no Task 8 file or generated source is included, then commit
+only the files listed by this task:
+
+```powershell
+git diff --check
+git add contracts/openapi/accord-control-api.yaml contracts/json-schema/problem-details.schema.json tests/contracts/openapi-contract.test.mjs database/control-plane/migrations/V003__foundation_http_reliability.sql database/control-plane/src/test/java/com/inforvans/accord/database/FoundationHttpReliabilityMigrationTest.java database/control-plane/src/test/java/com/inforvans/accord/database/PlatformMigrationTest.java apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/JooqCommandGate.java apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/JooqCommandGateTest.java gradle/libs.versions.toml apps/control-plane/api/build.gradle apps/control-plane/api/gradle.lockfile gradle/verification-metadata.xml apps/control-plane/api/src/main/resources/application.yml apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationVerifiedPrincipal.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationTenantTransactions.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationHttpRequestPolicy.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ContractValidationJson.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/HttpIdempotencyFingerprint.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationHttpConfiguration.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ContractValidationCommandService.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ContractValidationController.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationHttpSecurity.java apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ProblemAdvice.java apps/control-plane/api/src/test/java/com/inforvans/accord/controlplane/http/HttpIdempotencyFingerprintTest.java apps/control-plane/api/src/test/java/com/inforvans/accord/controlplane/http/ContractValidationApiTest.java
+git diff --cached --name-only
+git commit -m "feat: prove enterprise HTTP command reliability"
+```
+
+Expected: the staged manifest contains only the exact Task 9 files; already committed Task 8 files
+remain absent from the staged diff; the branch contains one reviewable HTTP reliability slice; and
+Task 10 begins immediately after this section without modification.
+
+### Task 10: Prove Durable Temporal Orchestration Over Production mTLS
+
+**Goal:** Run an identifier-only reconciliation workflow with Temporal Java SDK `1.28.1` through
+a production-shaped mTLS client and worker, prove deterministic replay from a committed history,
+and prove a replacement worker recovers after the first worker JVM is killed without making any
+Provider mutation call.
 
 **Files:**
+- Modify: `database/control-plane/migrations/V002__reliable_event_delivery.sql`
+- Modify: `database/control-plane/src/test/java/com/inforvans/accord/database/ReliableDeliveryMigrationTest.java`
+- Modify: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExternalIntentSnapshot.java`
+- Modify: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/JooqExternalIntentStore.java`
+- Modify: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/JooqExternalIntentStoreTest.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkflowRef.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationOutcome.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationObservationPort.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationActivities.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReadOnlyReconciliationActivity.java`
 - Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkflow.java`
 - Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkflowImpl.java`
-- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationRef.java`
-- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationOutcome.java`
-- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationActivities.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalConnectionProperties.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalRuntimeConfiguration.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalWorkerLifecycle.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/reconciliation/WorkerTenantTransactions.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/reconciliation/ProviderObservationPort.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/reconciliation/FencedReconciliationObservation.java`
 - Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkflowTest.java`
+- Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/reconciliation/FencedReconciliationObservationTest.java`
+- Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/TemporalMtlsTestServer.java`
+- Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/TemporalTestCertificates.java`
+- Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/TemporalMtlsIT.java`
+- Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkflowReplayTest.java`
+- Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationProbeServer.java`
+- Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkerChildMain.java`
+- Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationCrashRecoveryIT.java`
+- Create: `apps/control-plane/worker/src/test/resources/temporal/reconciliation-workflow-v1.json`
+- Create: `apps/control-plane/worker/src/test/resources/temporal/reconciliation-workflow-v1.provenance.json`
 - Modify: `apps/control-plane/worker/build.gradle`
+- Modify: `apps/control-plane/worker/gradle.lockfile`
+- Modify: `apps/control-plane/worker/src/main/resources/application.yml`
+- Modify: `gradle/libs.versions.toml`
+- Modify: `gradle/verification-metadata.xml`
 
-- [ ] **Step 1: Write the failing workflow retry and payload-boundary test**
+Task 10 owns the first edit to the three shared worker files: `build.gradle`, `gradle.lockfile`, and
+`application.yml`, including the baseline caller-owned datasource/jOOQ/PostgreSQL dependencies and
+configuration required by production reconciliation. Task 12 starts from the committed Task 10
+versions, reuses that database baseline without adding it again, and adds only scheduling/drain
+dependencies and configuration without replacing the mTLS properties, fenced reconciliation, or
+lifecycle. Do not implement Task 10 and the Task 12 worker-wiring step concurrently in one worktree.
 
-Create `ReconciliationWorkflowTest.java`:
+**Authoritative invariants:**
 
-```java
-package com.inforvans.accord.controlplane.worker.temporal;
+1. Workflow, activity, and history inputs are exactly `ReconciliationWorkflowRef(UUID tenantId,
+   UUID intentId)`. The ref rejects null values and is the only Temporal input DTO. FT8
+   `ReconciliationLease`, a reference/command/authorization DTO, and mutable business state never
+   enter a workflow/activity payload, heartbeat, result, failure, log, header, memo, or search
+   attribute.
+2. Workflow history contains only the ref, orchestration progress, retry metadata, and the closed
+   `ReconciliationOutcome`; it contains no Provider fact. Temporal
+   `ReconciliationObservationPort` accepts the ref and is the high-level boundary, and production
+   final class `reconciliation.FencedReconciliationObservation` is its only runtime implementation.
+   Provider adapters cannot implement, wrap, or replace that high-level port; they implement only
+   the lower `ProviderObservationPort`. Every activity attempt must:
+   (a) in tx1 install `ref.tenantId()` as tenant context, call FT8 `claimReconciliation`, and commit;
+   (b) expose only state for `NotReconcilable`, expose no capability for `Missing`, and retain an
+   `Acquired` `ReconciliationLease` only in that activity attempt's process memory; (c) perform the
+   bounded read-only `ProviderObservationPort.observe(lease, PT2S)` with no JDBC transaction open;
+   and (d) in tx2 reinstall tenant context and use that same in-memory lease. Terminal resolutions
+   call `completeReconciliation` with canonical safe `DomainEvent`/`OutboxMessage` so terminal intent,
+   event, and outbox commit atomically. `STILL_UNKNOWN` or a normalized retryable observation error
+   calls `markReconciliationOutcomeUnknown`. A stale fence rolls tx2 back. Capability data is
+   discarded when the attempt ends.
+3. Reconciliation is observation-only. Production workflow/activity packages and their runtime
+   dependency graph contain no Provider mutation port, generic Provider client, Provider SDK, or
+   generic HTTP/gRPC client. Every integration path that executes an activity uses the same probe
+   with separate `/observe` and `/mutate` counters and requires mutation count `0`.
+4. Production accepts only a `grpcs://` endpoint plus a client certificate, PKCS#8 private key,
+   trust certificate, expected server name, and allowed secret root. Blank, unreadable, malformed,
+   mismatched, expired, untrusted, wrong-name, escaping, or over-permissioned material prevents a
+   synchronous connection and polling; there is no plaintext, trust-all, or resolver fallback.
+5. `TemporalWorkerLifecycle` is a Spring `SmartLifecycle` at phase `100`. Startup creates the stubs,
+   proves connectivity synchronously within `rpc-timeout`, creates the client/factory/worker,
+   registers implementations, and only then calls `WorkerFactory.start()`. Shutdown calls
+   `worker.suspendPolling()`, `factory.shutdown()` plus bounded `awaitTermination`, and finally
+   `stubs.shutdown()` plus bounded termination. `WorkflowClient` is not treated as closeable.
+6. Workflow code uses only Temporal deterministic APIs. No JVM clock, random UUID, thread,
+   filesystem, environment, Spring bean lookup, network call, or database call appears in workflow
+   implementation code.
+7. The crash test is not an in-process worker restart. A parent JVM owns the TLS Temporal service
+   and probe counters, kills the first child with `Process.destroyForcibly()`, waits for its exit,
+   starts a distinct replacement child, and observes completion from persisted Temporal history.
+8. Integration tests use exactly `temporalio/server:1.28.1`, the source coordinate later incorporated
+   unchanged by Task 13. A one-shot schema-setup container must finish successfully before a distinct
+   real server container starts; `auto-setup`, `start-dev`, an in-process service, fake frontend, or
+   TLS proxy does not satisfy Task 10. Tests resolve and record the coordinate's actual immutable
+   repository digest. A registry-resolution failure, including the current local failure, is not
+   GREEN and cannot be replaced with a guessed/cached digest. The real server frontend terminates and
+   verifies mTLS and owns the test namespace.
+9. `WorkerTenantTransactions` receives the worker process's caller-owned `DSLContext` backed by its
+   caller-owned datasource and uses only `DSLContext.transactionResult`. Every call executes
+   `set_config('app.tenant_id', tenantId, true)`, reads `accord_security.current_tenant_id()`, and
+   verifies equality before invoking the callback with the transaction DSLContext. It owns no pool,
+   datasource, transaction manager, implicit transaction, or retry policy.
+10. `ProviderObservationPort` is read-only and has exactly
+    `ReconciliationResolution observe(ReconciliationLease lease, Duration timeout)`. It exposes no
+    mutation method and returns no raw Provider response. `FencedReconciliationObservation` always
+    supplies the constant `Duration.ofSeconds(2)`; a Provider adapter cannot choose or extend it.
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
+- [ ] **TDD prerequisite: expose safe intent scope before production reconciliation**
 
-import io.temporal.client.WorkflowOptions;
-import io.temporal.failure.ApplicationFailure;
-import io.temporal.testing.TestWorkflowEnvironment;
-import io.temporal.worker.Worker;
-import java.lang.reflect.Field;
-import java.util.Arrays;
-import java.util.Set;
-import java.util.UUID;
-import java.util.stream.Collectors;
-import org.junit.jupiter.api.Test;
+Because V002 is still unpublished, extend `ExternalIntentSnapshot` and
+`load_external_intent_snapshot` in place with the exact non-sensitive `scopeType`/`scopeId` pair from
+Task 8. Write the catalog and store tests first: `ReliableDeliveryMigrationTest` asserts exact OUT
+order/types and unchanged ACL, while `JooqExternalIntentStoreTest` proves same/cross-tenant loads,
+successor scope preservation, and unchanged null capability/provider columns on non-winning claims.
+Runtime roles retain zero table/column SELECT on `external_call_intent`; the security-definer snapshot
+routine remains the only scope source. RED is the changed exact snapshot expectation; GREEN requires
+the SQL routine, Java record, and mapper to agree without adding a capability field.
 
-class ReconciliationWorkflowTest {
-    @Test
-    void workflowCarriesIdentifiersWhileActivityReloadsAuthoritativeState() {
-        try (TestWorkflowEnvironment environment =
-                TestWorkflowEnvironment.newInstance()) {
-            Worker worker = environment.newWorker("reconciliation");
-            worker.registerWorkflowImplementationTypes(
-                ReconciliationWorkflowImpl.class);
-            RecordingActivities activities = new RecordingActivities();
-            worker.registerActivitiesImplementations(activities);
-            environment.start();
+Run the focused FT8 tests, then stage this unpublished-V002 fix separately before any Task 10 worker
+implementation:
 
-            ReconciliationWorkflow client =
-                environment.getWorkflowClient().newWorkflowStub(
-                    ReconciliationWorkflow.class,
-                    WorkflowOptions.newBuilder()
-                        .setTaskQueue("reconciliation")
-                        .build());
-            ReconciliationRef ref = new ReconciliationRef(
-                UUID.fromString("10000000-0000-0000-0000-000000000001"),
-                UUID.fromString("40000000-0000-0000-0000-000000000001"));
+~~~powershell
+./gradlew.bat :database:control-plane:test --tests '*ReliableDeliveryMigrationTest' :apps:control-plane:modules:reliability:test --tests '*JooqExternalIntentStoreTest' --no-daemon --dependency-verification=strict
+$task10SafeScopePaths = @(
+  'database/control-plane/migrations/V002__reliable_event_delivery.sql'
+  'database/control-plane/src/test/java/com/inforvans/accord/database/ReliableDeliveryMigrationTest.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ExternalIntentSnapshot.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/JooqExternalIntentStore.java'
+  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/JooqExternalIntentStoreTest.java'
+)
+git add -- $task10SafeScopePaths
+git diff --cached --name-only
+git commit -m "fix: expose safe external intent scope"
+~~~
 
-            assertEquals(ReconciliationOutcome.CONVERGED, client.run(ref));
-            assertEquals(2, activities.attempts());
-            assertEquals(ref, activities.loadedRef());
+- [ ] **Step 1: Write the RED workflow boundary and retry tests**
 
-            Set<String> fields = Arrays.stream(
-                    ReconciliationRef.class.getDeclaredFields())
-                .map(Field::getName)
-                .collect(Collectors.toSet());
-            assertEquals(Set.of("tenantId", "reconciliationId"), fields);
-            assertFalse(fields.stream().anyMatch(name -> {
-                String lower = name.toLowerCase(java.util.Locale.ROOT);
-                return lower.contains("authorization")
-                    || lower.contains("businessstate");
-            }));
-        }
-    }
-}
+Create `ReconciliationWorkflowTest.java` with these exact assertions:
 
-final class RecordingActivities implements ReconciliationActivities {
-    private int attempts;
-    private ReconciliationRef loadedRef;
+- `ReconciliationWorkflow.reconcile`, `ReconciliationActivities.observe`, and
+  `ReconciliationObservationPort.observe` each have one parameter of type
+  `ReconciliationWorkflowRef`; the record has exactly non-null `tenantId` and `intentId` UUIDs.
+- The workflow and activity interfaces expose no other workflow/activity method.
+- The first observation attempt throws retryable `OBSERVATION_UNAVAILABLE`; the second returns
+  `CONVERGED`; the workflow retries once and returns the closed outcome without learning a lease or
+  Provider fact. Non-retryable `RECONCILIATION_NOT_RECONCILABLE` and `RECONCILIATION_MISSING` each
+  stop after one activity failure.
+- ArchUnit scans main classes, bytecode references, module dependencies, and resolved runtime
+  coordinates. It rejects `ExternalWritePermit`, `ExecutionClaim`, `JooqExternalIntentStore`, every
+  Provider mutation/client/SDK type, and generic HTTP/gRPC clients anywhere under the temporal
+  workflow/activity package; this is not a three-class blacklist. The production orchestrator lives
+  outside that package under `worker.reconciliation`.
 
-    @Override
-    public ReconciliationOutcome reconcileFromDatabase(ReconciliationRef ref) {
-        attempts++;
-        loadedRef = ref;
-        if (attempts == 1) {
-            throw ApplicationFailure.newFailure(
-                "provider temporarily unavailable",
-                "TRANSIENT_PROVIDER");
-        }
-        return ReconciliationOutcome.CONVERGED;
-    }
+Use these production signatures consistently:
 
-    int attempts() {
-        return attempts;
-    }
-
-    ReconciliationRef loadedRef() {
-        return loadedRef;
-    }
-}
-```
-
-- [ ] **Step 2: Run the test and verify workflow types are absent**
-
-Run: `./gradlew :apps:control-plane:worker:test --tests '*ReconciliationWorkflowTest'`
-
-Expected: FAIL because `ReconciliationWorkflow` and its identifier-only input are unresolved.
-
-- [ ] **Step 3: Define an identifier-only workflow and retry policy**
-
-Create `ReconciliationRef.java`, `ReconciliationOutcome.java`, `ReconciliationWorkflow.java`, and `ReconciliationWorkflowImpl.java`; each public type is stored in its matching file:
-
-```java
-// ReconciliationRef.java
-package com.inforvans.accord.controlplane.worker.temporal;
-
-import java.util.UUID;
-
-public record ReconciliationRef(UUID tenantId, UUID reconciliationId) {}
-
-// ReconciliationOutcome.java
-package com.inforvans.accord.controlplane.worker.temporal;
-
+~~~java
 public enum ReconciliationOutcome {
     CONVERGED,
-    DIVERGED
+    CONFIRMED_NO_EFFECT,
+    DIVERGED,
+    STILL_UNKNOWN
 }
 
-// ReconciliationWorkflow.java
-package com.inforvans.accord.controlplane.worker.temporal;
-
-import io.temporal.workflow.WorkflowInterface;
-import io.temporal.workflow.WorkflowMethod;
-
-@WorkflowInterface
-public interface ReconciliationWorkflow {
-    @WorkflowMethod
-    ReconciliationOutcome run(ReconciliationRef ref);
-}
-
-// ReconciliationWorkflowImpl.java
-package com.inforvans.accord.controlplane.worker.temporal;
-
-import io.temporal.activity.ActivityOptions;
-import io.temporal.common.RetryOptions;
-import io.temporal.workflow.Workflow;
-import java.time.Duration;
-
-public final class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
-    private final ReconciliationActivities activities =
-        Workflow.newActivityStub(
-            ReconciliationActivities.class,
-            ActivityOptions.newBuilder()
-                .setStartToCloseTimeout(Duration.ofMinutes(2))
-                .setRetryOptions(
-                    RetryOptions.newBuilder()
-                        .setInitialInterval(Duration.ofSeconds(1))
-                        .setBackoffCoefficient(2.0)
-                        .setMaximumAttempts(5)
-                        .build())
-                .build());
-
-    @Override
-    public ReconciliationOutcome run(ReconciliationRef ref) {
-        return activities.reconcileFromDatabase(ref);
+public record ReconciliationWorkflowRef(UUID tenantId, UUID intentId) {
+    public ReconciliationWorkflowRef {
+        Objects.requireNonNull(tenantId, "tenantId");
+        Objects.requireNonNull(intentId, "intentId");
     }
 }
-```
 
-Create `ReconciliationActivities.java`:
-
-```java
-package com.inforvans.accord.controlplane.worker.temporal;
-
-import io.temporal.activity.ActivityInterface;
-import io.temporal.activity.ActivityMethod;
+@FunctionalInterface
+public interface ReconciliationObservationPort {
+    ReconciliationOutcome observe(ReconciliationWorkflowRef ref);
+}
 
 @ActivityInterface
 public interface ReconciliationActivities {
     @ActivityMethod
-    ReconciliationOutcome reconcileFromDatabase(ReconciliationRef ref);
+    ReconciliationOutcome observe(ReconciliationWorkflowRef ref);
 }
-```
 
-The test implementation records only `ReconciliationRef`, fails its first call with the retryable `TRANSIENT_PROVIDER` application failure, and returns `CONVERGED` on the second. The production activity added by the Git integration plan must load intent, authorization, and current state from PostgreSQL on every attempt and persist its result through a CAS command.
+@WorkflowInterface
+public interface ReconciliationWorkflow {
+    @WorkflowMethod
+    ReconciliationOutcome reconcile(ReconciliationWorkflowRef ref);
+}
 
-Add to the worker build:
+@FunctionalInterface
+public interface ProviderObservationPort {
+    ReconciliationResolution observe(ReconciliationLease lease, Duration timeout);
+}
+~~~
 
-```groovy
-implementation libs.temporal.sdk
-testImplementation libs.temporal.testing
-testImplementation platform(libs.junit.bom)
-testImplementation libs.junit.jupiter
-testImplementation libs.assertj.core
-```
+Run:
 
-- [ ] **Step 4: Run the deterministic retry test**
+~~~powershell
+./gradlew.bat :apps:control-plane:worker:test --tests '*ReconciliationWorkflowTest' --no-daemon
+~~~
 
-Run: `./gradlew :apps:control-plane:worker:test --tests '*ReconciliationWorkflowTest'`
+Expected RED: compilation fails because the temporal types do not exist. No database or Docker
+service is needed for this first failure.
 
-Expected: PASS; virtual time retries once, the activity runs twice, and workflow input has exactly `tenantId` and `reconciliationId`.
+- [ ] **Step 2: Add the deterministic workflow and production fenced observation**
 
-- [ ] **Step 5: Commit the orchestration boundary**
+Implement `ReadOnlyReconciliationActivity` as a final class with one non-null high-level
+`ReconciliationObservationPort`; its `observe(ReconciliationWorkflowRef)` method delegates exactly
+once and has no capability-bearing field or other port. Production final class
+`FencedReconciliationObservation implements ReconciliationObservationPort`; runtime configuration
+constructs it from `WorkerTenantTransactions`, FT8 `JooqExternalIntentStore`, and exactly one
+`ProviderObservationPort`. No Provider adapter or integration test supplies an alternate high-level
+implementation. The activity heartbeats only `ref.intentId()` immediately before and after its one
+high-level port invocation. Implement
+`ReconciliationWorkflowImpl` with one activity stub
+using a 30-second schedule-to-close timeout, ten-second start-to-close timeout, three-second
+heartbeat timeout, one-second initial retry, coefficient `2.0`, eight-second maximum interval, and
+five maximum attempts. Treat `RECONCILIATION_NOT_RECONCILABLE` and `RECONCILIATION_MISSING` as
+non-retryable. Tests prove heartbeat details contain only the intent UUID, never tenant/capability/
+Provider facts, and that missed heartbeats make the attempt eligible for prompt reassignment.
 
-```bash
-git add apps/control-plane/worker
-git commit -m "feat: add identifier-only Temporal orchestration"
-```
+Create `FencedReconciliationObservationTest.java` first with the real FT8 PostgreSQL fixture and
+worker login/role. For every attempt, assert this exact production sequence:
 
-### Task 11: Build The Isolated Java Webhook Edge
+1. `WorkerTenantTransactions` opens tx1 through the injected caller `DSLContext.transactionResult`,
+   installs and reads back transaction-local tenant context, calls `claimReconciliation`, and only
+   for `Acquired` loads the safe snapshot scope/root identifier in that same transaction. It commits
+   before any Provider observation.
+2. `Missing` returns no capability; `NotReconcilable` exposes only its state. Both fail closed with
+   their normalized non-retryable code and make zero low-level observation calls.
+3. Only `Acquired` retains the lease plus the minimal safe snapshot `scopeType`, `scopeId`, and
+   `rootIntentId` finalization context in that activity invocation's memory. The low-level port
+   receives `(lease, PT2S)` after tx1 closes; a connection/transaction probe proves no JDBC
+   transaction is open, and its `/mutate` count remains zero.
+4. Terminal `ReconciliationResolution` opens tx2, reinstalls/verifies tenant context, and calls
+   `completeReconciliation` with one canonical `DomainEvent`/`OutboxMessage`. The activity process
+   generates `eventId`; it never enters Temporal input/history/heartbeat/result/log. Event time comes
+   from tx2 PostgreSQL `clock_timestamp()`. Set scope from the tx1 snapshot, `aggregate_type` to
+   `external_intent`, `aggregate_id` to `ref.intentId()`, `sequence` to `lease.generation()`,
+   `event_type` to `external_intent.completed`, schema version to `1.0.0`, `causation_id` to
+   `eventId`, `correlation_id` to snapshot `rootIntentId`, and actor to the bounded configured process
+   instance ID. Its canonical payload is exactly `{intent_id,outcome}`. The outbox destination is
+   `external-intents`, payload schema is `external-intent.event/1.0`, and its payload is the same
+   closed identifiers/outcome. Neither payload contains lease or Provider facts. The database
+   completion routine revalidates scope against the intent row together with the full lease fence;
+   terminal intent, event, and outbox commit atomically.
+5. `STILL_UNKNOWN` and a normalized retryable low-level error each open tx2 with the same in-memory
+   lease and call `markReconciliationOutcomeUnknown`. The retryable error is rethrown only after that
+   commit. A stale lease at either completion path rolls back tx2 and exposes no capability.
+
+The test also proves rollback after each tx2 write, exact safe-event bytes, all terminal resolution
+mappings, no mutation API on `ProviderObservationPort`, `FencedReconciliationObservation` as the sole
+production `ReconciliationObservationPort` implementation, and zero Provider mutation calls.
+
+Run:
+
+~~~powershell
+./gradlew.bat :apps:control-plane:worker:test --tests '*ReconciliationWorkflowTest' --tests '*FencedReconciliationObservationTest' --no-daemon
+~~~
+
+Expected GREEN: retryable observation runs twice, non-retryable observation runs once, workflow
+input is only `ReconciliationWorkflowRef`, every acquired attempt follows the fenced transaction
+sequence through the production orchestrator, safe event scope comes from PostgreSQL snapshot rather
+than the lease/Provider adapter, no capability leaves process memory, and every case reports mutation
+count zero.
+
+- [ ] **Step 3: Write RED production mTLS configuration tests**
+
+Create `TemporalMtlsIT.java`. Add test-only Bouncy Castle `bcpkix-jdk18on` `1.81` through the version
+catalog. `TemporalTestCertificates` uses it to create an ephemeral CA, a server certificate for
+`temporal.test`, and distinct trusted, untrusted, expired, wrong-EKU, wrong-SAN, and key-mismatched
+cases under the JUnit temporary directory; no private key is checked into the repository.
+
+`TemporalMtlsTestServer` starts PostgreSQL 17.5, runs an explicit one-shot schema setup to successful
+exit, and then starts a distinct real server from exactly `temporalio/server:1.28.1` on a private
+Testcontainers network. It resolves the source through the registry, obtains the actual repository
+digest from Docker inspection, and rejects missing, tag-only, cached-but-unresolved, or fabricated
+identity; the current local registry-resolution failure therefore blocks GREEN. Capture mode writes
+both the exact coordinate and actual digest to `reconciliation-workflow-v1.provenance.json`; once
+committed, both mTLS and replay tests require byte-equal coordinate and digest. Mount an ephemeral Temporal server
+configuration that enables TLS on the real frontend listener, requires and verifies client
+certificates, uses the generated server key/certificate and CA, and creates one fixed test namespace.
+Readiness is the actual frontend gRPC health/namespace response over trusted mTLS. The helper rejects
+`TestWorkflowEnvironment`, an in-process service, a fake frontend, or a separate TLS-terminating proxy.
+
+The trusted case and every other integration case that can dispatch an activity use
+production `FencedReconciliationObservation`; `ReconciliationProbeServer` is wired only through a
+test-owned low-level `ProviderObservationPort`. They assert the `/mutate` counter is zero before
+teardown. TLS-negative cases also prove neither probe endpoint is reached. No test implements the
+high-level `ReconciliationObservationPort`.
+
+Test this matrix with real `WorkflowServiceStubs`, `WorkflowClient`, `WorkerFactory`, and `Worker`:
+
+| Case | Required result |
+| --- | --- |
+| trusted client, trusted CA, `temporal.test` | worker polls and one workflow completes |
+| blank endpoint, namespace, queue, server name, secret root, or path | binding fails before stubs exist |
+| non-`grpcs`, user-info, path, query, fragment, missing host, or missing port endpoint | URI validation fails before stubs exist |
+| no, untrusted, wrong-EKU, or wrong-CA client certificate | synchronous TLS connect fails before polling |
+| wrong trust CA or wrong expected SAN/server name | synchronous TLS connect fails before polling |
+| expired client or server certificate | synchronous TLS connect fails before polling |
+| client certificate with a different PKCS#8 key | TLS context construction fails before stubs exist |
+| missing, unreadable, empty, oversized, or malformed certificate/key/trust file | setup fails before stubs exist |
+| symlink projection resolving outside allowed root, loop, or broken link | path validation fails before any read |
+| valid Kubernetes `..data` symlink projection inside allowed root | resolved files are accepted |
+| insecure private-key owner/mode or ACL for the current platform | setup fails before stubs exist |
+| non-positive RPC/shutdown timeout | property binding fails before stubs exist |
+
+Before the first GREEN mTLS run, add the Temporal and Bouncy Castle build coordinates and run the
+metadata-generation command from Step 7, then review only those new artifacts/signatures. Do not
+weaken dependency verification or attempt strict lock resolution before their metadata exists.
+
+Run:
+
+~~~powershell
+./gradlew.bat :apps:control-plane:worker:test --tests '*TemporalMtlsIT' --no-daemon
+~~~
+
+Expected RED: `TemporalConnectionProperties`, the TLS stubs factory, and lifecycle are absent.
+
+- [ ] **Step 4: Implement the production TLS client, worker, and lifecycle**
+
+Bind the worker's baseline datasource and required Temporal properties in Task 10:
+
+~~~yaml
+spring:
+  datasource:
+    url: ${ACCORD_DB_URL:jdbc:postgresql://localhost:5432/accord}
+    username: ${ACCORD_WORKER_DB_USER:accord_worker_login}
+    password: ${ACCORD_WORKER_DB_PASSWORD:local-worker-only}
+    hikari:
+      connection-init-sql: SET ROLE ${ACCORD_DB_SESSION_ROLE:accord_worker}
+  flyway:
+    enabled: false
+accord:
+  temporal:
+    endpoint: ${ACCORD_TEMPORAL_ENDPOINT}
+    namespace: ${ACCORD_TEMPORAL_NAMESPACE}
+    task-queue: ${ACCORD_TEMPORAL_RECONCILIATION_TASK_QUEUE}
+    server-name: ${ACCORD_TEMPORAL_SERVER_NAME}
+    secret-root: ${ACCORD_TEMPORAL_SECRET_ROOT}
+    client-certificate: ${ACCORD_TEMPORAL_CLIENT_CERTIFICATE}
+    client-private-key: ${ACCORD_TEMPORAL_CLIENT_PRIVATE_KEY}
+    trust-certificate: ${ACCORD_TEMPORAL_TRUST_CERTIFICATE}
+    rpc-timeout: PT5S
+    shutdown-timeout: PT20S
+~~~
+
+Parse the endpoint once as a URI and require scheme `grpcs`, a host and explicit port, and no user
+info, path, query, or fragment. Pass only the validated `host:port` authority to
+`WorkflowServiceStubsOptions.setTarget`; enable HTTPS, install the exact client/trust `SslContext`,
+and apply the validated server name through the channel authority override. Never pass
+`grpcs://...` to gRPC name resolution and never retry with the raw endpoint.
+
+Resolve the configured secret root and each Kubernetes Secret symlink chain with `toRealPath`, reject
+loops/broken links, and require every resolved file to remain beneath the resolved root. Recheck a
+bounded regular file before opening it and read at most 64 KiB. On POSIX, a private key is owned by
+root or the effective user, any readable group is one of the process groups, and no unrelated-user
+permission or group/other write bit is allowed; certificate/trust files forbid group/other writes.
+On Windows, an ACL adapter accepts only the service identity, Administrators, and SYSTEM as owners,
+rejects broad read/write grants on the private key, and rejects broad writes on certificates. Tests
+exercise both permission adapters independent of the host OS. Error messages name only the property.
+
+`TemporalRuntimeConfiguration` builds `WorkerTenantTransactions` from the process-owned `DSLContext`,
+builds the final `FencedReconciliationObservation` around the configured low-level
+`ProviderObservationPort`, and injects that concrete high-level implementation into
+`ReadOnlyReconciliationActivity`. Startup fails when no low-level read-only adapter exists; it never
+falls back to an alternate high-level implementation.
+
+`TemporalWorkerLifecycle.start()` creates stubs, calls bounded synchronous
+`WorkflowServiceStubs.connect(rpcTimeout)` and verifies the fixed namespace, then creates the client,
+factory, and worker, registers only `ReconciliationWorkflowImpl` and the injected
+`ReadOnlyReconciliationActivity`, calls `factory.start()`, and finally reports running. Its phase is
+exactly `100`. `stop()` calls `worker.suspendPolling()`, `factory.shutdown()`, bounded
+`factory.awaitTermination`, force-closes the factory only on timeout, then shuts down/awaits stubs
+within the remaining deadline. A partial startup failure unwinds factory then stubs; it never tries
+to start or close `WorkflowClient` independently.
+
+Run:
+
+~~~powershell
+./gradlew.bat :apps:control-plane:worker:test --tests '*TemporalMtlsIT' --no-daemon
+~~~
+
+Expected GREEN: only the trusted matrix case starts a polling worker; all negative cases fail closed
+at TLS/property setup and never invoke observation or mutation.
+
+- [ ] **Step 5: Capture, inspect, commit, and replay one golden workflow history**
+
+Create `ReconciliationWorkflowReplayTest.java` using
+`WorkflowReplayer.replayWorkflowExecutionFromResource` against
+`temporal/reconciliation-workflow-v1.json`. Add an opt-in
+`TemporalMtlsIT.captureGoldenHistory` path that starts the real pinned server and production mTLS
+client, runs one fixed workflow with one retryable observation failure and terminal `CONVERGED`,
+fetches the persisted execution history from that same authenticated stubs instance, and exports
+canonical protobuf JSON. Capture is reproducible only through:
+
+~~~powershell
+./gradlew.bat :apps:control-plane:worker:test --tests '*TemporalMtlsIT.captureGoldenHistory' -PaccordCaptureTemporalHistory=true --no-daemon --dependency-verification=strict
+git diff -- apps/control-plane/worker/src/test/resources/temporal/reconciliation-workflow-v1.json apps/control-plane/worker/src/test/resources/temporal/reconciliation-workflow-v1.provenance.json
+~~~
+
+The capture also writes the closed provenance sidecar with SDK coordinate/version `1.28.1`, the SDK
+artifact SHA-256 approved in `verification-metadata.xml`, exact server source coordinate
+`temporalio/server:1.28.1` and its registry-resolved actual repository digest, namespace, task queue,
+workflow ID/type, exact capture command, and history SHA-256. Tests recompute every value available
+locally and reject a tag-only/cached-but-unresolved server identity, coordinate or digest mismatch,
+history edit, unknown provenance field, or capture over a non-mTLS channel. Capture cannot become
+GREEN until the source coordinate resolves to that actual digest.
+
+The replay test parses JSON into Temporal's protobuf `History`, recursively visits every `Payload`
+field in every event attribute/header/memo, reads `metadata.encoding`, and decodes every non-empty
+`data` value with the matching SDK payload converter before inspecting structured content. Unknown
+or opaque non-empty encodings fail. Every decoded payload position, including workflow/activity
+input, result, failure, heartbeat, header, memo, and search attribute, rejects the
+`ReconciliationLease` type/name and field names matching
+`(?i)(credential|authorization|secret|token(?:_value)?|owner|generation|deadline|lease_until|global(?:_idempotency)?_key|provider(?:_request)?|installation|repository|operation|request(?:_reference)?(?:_type|_id|_version)?|request_digest|url|source|diff|raw_body)`.
+There is no lease exception. The history-shape test also allowlists the two ref UUIDs, orchestration
+metadata, and closed outcome so Provider facts cannot enter history under an innocuous field name.
+Raw/base64 substring scans do not satisfy this inspection.
+
+Run:
+
+~~~powershell
+./gradlew.bat :apps:control-plane:worker:test --tests '*ReconciliationWorkflowReplayTest' --no-daemon
+~~~
+
+Expected RED before the resource is added: the history resource is absent. Expected GREEN after the
+captured history and provenance are added: `WorkflowReplayer` completes with no nondeterminism,
+every payload is decoded and structurally inspected, provenance matches, and the capture probe's
+mutation count is zero.
+
+- [ ] **Step 6: Prove recovery after a child JVM is killed forcibly**
+
+Create `ReconciliationCrashRecoveryIT.java`, `ReconciliationProbeServer.java`, and
+`ReconciliationWorkerChildMain.java` with this exact sequence:
+
+1. The parent starts the mTLS Temporal service and a loopback JDK HTTP probe with separate
+   `/observe` and `/mutate` counters.
+2. Child A creates the production TLS stubs/client/factory/worker from command-line paths and writes
+   `READY\n` to stdout only after polling starts. Both children use production
+   `FencedReconciliationObservation` plus the probe-backed low-level `ProviderObservationPort`.
+3. The parent starts one workflow with a fixed `ReconciliationWorkflowRef`. Child A's attempt commits
+   tx1 tenant-context installation plus FT8 claim, keeps the acquired lease only in its process
+   memory, and issues the first `/observe` request outside any JDBC transaction; the activity's last
+   heartbeat detail before the high-level port invocation is only the intent UUID. The handler
+   increments its counter and blocks past the three-second heartbeat timeout.
+4. The parent calls `destroyForcibly()`, waits at most ten seconds for Child A to exit, and verifies
+   it did not run a shutdown hook completion marker.
+5. The parent releases the blocked probe, starts Child B with the same namespace and task queue, and
+   requires a replacement activity task within ten seconds. After the database reconciliation fence
+   is reclaimable, Child B commits its own tx1 claim, observes outside JDBC, then commits tx2
+   `completeReconciliation` plus event/outbox atomically; the original workflow ID returns
+   `CONVERGED` within another twenty seconds.
+6. The parent asserts observation count is at least two, mutation count is exactly zero, heartbeat
+   details contain only the intent UUID, decoded history contains no capability or Provider fact,
+   there is one terminal workflow execution/event/outbox result, and Child B exits cleanly after an
+   explicit stop command.
+
+Build the child command from `java.home/bin/java`, the current test runtime classpath, and fixed
+arguments. Give the entire test one monotonic 45-second hard deadline; every wait consumes that
+single budget, and `finally` forcibly terminates any surviving child before stopping containers.
+Do not invoke a shell, wait for the ten-second start-to-close timeout when heartbeat expiry is
+available, or infer success from process exit alone.
+
+Run:
+
+~~~powershell
+./gradlew.bat :apps:control-plane:worker:test --tests '*ReconciliationCrashRecoveryIT' --no-daemon
+~~~
+
+Expected GREEN: Child A is forcibly terminated, Child B completes the same persisted execution,
+observation is safely repeated, and `/mutate` remains untouched.
+
+- [ ] **Step 7: Lock, verify, and commit Task 10 before Task 12 worker wiring**
+
+Add version `bouncycastle = "1.81"` and library alias `bouncycastle-pkix` for
+`org.bouncycastle:bcpkix-jdk18on` to `gradle/libs.versions.toml`. Add
+`implementation libs.temporal.sdk`, `implementation libs.spring.boot.jooq`,
+`runtimeOnly libs.postgresql`, `testImplementation libs.temporal.testing`,
+`testImplementation libs.bouncycastle.pkix`, database control-plane test fixtures, Flyway core plus
+PostgreSQL, and the existing JUnit/Testcontainers PostgreSQL dependencies to the worker build. These
+are Task 10's baseline worker datasource/jOOQ/PostgreSQL dependencies; Task 12 must reuse them rather
+than add duplicates. Bouncy Castle is test-only and absent from the runtime graph. Use the same
+bootstrap order as Task 9: generate the focused worker lock and metadata together without strict
+verification, immediately review only the worker lock/new dependency closure, then run the strict
+global lock writer. Hash the worker lock plus metadata, repeat the exact focused combined writer and
+require no byte change, then run strict read-only global resolution and fenced/full checks:
+
+~~~powershell
+./gradlew.bat :apps:control-plane:worker:dependencies --write-locks --write-verification-metadata sha256,pgp --no-configuration-cache --no-daemon
+git diff -- apps/control-plane/worker/gradle.lockfile gradle/verification-metadata.xml
+./gradlew.bat resolveAndLockAll --write-locks --no-configuration-cache --no-daemon --dependency-verification=strict
+$workerBeforeRepeat = @(
+  (Get-FileHash apps/control-plane/worker/gradle.lockfile -Algorithm SHA256).Hash
+  (Get-FileHash gradle/verification-metadata.xml -Algorithm SHA256).Hash
+)
+./gradlew.bat :apps:control-plane:worker:dependencies --write-locks --write-verification-metadata sha256,pgp --no-configuration-cache --no-daemon
+$workerAfterRepeat = @(
+  (Get-FileHash apps/control-plane/worker/gradle.lockfile -Algorithm SHA256).Hash
+  (Get-FileHash gradle/verification-metadata.xml -Algorithm SHA256).Hash
+)
+if (Compare-Object $workerBeforeRepeat $workerAfterRepeat -SyncWindow 0) { throw 'Worker lock/metadata writer is not stable' }
+./gradlew.bat resolveAndLockAll --no-configuration-cache --no-daemon --dependency-verification=strict
+./gradlew.bat :apps:control-plane:worker:test --tests '*FencedReconciliationObservationTest' --no-daemon --dependency-verification=strict
+./gradlew.bat :apps:control-plane:worker:check --no-daemon --dependency-verification=strict
+git diff --check
+$task10Paths = @(
+  'apps/control-plane/worker/build.gradle'
+  'apps/control-plane/worker/gradle.lockfile'
+  'apps/control-plane/worker/src/main/resources/application.yml'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkflowRef.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationOutcome.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationObservationPort.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationActivities.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReadOnlyReconciliationActivity.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkflow.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkflowImpl.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalConnectionProperties.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalRuntimeConfiguration.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalWorkerLifecycle.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/reconciliation/WorkerTenantTransactions.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/reconciliation/ProviderObservationPort.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/reconciliation/FencedReconciliationObservation.java'
+  'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkflowTest.java'
+  'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/reconciliation/FencedReconciliationObservationTest.java'
+  'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/TemporalMtlsTestServer.java'
+  'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/TemporalTestCertificates.java'
+  'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/TemporalMtlsIT.java'
+  'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkflowReplayTest.java'
+  'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationProbeServer.java'
+  'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationWorkerChildMain.java'
+  'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/ReconciliationCrashRecoveryIT.java'
+  'apps/control-plane/worker/src/test/resources/temporal/reconciliation-workflow-v1.json'
+  'apps/control-plane/worker/src/test/resources/temporal/reconciliation-workflow-v1.provenance.json'
+  'gradle/libs.versions.toml'
+  'gradle/verification-metadata.xml'
+)
+git add -- $task10Paths
+git diff --cached --name-only
+git commit -m "feat: prove durable Temporal reconciliation"
+~~~
+
+Expected: the safe-scope staging set plus `$task10Paths` equal the declared Task 10 files exactly.
+Temporal resolves at `1.28.1`, Bouncy Castle `1.81` is test-only, strict resolution makes no
+second metadata/lock change, `temporalio/server:1.28.1` resolves to the actual provenance digest, all
+TLS, boundary, replay, and crash tests pass, the two staging manifests jointly match the declared
+Task 10 list exactly, history contains no
+lease/capability/Provider fact, and mutation count is zero in every
+activity-executing test. Registry resolution failure remains non-GREEN.
+
+### Task 11: Build The GitLab 19.1-First Isolated Webhook Edge
+
+**Goal:** Authenticate GitLab 19.1 Standard Webhooks over exact raw bytes, allow an explicit and
+strict legacy-token migration path, normalize only closed metadata, and atomically persist an edge
+inbox plus outbox in a separately permissioned PostgreSQL database.
 
 **Files:**
 - Create: `contracts/events/provider-webhook-signal.schema.json`
-- Create: `contracts/golden-fixtures/webhooks/github-push.signal.json`
+- Create: `contracts/golden-fixtures/webhooks/gitlab-19.1-push.signal.json`
 - Create: `database/webhook-edge/bootstrap/00-pre-flyway-roles.sql`
-- Create: `database/webhook-edge/migrations/V001__webhook_delivery.sql`
-- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhook/WebhookEdgeApplication.java`
-- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhook/Binding.java`
-- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhook/ProviderWebhookSignal.java`
-- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhook/RecordOutcome.java`
-- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhook/BindingResolver.java`
-- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhook/SignalStore.java`
-- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhook/FileBindingResolver.java`
-- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhook/PostgresSignalStore.java`
-- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhook/WebhookController.java`
+- Create: `database/webhook-edge/migrations/V001__webhook_inbox_outbox.sql`
+- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/WebhookEdgeApplication.java`
+- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/binding/WebhookVerificationMode.java`
+- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/binding/WebhookBinding.java`
+- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/binding/BindingResolver.java`
+- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/binding/FileBindingResolver.java`
+- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/security/GitLabWebhookHeaders.java`
+- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/security/GitLabStandardWebhookVerifier.java`
+- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/security/GitLabLegacyTokenVerifier.java`
+- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/security/GitLabWebhookVerifier.java`
+- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/webhook/ProviderWebhookSignal.java`
+- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/webhook/VerifiedGitLabWebhook.java`
+- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/webhook/WebhookRecordOutcome.java`
+- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/webhook/WebhookInbox.java`
+- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/webhook/WebhookHandler.java`
+- Create: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/inbox/PostgresWebhookInbox.java`
 - Create: `apps/webhook-edge/src/main/resources/application.yml`
-- Create: `apps/webhook-edge/src/test/java/com/inforvans/accord/webhook/WebhookDatabaseFixture.java`
-- Create: `apps/webhook-edge/src/test/java/com/inforvans/accord/webhook/WebhookControllerTest.java`
-- Create: `apps/webhook-edge/src/test/java/com/inforvans/accord/webhook/PostgresSignalStoreTest.java`
+- Create: `apps/webhook-edge/src/test/java/com/inforvans/accord/webhookedge/security/GitLabWebhookVerifierTest.java`
+- Create: `apps/webhook-edge/src/test/java/com/inforvans/accord/webhookedge/webhook/WebhookHandlerTest.java`
+- Create: `apps/webhook-edge/src/test/java/com/inforvans/accord/webhookedge/inbox/WebhookDatabaseFixture.java`
+- Create: `apps/webhook-edge/src/test/java/com/inforvans/accord/webhookedge/inbox/PostgresWebhookInboxTest.java`
+- Create: `apps/webhook-edge/src/test/java/com/inforvans/accord/webhookedge/WebhookEdgeBoundaryTest.java`
 - Modify: `apps/webhook-edge/build.gradle`
-- Modify: `settings.gradle`
+- Modify: `apps/webhook-edge/gradle.lockfile`
+- Modify: `gradle/verification-metadata.xml`
 
-- [ ] **Step 1: Write failing verify-first, size-limit, and deduplication tests**
+`settings.gradle` already includes `:apps:webhook-edge`; do not edit it. The package root is
+`com.inforvans.accord.webhookedge`, matching the downstream Git Delivery plan. The edge must not
+depend on `apps/control-plane/modules/**`, `database:control-plane`, control-plane test fixtures, or
+a generated control-plane database package.
 
-`WebhookControllerTest` must use a fixed `Clock`, a fixed server-side binding, and a recording store. Add these tests before production code:
+**Authoritative invariants:**
 
-1. Two correctly signed deliveries with the same tenant, immutable repository ID, delivery ID, and digest return 202 while the store records one logical signal.
-2. A wrong signature over syntactically invalid JSON returns 401, not 400, and the store receives no call. This proves verification precedes JSON parsing.
-3. A valid signature whose body repository ID differs from the binding returns 403 and writes nothing.
-4. A request larger than 2 MiB returns 413 without parsing or persistence.
-5. Missing provider identity headers return 400; a reused delivery ID with a changed raw-body digest returns 409.
-6. The normalized signal contains only the allowlisted schema fields and never the raw body, source archive, diff, authorization header, or secret.
+1. `STANDARD_REQUIRED` is the default. Standard verification decodes the configured signing token
+   by removing `whsec_`, Base64-decoding 24-64 key bytes, and computing HMAC-SHA256 over
+   `{webhook-id}.{webhook-timestamp}.{exact raw body}`.
+2. `webhook-signature` is a space-delimited list. Accept at most eight well-formed `v1,<base64>`
+   candidates, decode each to exactly 32 bytes, compare every candidate in constant time, and accept
+   if at least one matches. Unknown versions do not match.
+3. The allowed timestamp skew is exactly five minutes in either direction using an injected UTC
+   `Clock`. Missing, duplicated, non-decimal, non-canonical, overflowed, stale, or future timestamps
+   fail authentication before JSON parsing and persistence.
+4. If any `webhook-signature` value is present, Standard verification is mandatory. A malformed,
+   stale, untrusted, or mismatched signature never falls back to `X-Gitlab-Token`, even if that token
+   is valid.
+5. Legacy comparison is allowed only when the signature header is completely absent and the
+   server-side binding mode is `LEGACY_ALLOWED`. The legacy header must occur exactly once and is
+   compared to the configured secret in constant time. Request data cannot select the mode.
+6. Read at most 2 MiB plus one byte. Size rejection occurs before verification; verification occurs
+   before JSON parsing; immutable repository identity validation occurs before persistence.
+7. The edge persists only bounded identifiers, event/ref/SHA metadata, raw-body SHA-256, timestamps,
+   and the closed normalized signal. It never persists or logs the raw body, header map, URL,
+   hostname, token, signature, commit message, author data, source, archive, or diff.
+8. The first accepted delivery inserts one inbox row and one outbox row in one transaction. An
+   identical retry returns the original acceptance with no second outbox row. Reusing a webhook ID
+   with a different body digest returns `409` and does not change either stored row.
 
-The request helper computes `HmacSHA256` over the exact request bytes and sends `X-Hub-Signature-256: sha256=<lowercase hex>`. Run:
+- [ ] **Step 1: Write RED Standard Webhooks and downgrade-matrix tests**
 
-~~~bash
-./gradlew :apps:webhook-edge:test --tests '*WebhookControllerTest'
+Create `GitLabWebhookVerifierTest.java` with fixed raw UTF-8 bytes, a fixed clock, one `whsec_`
+signing token, and a distinct legacy token. Cover:
+
+- exact HMAC success, raw-byte mutation failure, and valid signatures in first/middle/last position;
+- malformed prefix, invalid Base64, decoded length other than 32, more than eight candidates, and no
+  matching `v1` candidate;
+- missing/duplicate `webhook-id`, timestamp, signature, and legacy header values;
+- timestamp at exactly minus/plus five minutes succeeds; one second outside either bound fails;
+- an omitted binding mode defaults to `STANDARD_REQUIRED` and cannot use a valid legacy token;
+- `STANDARD_REQUIRED` plus no signature fails even with a valid legacy token;
+- `LEGACY_ALLOWED` plus no signature and valid legacy token succeeds;
+- any present invalid signature plus valid legacy token fails without invoking the legacy verifier;
+- constant-time comparison receives all eligible candidates rather than stopping at the first match.
+
+Use these closed modes:
+
+~~~java
+public enum WebhookVerificationMode {
+    STANDARD_REQUIRED,
+    LEGACY_ALLOWED
+}
 ~~~
 
-Expected: FAIL because the Java binding, controller, signal, and store contracts do not exist.
+Run:
 
-- [ ] **Step 2: Define the closed normalized signal contract**
+~~~powershell
+./gradlew.bat :apps:webhook-edge:test --tests '*GitLabWebhookVerifierTest' --no-daemon
+~~~
 
-Create `provider-webhook-signal.schema.json`:
+Expected RED: the binding and verifier types are absent.
+
+- [ ] **Step 2: Implement strict GitLab 19.1 verification**
+
+`GitLabStandardWebhookVerifier` owns signing-token decoding, canonical timestamp validation,
+signature-list parsing, exact message construction, HMAC, and constant-time comparisons.
+`GitLabLegacyTokenVerifier` owns only the single-header constant-time token comparison.
+`GitLabWebhookVerifier` chooses the path from server-side `WebhookBinding`: signature present means
+Standard; signature absent plus `LEGACY_ALLOWED` means legacy; all other combinations fail with one
+normalized authentication error code.
+
+`FileBindingResolver` reloads a read-only projected JSON file and accepts only binding ID, tenant
+UUID, immutable repository ID, verification mode, signing token, and legacy token. It rejects an
+unknown field, duplicate binding ID, invalid token shape, `STANDARD_REQUIRED` without a signing
+token, or `LEGACY_ALLOWED` without a legacy token. A missing mode becomes `STANDARD_REQUIRED`; only
+the explicit `LEGACY_ALLOWED` value enables legacy comparison. It never returns token text from
+`toString`, an exception, or an actuator value.
+
+Run the focused verifier test again. Expected GREEN: the complete Standard and downgrade matrix
+passes with no JSON parser or database dependency.
+
+- [ ] **Step 3: Write RED verify-before-parse and normalization tests**
+
+Create `WebhookHandlerTest.java` with a recording inbox and parser. Prove:
+
+- wrong signature over invalid JSON returns `401`, parser calls `0`, inbox calls `0`;
+- 2 MiB succeeds when signed; 2 MiB plus one byte returns `413` before verifier/parser/store calls;
+- valid signature plus malformed JSON returns `400` and stores nothing;
+- body project ID different from the binding returns `403` and stores nothing;
+- accepted GitLab push stores only provider `gitlab`, immutable repository ID, `webhook-id`,
+  `X-Gitlab-Event`, `ref`, `before`, `after`, body digest, and observed time;
+- payload URLs, commit arrays/messages/authors, user data, and unknown JSON fields never enter the
+  normalized signal;
+- duplicate/smuggled identity headers and a disagreement between `webhook-id` and
+  `Idempotency-Key` fail before persistence;
+- captured application logs for accepted and rejected requests contain none of the raw-body sentinel,
+  URL, commit message, author, signing token, legacy token, signature, or header-map values.
+
+`WebhookHandler` reads the servlet stream once into a bounded byte array, resolves the binding,
+verifies, parses with a duplicate-key-rejecting Jackson mapper, checks the immutable project ID, and
+then calls `WebhookInbox.record`. It returns `202` for accepted/identical duplicate and `409` for a
+digest conflict.
+
+Run:
+
+~~~powershell
+./gradlew.bat :apps:webhook-edge:test --tests '*WebhookHandlerTest' --no-daemon
+~~~
+
+Expected GREEN after implementation: verification always precedes parsing, and parsing always
+precedes the single persistence call.
+
+- [ ] **Step 4: Define and validate the closed normalized signal**
+
+Create `provider-webhook-signal.schema.json` as JSON Schema 2020-12 with
+`additionalProperties: false`. Require exactly `schema_version`, `tenant_id`, `scope_type`,
+`scope_id`, `provider`, `immutable_repository_id`, `delivery_id`, `event_type`, `body_digest`, and
+`observed_at`; allow optional nullable `ref`, `before_sha`, and `after_sha`. Fix `schema_version` to
+`1.0.0`, `scope_type` to `repository`, provider to `gitlab`, digests to lowercase
+`sha256:<64 hex>`, and SHAs to lowercase 40-64 hex.
+
+Create `gitlab-19.1-push.signal.json` with fixed UUIDs, repository ID `77831`, delivery UUID,
+`Push Hook`, `refs/heads/main`, fixed before/after SHAs, digest, and UTC timestamp. The fixture is the
+normalized signal only.
+
+Run:
+
+~~~powershell
+corepack pnpm exec ajv validate --spec=draft2020 -s contracts/events/provider-webhook-signal.schema.json -d contracts/golden-fixtures/webhooks/gitlab-19.1-push.signal.json
+~~~
+
+Expected: PASS. Adding `url`, `commits`, `message`, `token`, `headers`, or `raw_body` to a negative
+copy fails schema validation.
+
+- [ ] **Step 5: Write RED isolated database, RLS, and atomicity tests**
+
+`WebhookDatabaseFixture` starts PostgreSQL 17.5, applies the edge bootstrap as container
+administrator, migrates as `accord_webhook_migrator_login` after `SET ROLE accord_webhook_owner`,
+and opens runtime connections as `accord_webhook_runtime_login` after
+`SET ROLE accord_webhook_runtime`. It imports no control-plane fixture.
+
+Create `PostgresWebhookInboxTest.java` and prove:
+
+- one accepted request creates exactly one inbox and one outbox row;
+- failure injected after inbox insert but before outbox insert rolls both back;
+- 32 simultaneous identical deliveries converge to one inbox/outbox pair;
+- same natural key plus changed digest returns conflict and preserves original bytes;
+- tenant A cannot read, collide with, or mutate tenant B rows;
+- missing transaction-local tenant context reads zero and cannot insert;
+- runtime has only `SELECT, INSERT`, cannot update/delete/truncate/own/bypass RLS/set owner role;
+- catalog and JSON scans find no raw body, URL, header, token, signature, credential, commit message,
+  author, source, archive, or diff field.
+
+Run the focused test. Expected RED: bootstrap, V001, and `PostgresWebhookInbox` are absent.
+
+- [ ] **Step 6: Add V001 inbox/outbox and one atomic store**
+
+`V001__webhook_inbox_outbox.sql` creates `webhook_inbox` keyed by
+`(tenant_id, provider, immutable_repository_id, webhook_id)` and `webhook_outbox` keyed by
+`(tenant_id, signal_id)` with a unique foreign-key-backed natural key to the inbox. The inbox stores
+body digest, event type, and receive time; the outbox stores schema version, closed signal JSON, and
+creation time. Both tables use bounded text/JSON constraints, forced tenant RLS, the single
+canonical policy, owner `accord_webhook_owner`, and exact runtime `SELECT, INSERT` grants. Neither
+table has an UPDATE/DELETE runtime path.
+
+`PostgresWebhookInbox.record` installs and verifies transaction-local tenant context, inserts the
+inbox, inserts the outbox only for the winning inbox insert, and handles uniqueness conflicts by
+locking and comparing the existing digest. Serialization happens before SQL. Any exception rolls
+back both inserts.
+
+Run:
+
+~~~powershell
+./gradlew.bat :apps:webhook-edge:test --tests '*PostgresWebhookInboxTest' --no-daemon
+~~~
+
+Expected GREEN: role, RLS, atomicity, concurrency, digest-conflict, and no-sensitive-column tests
+all pass against only the edge database.
+
+- [ ] **Step 7: Configure and verify the isolated executable artifact**
+
+Use Spring Boot web, actuator, jOOQ, Jackson, and PostgreSQL dependencies only. Package edge
+bootstrap/migrations into the test resources from `database/webhook-edge`; do not add a Gradle
+project dependency on any control-plane module or database fixture. Configure Flyway disabled at
+runtime, the edge runtime login/session role, required binding-file path, actuator probes, and no
+Provider content credential property.
+
+`WebhookEdgeBoundaryTest` must scan main/test imports, runtime coordinates, and the boot jar. It
+rejects `com.inforvans.accord.reliability`, `com.inforvans.accord.database`, any
+`:apps:control-plane` project dependency, Git SDK/client libraries, and raw-body fixture resources in
+the executable artifact.
+
+Run:
+
+~~~powershell
+./gradlew.bat :apps:webhook-edge:dependencies --write-locks --no-configuration-cache --no-daemon --dependency-verification=strict
+./gradlew.bat resolveAndLockAll --write-verification-metadata sha256,pgp --no-configuration-cache --no-daemon
+./gradlew.bat :apps:webhook-edge:check :apps:webhook-edge:bootJar --no-daemon --dependency-verification=strict
+corepack pnpm exec ajv validate --spec=draft2020 -s contracts/events/provider-webhook-signal.schema.json -d contracts/golden-fixtures/webhooks/gitlab-19.1-push.signal.json
+git diff --check
+~~~
+
+Expected: the executable is independently deployable, contains no control-plane package, accepts
+only authenticated bounded GitLab metadata, and persists no raw request material.
+
+- [ ] **Step 8: Commit the isolated GitLab edge**
+
+~~~powershell
+$task11Paths = @(
+  'contracts/events/provider-webhook-signal.schema.json'
+  'contracts/golden-fixtures/webhooks/gitlab-19.1-push.signal.json'
+  'database/webhook-edge/bootstrap/00-pre-flyway-roles.sql'
+  'database/webhook-edge/migrations/V001__webhook_inbox_outbox.sql'
+  'apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/WebhookEdgeApplication.java'
+  'apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/binding/WebhookVerificationMode.java'
+  'apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/binding/WebhookBinding.java'
+  'apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/binding/BindingResolver.java'
+  'apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/binding/FileBindingResolver.java'
+  'apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/security/GitLabWebhookHeaders.java'
+  'apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/security/GitLabStandardWebhookVerifier.java'
+  'apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/security/GitLabLegacyTokenVerifier.java'
+  'apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/security/GitLabWebhookVerifier.java'
+  'apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/webhook/ProviderWebhookSignal.java'
+  'apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/webhook/VerifiedGitLabWebhook.java'
+  'apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/webhook/WebhookRecordOutcome.java'
+  'apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/webhook/WebhookInbox.java'
+  'apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/webhook/WebhookHandler.java'
+  'apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/inbox/PostgresWebhookInbox.java'
+  'apps/webhook-edge/src/main/resources/application.yml'
+  'apps/webhook-edge/src/test/java/com/inforvans/accord/webhookedge/security/GitLabWebhookVerifierTest.java'
+  'apps/webhook-edge/src/test/java/com/inforvans/accord/webhookedge/webhook/WebhookHandlerTest.java'
+  'apps/webhook-edge/src/test/java/com/inforvans/accord/webhookedge/inbox/WebhookDatabaseFixture.java'
+  'apps/webhook-edge/src/test/java/com/inforvans/accord/webhookedge/inbox/PostgresWebhookInboxTest.java'
+  'apps/webhook-edge/src/test/java/com/inforvans/accord/webhookedge/WebhookEdgeBoundaryTest.java'
+  'apps/webhook-edge/build.gradle'
+  'apps/webhook-edge/gradle.lockfile'
+  'gradle/verification-metadata.xml'
+)
+git add -- $task11Paths
+git diff --cached --name-only
+git commit -m "feat: add GitLab Standard Webhook edge"
+~~~
+
+Expected: the staged set contains no control-plane file and no raw webhook body; the edge database
+commit is independent from Tasks 10 and 12.
+
+### Task 12: Dispatch Reliable Messages With Fair Permits And Durable Receipts
+
+**Goal:** Add control-plane V004 and a non-web `control-worker` runtime that schedules tenants
+fairly, acquires a tenant permit before any message lease, enforces complete database-time fences,
+persists receipts around every effect, drains cleanly, and deletes only expired completed
+idempotency results.
+
+**Files:**
+- Create: `database/control-plane/migrations/V004__reliability_coordination_and_fences.sql`
+- Create: `database/control-plane/src/test/java/com/inforvans/accord/database/ReliabilityCoordinationMigrationTest.java`
+- Modify: `apps/control-plane/modules/reliability/build.gradle`
+- Modify: `apps/control-plane/modules/reliability/gradle.lockfile`
+- Modify: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReliableEventStore.java`
+- Modify: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/ReliableEventStoreTest.java`
+- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/TenantWorkPermit.java`
+- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/MessageFence.java`
+- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/LeasedEvent.java`
+- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/LeasedInboxMessage.java`
+- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/DeliveryReceipt.java`
+- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/HandlerReceipt.java`
+- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/TenantWorkRepository.java`
+- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/OutboxRepository.java`
+- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/InboxRepository.java`
+- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/EventTransport.java`
+- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/TransactionalInboxHandler.java`
+- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/OutboxDispatcher.java`
+- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/InboxDispatcher.java`
+- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/IdempotencyResultCleaner.java`
+- Create: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/TenantWorkRepositoryTest.java`
+- Create: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/MessageFenceProperties.java`
+- Create: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/OutboxDispatcherTest.java`
+- Create: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/InboxDispatcherTest.java`
+- Create: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/IdempotencyResultCleanerTest.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/WorkerReliabilityProperties.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/WorkerScheduling.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/WorkerDrainCoordinator.java`
+- Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/WorkerSchedulingTest.java`
+- Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/WorkerDrainCoordinatorTest.java`
+- Modify: `apps/control-plane/worker/build.gradle`
+- Modify: `apps/control-plane/worker/gradle.lockfile`
+- Modify: `apps/control-plane/worker/src/main/resources/application.yml`
+- Modify: `gradle/verification-metadata.xml`
+
+Task 9 owns `V003__foundation_http_reliability.sql`; Task 12 must not rename, edit, or duplicate it.
+V004 migrates a database that already contains V001, FT8 V002, and Task 9 V003. Task 10 must be
+committed before the Task 12 worker files are changed, because both tasks own the worker build,
+lock, YAML, and lifecycle ordering. Task 12 reuses Task 10's datasource, jOOQ, PostgreSQL,
+`WorkerTenantTransactions`, and production fenced reconciliation wiring; it neither adds duplicate
+database dependencies nor alters Task 10 TLS/fence semantics.
+
+**Authoritative invariants:**
+
+1. `reliability_tenant_work` is the sole unscoped cross-tenant scheduling directory. It contains
+   tenant UUID, readiness/fairness timestamps, and permit fence fields only. API can signal only its
+   transaction tenant through a parameter-free security-definer function; API cannot read or
+   mutate the table directly.
+2. Fair acquisition orders ready tenants by `last_granted_at NULLS FIRST`, then `available_at`, then
+   tenant UUID, and uses `FOR UPDATE SKIP LOCKED`. Finishing a bounded turn updates
+   `last_granted_at`, so a continuously hot tenant cannot starve another ready tenant.
+3. A live `TenantWorkPermit` is acquired before transaction-local tenant context is installed for a
+   message operation and before any outbox/inbox query or lease. No code path scans message tables
+   to discover a tenant.
+4. Tenant permit and message fences each contain owner, monotonically increasing generation, opaque
+   UUID token, and exact database deadline. Acquire, renew, receipt, acknowledge, fail, reschedule,
+   release, and takeover compare tenant/natural key, state, owner, generation, token, exact prior
+   deadline, and `deadline > clock_timestamp()` where the operation requires a live lease.
+5. V004 drops the V002 all-update-blocking triggers only while replacing them with strict outbox and
+   inbox transition guards. Runtime receives column-level UPDATE grants for lifecycle columns only;
+   it receives no table ownership, trigger bypass, TRUNCATE, or message DELETE privilege.
+6. Outbox leasing commits before `EventTransport.deliver`. The Provider/downstream call runs with no
+   JDBC transaction open. A successful call returns a bounded `DeliveryReceipt`; the worker commits
+   that receipt under the full fence before a separate fenced acknowledgement. Recovery with a
+   valid stored receipt acknowledges without another external call. A crash after external success
+   but before receipt persistence relies on the event ID downstream idempotency key.
+7. `TransactionalInboxHandler.handle(DSLContext, LeasedInboxMessage)` performs database/domain work
+   only. Handler domain mutations, domain event, outbox, handler receipt, and `COMPLETED` transition
+   commit in one tenant transaction under the full permit/message fences. A fence loss or any
+   exception rolls all of them back. No network call occurs inside this transaction.
+8. Worker shutdown first rejects new permits and makes readiness false, then drains bounded in-flight
+   work while renewing live fences when needed, then releases unstarted work, and only afterward
+   stops Task 10 Temporal polling and infrastructure. It never acknowledges an interrupted,
+   expired, or unreceipted effect.
+9. Worker has no direct `DELETE` on `idempotency_result`. A bounded security-definer function uses
+   database time and the installed tenant context to delete only rows with `state='COMPLETED' AND
+   expires_at < clock_timestamp()`. It never deletes `STARTED`, regardless of lease or expiry.
+
+- [ ] **Step 1: Write RED V004 migration and privilege tests**
+
+Create `ReliabilityCoordinationMigrationTest.java`. Migrate explicitly through V003, then V004, and
+assert:
+
+- Flyway history contains successful V001, V002, V003, V004 in order with one row per version;
+- V002 checksums are unchanged;
+- `reliability_tenant_work`, `outbox_delivery_receipt`, and `inbox_handler_receipt` have exact
+  columns, keys, bounded constraints, ownership, and indexes;
+- V002 `outbox_v002_immutable` and `inbox_v002_immutable` are absent, and exactly one named V004
+  transition trigger protects each message table;
+- outbox/inbox include independent `lease_generation`, `lease_token`, owner, and deadline fields;
+- receipt tables are forced-RLS and append-only;
+- worker has exact SELECT/INSERT plus lifecycle-column UPDATE grants and no message DELETE;
+- worker direct DELETE on `idempotency_result` is revoked and only the bounded cleanup function is
+  executable;
+- API can execute tenant work signal but has no direct tenant-directory or receipt-table grant.
+
+Run:
+
+~~~powershell
+./gradlew.bat :database:control-plane:test --tests '*ReliabilityCoordinationMigrationTest' --no-daemon
+~~~
+
+Expected RED: V004 and all coordination/receipt objects are absent.
+
+- [ ] **Step 2: Add V004 state machines, permits, receipts, and cleanup authority**
+
+`V004__reliability_coordination_and_fences.sql` must perform these operations in this order:
+
+1. Set bounded lock and statement timeouts and assert V003's `contract_validation` table exists.
+2. Add message generation/token columns and constraints without changing V002 data meaning.
+3. Create the payload-free fair tenant directory and its ready/fairness index.
+4. Create append-only outbox delivery and inbox handler receipt tables with tenant-first foreign
+   keys and one receipt per message natural key.
+5. Drop the two V002 immutable message triggers and install strict transition functions/triggers.
+6. Apply forced tenant RLS to both receipt tables before grants.
+7. Revoke all table privileges, then grant only the exact API/worker matrix.
+8. Revoke worker `DELETE` on `idempotency_result`; create the bounded completed-result cleanup
+   function with fixed search path and grant only its execution.
+
+The cleanup function accepts `batch_size` in `1..500`, selects the current tenant's eligible rows in
+`expires_at`/primary-key order with `FOR UPDATE SKIP LOCKED`, deletes by the selected primary keys,
+and returns the deleted count. Its SQL predicate contains both `state='COMPLETED'` and
+`expires_at < clock_timestamp()`; there is no predicate branch for `STARTED`.
+
+The outbox guard permits only `PENDING -> DELIVERING`, expired `DELIVERING -> DELIVERING` takeover,
+live `DELIVERING -> DELIVERING` deadline extension, `DELIVERING -> PENDING`, `DELIVERING -> DEAD`,
+and receipted `DELIVERING -> DELIVERED`. The inbox guard permits the corresponding
+`PENDING/PROCESSING/DEAD/COMPLETED` transitions and requires a matching handler receipt before
+`COMPLETED`. Terminal rows cannot be reopened or deleted.
+
+Run the focused migration test again. Expected GREEN: exact catalog, state-machine, RLS, grant, and
+cleanup-authority assertions pass.
+
+- [ ] **Step 3: Write RED fair permit-first and complete-fence tests**
+
+Create `TenantWorkRepositoryTest.java` using worker login/role for runtime SQL. Prove:
+
+- three ready tenants are granted in round-robin fairness order even when tenant A is continuously
+  re-signaled;
+- 32 concurrent workers claim disjoint live permits with `SKIP LOCKED`;
+- takeover increments generation and changes token even when owner text is reused;
+- old owner/generation/token/deadline cannot renew, release, reschedule, or lease a message;
+- API signal derives tenant from transaction context and cannot name or inspect another tenant;
+- an SQL listener fails the test if outbox/inbox is touched before a live permit is acquired and
+  the exact tenant context is installed.
+
+Create `MessageFenceProperties.java` with jqwik properties for positive bounded durations,
+monotonic generation, token replacement, exact-deadline comparison, deterministic retry jitter,
+backoff cap, and stale-fence rejection.
+
+Run:
+
+~~~powershell
+./gradlew.bat :apps:control-plane:modules:reliability:test --tests '*TenantWorkRepositoryTest' --tests '*MessageFenceProperties' --no-daemon
+~~~
+
+Expected RED: permit/fence records and repositories are absent.
+
+- [ ] **Step 4: Implement fair permits and fenced message repositories**
+
+Use these immutable fence shapes:
+
+~~~java
+public record MessageFence(
+    String owner,
+    long generation,
+    UUID token,
+    OffsetDateTime leaseUntil
+) {}
+
+public record TenantWorkPermit(
+    UUID tenantId,
+    MessageFence fence
+) {}
+~~~
+
+`TenantWorkRepository.acquire` uses one atomic CTE ordered by fairness fields and computes deadline
+from `clock_timestamp()`. `OutboxRepository.lease` and `InboxRepository.lease` require a
+`TenantWorkPermit`, install and verify its tenant context as the first SQL in a new transaction,
+revalidate the live permit, then lease at most the configured batch size. No repository owns a pool
+or opens a connection.
+
+All lifecycle SQL uses database time. JVM `Clock` may format telemetry but cannot calculate a lease,
+expiry decision, retry eligibility, or cleanup eligibility.
+
+Run the focused permit/property tests. Expected GREEN: fair ordering, permit-first SQL order,
+database-time deadlines, and every stale-fence case pass.
+
+- [ ] **Step 5: Write RED durable outbox receipt and crash-cut tests**
+
+Create `OutboxDispatcherTest.java` with a counting idempotent transport. Inject failures at these
+boundaries:
+
+| Boundary | Required recovery |
+| --- | --- |
+| before external call | no receipt, retry may call once |
+| external success before receipt commit | no receipt; retry uses the same event ID idempotency key |
+| receipt commit before acknowledgement | retry reads receipt, makes zero new external calls, then acknowledges |
+| acknowledgement commit | terminal delivered row and one immutable receipt |
+| stale fence during receipt | receipt and acknowledgement both absent |
+| stale fence after stored receipt | new owner may acknowledge the verified receipt without calling transport |
+
+Also prove transport timeout is shorter than the message lease, retries are bounded, terminal
+`DEAD` occurs exactly once, and receipt IDs/digests/error codes are bounded and contain no payload,
+URL, credential, or exception message.
+
+Run the focused test. Expected RED: receipt repository operations and dispatcher do not exist.
+
+- [ ] **Step 6: Implement transaction-free delivery and receipt-before-ack**
+
+Define `EventTransport.deliver(LeasedEvent)` to return `DeliveryReceipt` and require the event UUID as
+the downstream idempotency key. `OutboxDispatcher` executes exactly:
+
+1. inspect for an existing valid receipt;
+2. if absent, call transport with no transaction open;
+3. persist the returned receipt in its own tenant transaction under both live fences;
+4. acknowledge in a later tenant transaction under the current full fences and exact receipt digest;
+5. release/reschedule the tenant permit to the earliest ready message time.
+
+Failure normalization stores only a closed uppercase error code. Unknown destinations fail closed
+through the same retry/dead policy.
+
+Run `OutboxDispatcherTest`. Expected GREEN: every crash boundary converges to one receipt, one
+terminal acknowledgement, and the minimum external call count permitted by the crash location.
+
+- [ ] **Step 7: Write RED atomic inbox handler tests**
+
+Create `InboxDispatcherTest.java` with a transactional handler that inserts one aggregate row,
+appends one domain event/outbox pair through `ReliableEventStore`, and returns a deterministic
+`HandlerReceipt`. Prove:
+
+- handler write, domain event, outbox, receipt, and `COMPLETED` commit together;
+- injected failure after each write rolls back all five effects;
+- lost tenant permit or message fence at completion rolls back handler business writes;
+- a crash after commit replays as the stored receipt and does not call the handler again;
+- digest/schema mismatch and unknown handler fail before business writes and follow retry/dead policy;
+- handler attempts network access through the test guard fail the handler and roll back;
+- colliding natural keys in two tenants never share receipt or business effects.
+
+Use this handler boundary:
+
+~~~java
+@FunctionalInterface
+public interface TransactionalInboxHandler {
+    HandlerReceipt handle(DSLContext tx, LeasedInboxMessage message);
+}
+~~~
+
+Run the focused test. Expected RED: transactional handler registry, receipt persistence, and atomic
+completion do not exist.
+
+- [ ] **Step 8: Implement atomic inbox processing and work signaling**
+
+`InboxDispatcher` validates stored digest and schema before opening the handler transaction. Inside
+one transaction it revalidates both fences, invokes the selected local handler, appends the handler
+receipt, marks the inbox `COMPLETED`, and signals/reschedules tenant work. The final fenced update is
+the last SQL statement; a changed row count other than one throws and rolls back the transaction.
+
+Modify `ReliableEventStore.append` and the accepted branch of `acceptInbox` to call the tenant work
+signal function in their existing transaction after message insertion. Duplicate inbox acceptance
+does not emit a second signal unless the existing row is nonterminal and its current availability
+is earlier than the directory value. Extend `ReliableEventStoreTest` to assert that a successful
+append/first inbox acceptance signals exactly once and every rollback or terminal duplicate leaves
+the directory unchanged.
+
+Run `InboxDispatcherTest` plus existing FT8 reliability tests. Expected GREEN: atomic completion,
+replay, schema/digest rejection, tenant isolation, and original append/deduplication behavior pass.
+
+- [ ] **Step 9: Prove bounded completed-only idempotency cleanup**
+
+Create `IdempotencyResultCleanerTest.java` with expired/future `COMPLETED` rows and expired/future,
+live/stale `STARTED` rows in two tenants. Assert a batch of two deletes exactly two eligible rows for
+the installed tenant, repeated calls finish the remaining eligible completed rows, and every
+`STARTED`, future completed, and other-tenant row remains. Test batch sizes `0`, `501`, and negative
+as rejected before deletion, and race cleanup against claim takeover.
+
+`IdempotencyResultCleaner` calls only the V004 function inside an already tenant-scoped worker
+transaction; it contains no direct `DELETE` SQL.
+
+Run the focused test. Expected GREEN after implementation: only expired `COMPLETED` rows are removed
+in bounded batches using database time.
+
+- [ ] **Step 10: Write RED worker selection and drain tests**
+
+Create `WorkerSchedulingTest.java` and `WorkerDrainCoordinatorTest.java`. Prove:
+
+- `accord.process-role=control-worker` creates exactly one tenant poller, outbox dispatcher, inbox
+  dispatcher, cleanup poller, and drain coordinator; API role creates none;
+- duplicate destination or handler keys fail startup; absent adapters install fail-closed handlers;
+- polling never holds more work than configured concurrency and always acquires permit first;
+- drain changes `RUNNING -> QUIESCING -> DRAINED`, rejects new acquisitions immediately, and marks
+  readiness false before waiting;
+- work that completes within the 20-second drain timeout persists receipt/acknowledgement;
+- unstarted leased work is fenced-rescheduled before permit release;
+- work exceeding the deadline is never falsely acknowledged and remains recoverable by expiry;
+- Task 12 drain lifecycle phase `200` stops before Task 10 Temporal lifecycle phase `100` and before
+  datasource shutdown.
+
+Run:
+
+~~~powershell
+./gradlew.bat :apps:control-plane:worker:test --tests '*WorkerSchedulingTest' --tests '*WorkerDrainCoordinatorTest' --no-daemon
+~~~
+
+Expected RED: scheduling properties, conditional beans, and drain lifecycle are absent.
+
+- [ ] **Step 11: Wire bounded scheduling and graceful drain after Task 10**
+
+Reuse the worker datasource/jOOQ/PostgreSQL dependencies and tenant transaction helper already owned
+by Task 10; add only Task 12's scheduling/receipt dependencies without removing Temporal or fenced
+reconciliation dependencies. Bind positive bounded values for poll delay, tenant/message lease,
+transport timeout, batch size, concurrency, max attempts, cleanup batch, and drain timeout. Extend,
+rather than replace, the Task 10 YAML:
+
+~~~yaml
+accord:
+  worker:
+    poll-delay: PT1S
+    tenant-permit-lease: PT30S
+    message-lease: PT30S
+    transport-timeout: PT10S
+    batch-size: 50
+    concurrency: 8
+    max-attempts: 8
+    cleanup-batch-size: 200
+    drain-timeout: PT20S
+~~~
+
+`WorkerDrainCoordinator` is a Spring `SmartLifecycle` at phase `200`. `WorkerScheduling` stops
+scheduling before `WorkerDrainCoordinator` waits for in-flight work.
+During drain, live work may renew its full fences within the remaining grace period; no renewal may
+extend beyond that period. On timeout, cancel local waiting, leave unconfirmed external outcomes
+unacknowledged, and let database leases recover them.
+
+Run the worker selection/drain tests. Expected GREEN: role selection, permit-first polling,
+configuration validation, lifecycle ordering, and bounded drain all pass.
+
+- [ ] **Step 12: Run concurrency, property, fault, and full regression verification**
+
+Run:
+
+~~~powershell
+./gradlew.bat :database:control-plane:test --no-daemon --dependency-verification=strict
+./gradlew.bat :apps:control-plane:modules:reliability:test --no-daemon --dependency-verification=strict
+./gradlew.bat :apps:control-plane:worker:test --no-daemon --dependency-verification=strict
+./gradlew.bat :apps:control-plane:api:test --no-daemon --dependency-verification=strict
+~~~
+
+Expected: V001-V004 migration and checksum checks pass; concurrent workers never share a live
+permit/message; ready tenants make bounded progress; every stale fence fails; outbox crash cuts
+converge through durable receipts; inbox effects are atomic; shutdown leaves no false completion;
+and cleanup never deletes a `STARTED` row.
+
+- [ ] **Step 13: Lock and commit the V004 worker slice**
+
+Refresh only Task 12's affected locks and approved metadata without re-adding Task 10's baseline
+database closure, verify the second resolution is stable, then stage the exact Task 12 paths:
+
+~~~powershell
+./gradlew.bat :apps:control-plane:modules:reliability:dependencies :apps:control-plane:worker:dependencies --write-locks --no-configuration-cache --no-daemon --dependency-verification=strict
+./gradlew.bat resolveAndLockAll --write-verification-metadata sha256,pgp --no-configuration-cache --no-daemon
+./gradlew.bat resolveAndLockAll --no-configuration-cache --no-daemon --dependency-verification=strict
+git diff --check
+$task12Paths = @(
+  'database/control-plane/migrations/V004__reliability_coordination_and_fences.sql'
+  'database/control-plane/src/test/java/com/inforvans/accord/database/ReliabilityCoordinationMigrationTest.java'
+  'apps/control-plane/modules/reliability/build.gradle'
+  'apps/control-plane/modules/reliability/gradle.lockfile'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReliableEventStore.java'
+  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/ReliableEventStoreTest.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/TenantWorkPermit.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/MessageFence.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/LeasedEvent.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/LeasedInboxMessage.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/DeliveryReceipt.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/HandlerReceipt.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/TenantWorkRepository.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/OutboxRepository.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/InboxRepository.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/EventTransport.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/TransactionalInboxHandler.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/OutboxDispatcher.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/InboxDispatcher.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/IdempotencyResultCleaner.java'
+  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/TenantWorkRepositoryTest.java'
+  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/MessageFenceProperties.java'
+  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/OutboxDispatcherTest.java'
+  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/InboxDispatcherTest.java'
+  'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/IdempotencyResultCleanerTest.java'
+  'apps/control-plane/worker/build.gradle'
+  'apps/control-plane/worker/gradle.lockfile'
+  'apps/control-plane/worker/src/main/resources/application.yml'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/WorkerReliabilityProperties.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/WorkerScheduling.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/WorkerDrainCoordinator.java'
+  'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/WorkerSchedulingTest.java'
+  'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/WorkerDrainCoordinatorTest.java'
+  'gradle/verification-metadata.xml'
+)
+git add -- $task12Paths
+git diff --cached --name-only
+git commit -m "feat: dispatch reliable work with durable fences"
+~~~
+
+Expected: V003 remains owned by Task 9 and unchanged; the staged set contains V004 plus reliability
+and worker files only; Task 10 mTLS/replay tests remain green; and Task 13 begins immediately after
+this section.
+
+
+### Task 13: Run One Digest-Locked Local Foundation Topology
+
+**Goal:** Start the Foundation dependencies from one closed image-digest lock, give Temporal
+independent PostgreSQL authority, run a pinned real Temporal server with mandatory frontend mTLS,
+let the UI and worker authenticate with different client certificates, and expose GitLab-first
+Provider facts without using GitHub product semantics.
+
+**Files:**
+- Create: `contracts/capabilities/object-storage-adapter.schema.json`
+- Create: `contracts/supply-chain/image-lock.schema.json`
+- Create: `contracts/verification/check-result.schema.json`
+- Generate: `infra/images/images.lock.json`
+- Create: `infra/local/compose.yaml`
+- Create: `infra/local/postgres/00-roles-and-databases.sql`
+- Create: `infra/local/temporal/server.yaml`
+- Create: `infra/local/temporal/dynamicconfig/development-sql.yaml`
+- Create: `infra/local/minio/normal-runtime-policy.json`
+- Create: `infra/local/minio/quarantine-scanner-policy.json`
+- Create: `infra/local/wiremock/mappings/gitlab-get-project.json`
+- Create: `infra/local/localstack/ready.d/10-create-kms-key.sh`
+- Create: `infra/local/otel-collector.yaml`
+- Create: `infra/local/object-storage-capabilities.json`
+- Create: `scripts/verification/check-result.mjs`
+- Create: `scripts/verification/preflight.mjs`
+- Create: `scripts/images/lock-images.mjs`
+- Create: `scripts/images/render-compose-images.mjs`
+- Create: `scripts/images/verify-images.mjs`
+- Create: `scripts/local-up.mjs`
+- Create: `scripts/local-down.mjs`
+- Create: `scripts/local-up.ps1`
+- Create: `scripts/local-down.ps1`
+- Create: `tests/integration/image-lock.test.mjs`
+- Create: `tests/integration/local-foundation.test.mjs`
+- Create: `tests/integration/temporal-mtls.test.mjs`
+- Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/LocalTemporalPki.java`
+- Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/TemporalLocalTopologyIT.java`
+- Modify: `.tool-versions`
+- Modify: `apps/control-plane/worker/build.gradle`
+- Modify: `.gitignore`
+
+`infra/images/images.lock.json` is the only image lock in the repository. There is no
+`infra/local/images.lock.json`, `infra/images/base-images.lock.json`, second platform lock, or
+workflow-owned digest list. Task 13 owns its schema, initial resolution, and maintenance command.
+Task 16 consumes the same bytes when it renders Dockerfiles and never creates another lock.
+
+**Authoritative invariants:**
+
+1. The closed lock has exactly these role keys: `postgres`, `temporal-server`, `temporal-ui`,
+   `minio`, `minio-client`, `wiremock`, `localstack`, `otel-collector`, `java-build`, and
+   `java-runtime`. Each entry contains one reviewed source tag, canonical registry/repository,
+   manifest-list digest, required platform digests, retrieval time, license identifier, and
+   end-of-support date. Every digest is lowercase `sha256:<64 hex>` and is recomputed from fetched
+   manifest bytes.
+2. Compose image values are rendered into ignored `infra/local/state/images.env` from that lock.
+   Every Compose `image` is a required environment expansion and resolves to the exact canonical
+   repository plus locked digest. Dockerfile base entries are already present in the same lock;
+   Task 16 later verifies every effective `FROM` against them. A tag-only, duplicate, extra,
+   unknown-registry, absent-platform, zero, or fabricated digest is a hard failure.
+3. Updating a source tag or digest is an explicit maintenance action. `verify-images.mjs` is
+   read-only and proves exact consumer/lock set equality; ordinary local startup and CI never
+   rewrite the lock.
+4. One local PostgreSQL instance may host separate databases, but Temporal uses only
+   `accord_temporal_schema_login` for schema setup and `accord_temporal_runtime_login` for runtime.
+   Neither identity can connect to `accord`, `accord_webhook`, or `accord_signing`, and no Accord
+   application login can connect to the Temporal or visibility database.
+5. `temporal-server` incorporates Task 10's source coordinate unchanged as exactly
+   `temporalio/server:1.28.1` plus its registry-resolved actual immutable digest. It is a real server,
+   not `auto-setup`, a dev server, an in-process service, or `TestWorkflowEnvironment`. An explicit
+   one-shot schema service prepares `accord_temporal` and `accord_temporal_visibility` and exits
+   successfully before the distinct server starts. A missing actual digest is non-GREEN.
+6. The Temporal frontend on 7233 requires a client certificate signed by the local Temporal client
+   CA and verifies the server name `temporal`. Server, worker, UI, and schema/admin identities use
+   separate keys and Extended Key Usage. Private keys are generated under ignored
+   `infra/local/state/pki` and are never committed, logged, placed in an environment variable, or
+   included in a verdict.
+7. The production Task 10 `TemporalRuntimeConfiguration` is used for the worker success path.
+   Correct worker and UI certificates succeed. Plaintext, no client certificate, a certificate
+   signed by the wrong CA, the wrong server-name/SAN, and a client certificate with the wrong EKU all
+   fail before a namespace or workflow response.
+8. The Git mock models GitLab 19.1 project facts at `/api/v4/projects/77831`. GitHub is only the
+   current host of the Accord source repository and is not a product Provider fixture.
+9. The local MinIO profile proves only its six executable local capabilities and remains
+   `production_eligible: false`. Replication evidence and deletion receipts remain
+   `EXTERNAL_EVIDENCE_REQUIRED`.
+10. Node 22 `.mjs` files own orchestration and spawn native commands with argument arrays and
+    `shell: false`. Windows PowerShell 5.1 files are thin launchers only; they do not parse JSON,
+    inspect native stderr, build command strings, or rely on
+    `PSNativeCommandUseErrorActionPreference`.
+11. Every verification check returns exit 0 for `PASS`, 1 for `FAIL`, or 2 for `BLOCKED` and writes
+     a closed check-result JSON. An absent executable or wrong version is
+     `BLOCKED_TOOLCHAIN`, never a skip or pass.
+12. Task 13 adds exact normalized core pins `docker 29.4.2`, `docker-buildx 0.33.0`, and
+    `git 2.52.0` to `.tool-versions`. Preflight derives requirements only from that lock. A parser may
+    remove a documented vendor wrapper or platform suffix solely to compare the normalized core
+    version, but evidence retains the complete observed version string. A missing pin is itself
+    `BLOCKED_TOOLCHAIN`; no default or script-local version is permitted.
+
+- [ ] **Step 1: Write RED image-lock and check-result contract tests**
+
+Create `image-lock.test.mjs` with Node's test runner, Ajv 2020-12, and `yaml`. It must fail until the
+schema, lock, renderer, and verifier exist. Cover:
+
+- `additionalProperties: false` at the document, image, platform, and evidence levels;
+- exact sorted role-key equality and unique canonical repository/digest tuples;
+- manifest and `linux/amd64` plus `linux/arm64` digests for both Java base entries;
+- required host platform digest for every Compose entry;
+- rejection of a tag-only reference, uppercase/zero digest, mutable alias, duplicate role,
+  duplicate digest under a different repository, unknown registry, and absent platform;
+- structural parsing of `compose.yaml` and exact equality with rendered `images.env`;
+- a repository scan proving the only path matching `images*.lock.json` is
+  `infra/images/images.lock.json`;
+- `verify-images.mjs` leaves the lock, Compose file, and rendered Dockerfiles byte-identical.
+- `.tool-versions` contains exactly the Task 13 core pins `docker 29.4.2`,
+  `docker-buildx 0.33.0`, and `git 2.52.0`; preflight tests cover exact match, allowed wrapper/platform
+  suffix normalization with full observed-version evidence, mismatch, absent executable, and absent
+  pin as `BLOCKED_TOOLCHAIN`.
+
+Create `check-result.schema.json` with this closed shape:
 
 ~~~json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.accord.inforvans.com/events/provider-webhook-signal/1-0-0",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema_version", "tenant_id", "scope_type", "scope_id", "provider",
-    "immutable_repository_id", "delivery_id", "event_type", "body_digest",
-    "observed_at"
-  ],
+  "required": ["schema_version", "check_id", "status", "reason_code", "started_at", "finished_at", "evidence"],
   "properties": {
     "schema_version": { "const": "1.0.0" },
-    "tenant_id": { "type": "string", "format": "uuid" },
-    "scope_type": { "const": "repository" },
-    "scope_id": { "type": "string", "minLength": 1 },
-    "provider": { "const": "github" },
-    "immutable_repository_id": { "type": "string", "minLength": 1 },
-    "delivery_id": { "type": "string", "minLength": 1, "maxLength": 255 },
-    "event_type": { "type": "string", "minLength": 1, "maxLength": 128 },
-    "ref": { "type": ["string", "null"] },
-    "head_sha": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40,64}$" },
-    "body_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-    "observed_at": { "type": "string", "format": "date-time" }
+    "check_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{2,95}$" },
+    "status": { "enum": ["PASS", "FAIL", "BLOCKED"] },
+    "reason_code": {
+      "enum": ["PASS", "ASSERTION_FAILED", "BLOCKED_TOOLCHAIN", "BLOCKED_EXTERNAL_IMAGE_RESOLUTION", "BLOCKED_EXTERNAL_ENVIRONMENT"]
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "evidence": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+      "uniqueItems": true
+    }
   }
 }
 ~~~
 
-Create the golden fixture with repository ID `77831`, a fixed UTC timestamp, and a valid digest. Validate it with AJV. The fixture contains the normalized signal only.
-
-- [ ] **Step 3: Implement verify-first normalization in the independent Java process**
-
-Create one public type per matching file:
-
-~~~java
-// Binding.java
-package com.inforvans.accord.webhook;
-
-import java.util.UUID;
-
-public record Binding(
-    UUID tenantId,
-    String immutableRepositoryId,
-    byte[] secret
-) {
-    public Binding {
-        secret = secret.clone();
-        if (secret.length < 32) {
-            throw new IllegalArgumentException("webhook secret must be at least 256 bits");
-        }
-    }
-
-    @Override
-    public byte[] secret() {
-        return secret.clone();
-    }
-}
-
-// ProviderWebhookSignal.java
-package com.inforvans.accord.webhook;
-
-import com.fasterxml.jackson.annotation.JsonProperty;
-import java.time.OffsetDateTime;
-import java.util.UUID;
-
-public record ProviderWebhookSignal(
-    @JsonProperty("schema_version") String schemaVersion,
-    @JsonProperty("tenant_id") UUID tenantId,
-    @JsonProperty("scope_type") String scopeType,
-    @JsonProperty("scope_id") String scopeId,
-    String provider,
-    @JsonProperty("immutable_repository_id") String immutableRepositoryId,
-    @JsonProperty("delivery_id") String deliveryId,
-    @JsonProperty("event_type") String eventType,
-    String ref,
-    @JsonProperty("head_sha") String headSha,
-    @JsonProperty("body_digest") String bodyDigest,
-    @JsonProperty("observed_at") OffsetDateTime observedAt
-) {}
-
-// RecordOutcome.java
-package com.inforvans.accord.webhook;
-
-public enum RecordOutcome {
-    ACCEPTED,
-    DUPLICATE,
-    DIGEST_CONFLICT
-}
-
-// BindingResolver.java
-package com.inforvans.accord.webhook;
-
-public interface BindingResolver {
-    Binding resolve(String bindingId);
-}
-
-// SignalStore.java
-package com.inforvans.accord.webhook;
-
-public interface SignalStore {
-    RecordOutcome record(ProviderWebhookSignal signal);
-}
-~~~
-
-`WebhookController.java` reads at most 2 MiB plus one byte directly from `HttpServletRequest`. It resolves the binding from server-side configuration, verifies the exact raw bytes in constant time, and only then parses the JSON:
-
-~~~java
-package com.inforvans.accord.webhook;
-
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import jakarta.servlet.http.HttpServletRequest;
-import java.io.IOException;
-import java.security.GeneralSecurityException;
-import java.security.MessageDigest;
-import java.time.Clock;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
-import java.util.HexFormat;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestHeader;
-import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.server.ResponseStatusException;
-
-@RestController
-public final class WebhookController {
-    private static final int MAX_BODY_BYTES = 2 * 1024 * 1024;
-
-    private final BindingResolver bindings;
-    private final SignalStore store;
-    private final ObjectMapper mapper;
-    private final Clock clock;
-
-    public WebhookController(
-            BindingResolver bindings,
-            SignalStore store,
-            ObjectMapper mapper,
-            Clock clock) {
-        this.bindings = bindings;
-        this.store = store;
-        this.mapper = mapper;
-        this.clock = clock;
-    }
-
-    @PostMapping("/webhooks/github/{bindingId}")
-    public ResponseEntity<Void> receive(
-            @PathVariable String bindingId,
-            @RequestHeader("X-Hub-Signature-256") String signature,
-            @RequestHeader("X-GitHub-Delivery") String deliveryId,
-            @RequestHeader("X-GitHub-Event") String eventType,
-            HttpServletRequest request) throws IOException {
-        byte[] body = request.getInputStream().readNBytes(MAX_BODY_BYTES + 1);
-        if (body.length > MAX_BODY_BYTES) {
-            throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE);
-        }
-
-        Binding binding = bindings.resolve(bindingId);
-        if (!validSignature(body, signature, binding.secret())) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED);
-        }
-
-        JsonNode payload = mapper.readTree(body);
-        String repositoryId = payload.path("repository").path("id").asText();
-        if (!binding.immutableRepositoryId().equals(repositoryId)) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN);
-        }
-
-        String bodyDigest;
-        try {
-            bodyDigest = "sha256:" + HexFormat.of().formatHex(
-                MessageDigest.getInstance("SHA-256").digest(body));
-        } catch (GeneralSecurityException error) {
-            throw new IllegalStateException("SHA-256 is unavailable", error);
-        }
-        ProviderWebhookSignal signal = new ProviderWebhookSignal(
-            "1.0.0",
-            binding.tenantId(),
-            "repository",
-            binding.immutableRepositoryId(),
-            "github",
-            binding.immutableRepositoryId(),
-            deliveryId,
-            eventType,
-            nullableText(payload, "ref"),
-            nullableText(payload, "after"),
-            bodyDigest,
-            OffsetDateTime.ofInstant(clock.instant(), ZoneOffset.UTC));
-
-        return switch (store.record(signal)) {
-            case ACCEPTED, DUPLICATE -> ResponseEntity.accepted().build();
-            case DIGEST_CONFLICT -> ResponseEntity.status(HttpStatus.CONFLICT).build();
-        };
-    }
-
-    private static boolean validSignature(
-            byte[] body,
-            String header,
-            byte[] secret) {
-        if (header == null || !header.startsWith("sha256=")) {
-            return false;
-        }
-        try {
-            byte[] supplied = HexFormat.of().parseHex(header.substring(7));
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(secret, "HmacSHA256"));
-            return MessageDigest.isEqual(supplied, mac.doFinal(body));
-        } catch (IllegalArgumentException | GeneralSecurityException error) {
-            return false;
-        }
-    }
-
-    private static String nullableText(JsonNode payload, String name) {
-        JsonNode value = payload.path(name);
-        return value.isMissingNode() || value.isNull() ? null : value.asText();
-    }
-}
-~~~
-
-`FileBindingResolver` re-reads a secret-store-projected JSON file for rotation, rejects unknown IDs and secrets shorter than 32 decoded bytes, and accepts only `tenant_id`, `immutable_repository_id`, and `secret_base64`. The projection is a memory-backed read-only volume and never contains Git content credentials. `WebhookEdgeApplication` supplies `Clock.systemUTC()` and starts only this service.
-
-- [ ] **Step 4: Create isolated database identities and the raw-body-free schema**
-
-The administrator-owned bootstrap creates four principals:
-
-| Principal | Login | Purpose |
-| --- | --- | --- |
-| `accord_webhook_owner` | No | Owns schema, tables, functions, and policies |
-| `accord_webhook_migrator_login` | Yes | Can set only `accord_webhook_owner` |
-| `accord_webhook_runtime` | No | Holds exact runtime table/function privileges |
-| `accord_webhook_runtime_login` | Yes | Can set only `accord_webhook_runtime` |
-
-All four are `NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS`; the login roles have no direct schema/table privileges and no sibling membership. Migration tooling connects as the migrator login then runs `SET ROLE accord_webhook_owner`. The application connects as the runtime login and every physical connection runs `SET ROLE accord_webhook_runtime`.
-
-Create `WebhookDatabaseFixture.java` in the Webhook Edge test source set. It is owned by the edge tests and imports no control-plane test or production package. It loads `/bootstrap/00-pre-flyway-roles.sql` through its class loader, removes only the psql `\\set ON_ERROR_STOP on` meta-command, executes the bootstrap as the Testcontainer administrator, assigns test-only passwords to the two webhook login roles, and runs Flyway from `classpath:migrations` as `accord_webhook_migrator_login` after setting `accord_webhook_owner`. A missing resource, unexpected role name, bootstrap failure, or migration failure aborts the test fixture; no fallback to `user.dir` or a repository-relative path is allowed.
-
-Create `V001__webhook_delivery.sql`:
-
-~~~sql
-SET lock_timeout = '5s';
-SET statement_timeout = '30s';
-
-CREATE TABLE webhook_delivery (
-    tenant_id uuid NOT NULL,
-    provider varchar(32) NOT NULL,
-    immutable_repository_id varchar(255) NOT NULL,
-    delivery_id varchar(255) NOT NULL,
-    body_digest char(71) NOT NULL
-      CHECK (body_digest ~ '^sha256:[0-9a-f]{64}$'),
-    event_type varchar(128) NOT NULL,
-    normalized_signal jsonb NOT NULL,
-    state varchar(16) NOT NULL DEFAULT 'PENDING'
-      CHECK (state IN ('PENDING', 'FORWARDED', 'DEAD')),
-    received_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
-    forwarded_at timestamptz,
-    PRIMARY KEY (
-      tenant_id, provider, immutable_repository_id, delivery_id
-    )
-);
-CREATE INDEX webhook_delivery_pending_idx
-  ON webhook_delivery (state, received_at)
-  WHERE state = 'PENDING';
-
-CREATE SCHEMA accord_security AUTHORIZATION accord_webhook_owner;
-REVOKE ALL ON SCHEMA accord_security FROM PUBLIC;
-CREATE FUNCTION accord_security.current_tenant_id() RETURNS uuid
-LANGUAGE sql STABLE PARALLEL SAFE
-RETURN NULLIF(current_setting('app.tenant_id', true), '')::uuid;
-REVOKE ALL ON FUNCTION accord_security.current_tenant_id() FROM PUBLIC;
-GRANT USAGE ON SCHEMA accord_security TO accord_webhook_runtime;
-GRANT EXECUTE ON FUNCTION accord_security.current_tenant_id()
-  TO accord_webhook_runtime;
-
-ALTER TABLE webhook_delivery ENABLE ROW LEVEL SECURITY;
-ALTER TABLE webhook_delivery FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON webhook_delivery
-  FOR ALL TO PUBLIC
-  USING (tenant_id = accord_security.current_tenant_id())
-  WITH CHECK (tenant_id = accord_security.current_tenant_id());
-
-REVOKE ALL ON webhook_delivery FROM PUBLIC, accord_webhook_runtime;
-GRANT SELECT, INSERT, UPDATE ON webhook_delivery TO accord_webhook_runtime;
-~~~
-
-The migration contains no raw request, header map, secret, source, archive, or diff column. The catalog test requires exact ownership, forced RLS, policy expressions, and privileges, failing on any extra grant.
-
-- [ ] **Step 5: Implement transaction-local tenant scoping and digest conflict detection**
-
-`PostgresSignalStore.java` owns no alternate connection or unscoped query path:
-
-~~~java
-package com.inforvans.accord.webhook;
-
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.jooq.DSLContext;
-import org.jooq.JSONB;
-import org.jooq.Record;
-import org.springframework.stereotype.Repository;
-
-@Repository
-public final class PostgresSignalStore implements SignalStore {
-    private final DSLContext dsl;
-    private final ObjectMapper mapper;
-
-    public PostgresSignalStore(DSLContext dsl, ObjectMapper mapper) {
-        this.dsl = dsl;
-        this.mapper = mapper;
-    }
-
-    @Override
-    public RecordOutcome record(ProviderWebhookSignal signal) {
-        return dsl.transactionResult(configuration -> {
-            DSLContext tx = configuration.dsl();
-            tx.execute(
-                "SELECT set_config('app.tenant_id', ?, true)",
-                signal.tenantId().toString());
-            int inserted = tx.execute("""
-                INSERT INTO webhook_delivery (
-                  tenant_id,provider,immutable_repository_id,delivery_id,
-                  body_digest,event_type,normalized_signal
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT DO NOTHING
-                """,
-                signal.tenantId(), signal.provider(),
-                signal.immutableRepositoryId(), signal.deliveryId(),
-                signal.bodyDigest(), signal.eventType(),
-                JSONB.valueOf(serialize(signal)));
-            if (inserted == 1) {
-                return RecordOutcome.ACCEPTED;
-            }
-            Record row = tx.fetchOne("""
-                SELECT body_digest FROM webhook_delivery
-                WHERE tenant_id=? AND provider=?
-                  AND immutable_repository_id=? AND delivery_id=?
-                FOR UPDATE
-                """,
-                signal.tenantId(), signal.provider(),
-                signal.immutableRepositoryId(), signal.deliveryId());
-            if (row == null) {
-                throw new IllegalStateException("webhook delivery disappeared");
-            }
-            return signal.bodyDigest().equals(
-                    row.get("body_digest", String.class))
-                ? RecordOutcome.DUPLICATE
-                : RecordOutcome.DIGEST_CONFLICT;
-        });
-    }
-
-    private String serialize(ProviderWebhookSignal signal) {
-        try {
-            return mapper.writeValueAsString(signal);
-        } catch (JsonProcessingException error) {
-            throw new IllegalArgumentException(
-                "normalized signal cannot be serialized", error);
-        }
-    }
-}
-~~~
-
-`PostgresSignalStoreTest` starts PostgreSQL 17.5, applies the administrator bootstrap, migrates as the dedicated migrator login/owner role, and connects the store as the runtime login/runtime role. It must prove:
-
-1. Identical delivery/digest returns `DUPLICATE`; changed digest returns `DIGEST_CONFLICT`.
-2. Colliding IDs for tenants A and B remain distinct.
-3. A tenant-A session cannot select or update tenant B even with all of B's identifiers.
-4. A transaction without `app.tenant_id` sees zero rows and cannot insert.
-5. Runtime cannot set the owner/sibling role and has no `BYPASSRLS`, schema `CREATE`, ownership, `DELETE`, `TRUNCATE`, `REFERENCES`, or `TRIGGER` privilege.
-6. A database-column scan and serialized-signal scan find no raw body or credential-bearing field.
-
-- [ ] **Step 6: Configure, build, and verify the independent artifact**
-
-Replace `apps/webhook-edge/build.gradle` with Groovy DSL:
-
-~~~groovy
-plugins {
-    alias(libs.plugins.spring.boot)
-    id 'java'
-}
-
-dependencies {
-    implementation libs.spring.boot.web
-    implementation libs.spring.boot.actuator
-    implementation libs.spring.boot.jooq
-    implementation libs.jackson.databind
-    runtimeOnly libs.postgresql
-
-    testImplementation libs.spring.boot.test
-    testImplementation libs.flyway.core
-    testImplementation libs.flyway.postgresql
-    testImplementation libs.testcontainers.junit
-    testImplementation libs.testcontainers.postgresql
-}
-
-sourceSets {
-    test {
-        resources {
-            srcDir rootProject.file('database/webhook-edge')
-            include 'bootstrap/**'
-            include 'migrations/**'
-        }
-    }
-}
-~~~
-
-The canonical Webhook SQL is therefore packaged into the Webhook Edge test runtime without introducing a Gradle dependency on `database/control-plane` or a control-plane test-fixture JAR. Add ArchUnit assertions that both main and test code have no dependency on `database.controlplane` or `apps/control-plane/modules/**`, and make the supply-chain policy reject any `testFixtures(project(':database:control-plane'))` declaration in `apps/webhook-edge/build.gradle`.
-
-Create `application.yml` with Flyway disabled, runtime-login credentials, Hikari `SET ROLE accord_webhook_runtime` initialization, Actuator liveness/readiness probes, a required binding-file path, and no Git content credential property. Build and validate:
-
-~~~bash
-./gradlew :apps:webhook-edge:test :apps:webhook-edge:bootJar
-pnpm exec ajv validate --spec=draft2020 -s contracts/events/provider-webhook-signal.schema.json -d contracts/golden-fixtures/webhooks/github-push.signal.json
-jar tf apps/webhook-edge/build/libs/*.jar
-~~~
-
-Expected: tests and schema validation pass; the independent executable jar contains the edge code and bounded libraries but no control-plane domain packages. Invalid signatures are rejected before parsing, no raw body is stored, and database A/B isolation is proven.
-
-- [ ] **Step 7: Commit the isolated ingress service**
-
-~~~bash
-git add settings.gradle apps/webhook-edge contracts/events/provider-webhook-signal.schema.json contracts/golden-fixtures/webhooks database/webhook-edge
-git commit -m "feat: verify and deduplicate provider webhooks"
-~~~
-
-### Task 12: Run Outbox Delivery And Inbox Consumption In `control-worker`
-
-**Files:**
-- Create: `database/control-plane/migrations/V003__reliability_coordination_and_fences.sql`
-- Modify: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReliableEventStore.java`
-- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/TenantWorkRepository.java`
-- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/OutboxRepository.java`
-- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/OutboxDispatcher.java`
-- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/InboxRepository.java`
-- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/InboxDispatcher.java`
-- Create: `apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReliableMessageRedriveService.java`
-- Create: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/TenantWorkRepositoryTest.java`
-- Create: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/OutboxDispatcherTest.java`
-- Create: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/InboxDispatcherTest.java`
-- Create: `apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/ReliableMessageRedriveTest.java`
-- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/WorkerScheduling.java`
-- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/WorkerHealthCoordinator.java`
-- Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/WorkerSchedulingTest.java`
-- Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/WorkerHealthCoordinatorTest.java`
-- Modify: `apps/control-plane/worker/build.gradle`
-- Modify: `apps/control-plane/worker/src/main/resources/application.yml`
-- Create: `docs/runbooks/reliable-message-redrive.md`
-
-- [ ] **Step 1: Write failing concurrency, recovery, and role-selection tests**
-
-Write PostgreSQL 17.5 Testcontainers tests before implementation. They must cover this complete matrix:
-
-| Test | Required proof |
-| --- | --- |
-| `TenantWorkRepositoryTest.twoWorkersClaimDifferentTenants` | Two open transactions using `FOR UPDATE SKIP LOCKED` never claim the same tenant work slot |
-| `TenantWorkRepositoryTest.staleTenantLeaseCannotReleaseNewGeneration` | Expiry increments generation and replaces the UUID token even when owner text is reused |
-| `OutboxDispatcherTest.twoWorkersNeverLeaseSameEvent` | Within one claimed tenant, concurrent workers get disjoint event IDs |
-| `OutboxDispatcherTest.expiredLeaseIsReclaimed` | Old generation/token cannot deliver, fail, renew, or release the recovered row |
-| `OutboxDispatcherTest.retryIsExactAndBounded` | Backoff and deterministic jitter match the policy; attempt limit transitions once to `DEAD` |
-| `InboxDispatcherTest.handlerCrashReplaysSafely` | Crash after domain commit but before acknowledgement replays without duplicating the domain command |
-| `InboxDispatcherTest.digestAndSchemaAreRechecked` | Changed digest never enters processing; unsupported schema fails closed and becomes retry/dead state |
-| `ReliableMessageRedriveTest.auditFailureRollsBack` | Audit exception leaves state, attempts, and redrive count unchanged |
-| `ReliableMessageRedriveTest.optimisticRedriveRunsOnce` | Expected attempts/redrives fence one explicit natural key; duplicate command changes zero rows |
-| `WorkerSchedulingTest.processRoleSelectsBeans` | One outbox and one inbox poller exist only for `control-worker`, never `control-api` |
-| `WorkerHealthCoordinatorTest.livenessAndReadinessHaveIndependentFailureRules` | Scheduler progress refreshes liveness; database, Temporal, or poller-staleness failure removes readiness without falsely killing liveness |
-| `WorkerHealthCoordinatorTest.stateFilesFailClosedAndRecoverAtomically` | Startup and failed checks leave readiness absent; recovery atomically replaces bounded owned files; shutdown removes both files |
-| `WorkerHealthCoordinatorTest.unsafeHealthDirectoryIsRejected` | A symlink, non-directory, wrong owner, or group/world-writable health directory aborts worker startup |
-
-Every database test uses the worker login/role, not the container administrator, for runtime operations. Add an SQL-listener assertion that no outbox or inbox table is queried before `set_config('app.tenant_id', ..., true)` in that transaction.
+`check-result.mjs` validates `PASS -> reason_code=PASS`, `FAIL -> ASSERTION_FAILED`, and
+`BLOCKED -> BLOCKED_*` before atomically writing JSON outside the source tree.
 
 Run:
 
-~~~bash
-./gradlew :apps:control-plane:modules:reliability:test --tests '*TenantWorkRepositoryTest' --tests '*OutboxDispatcherTest' --tests '*InboxDispatcherTest' --tests '*ReliableMessageRedriveTest'
-./gradlew :apps:control-plane:worker:test --tests '*WorkerSchedulingTest'
+~~~powershell
+node --test tests/integration/image-lock.test.mjs
 ~~~
 
-Expected: FAIL because the durable tenant-work directory, generation/token fences, repositories, dispatchers, audited redrive service, and conditional scheduling do not exist.
+Expected RED: the image-lock schema, single lock, and Node scripts are absent.
 
-- [ ] **Step 2: Add a PostgreSQL-only cross-tenant scheduling directory**
+- [ ] **Step 2: Implement the closed verification result and tool preflight**
 
-Directly scanning `outbox_event` or `inbox_message` without `app.tenant_id` is forbidden and cannot work under forced RLS. V003 therefore adds a payload-free coordination table that the multi-tenant worker may lease before entering a tenant-scoped transaction:
+`preflight.mjs` reads every exact required version from `.tool-versions`, resolves executables without
+a shell, runs a bounded version command, and emits one result per required tool. Its closed per-tool
+parser may normalize only a documented vendor wrapper or platform suffix to the core token used for
+comparison; evidence always retains the complete observed version string. Docker Buildx is queried
+through an argument array equivalent to `docker buildx version` but is keyed by the independent
+`docker-buildx` pin. An absent pin/executable, unparsable output, or mismatch is
+`BLOCKED_TOOLCHAIN`. It accepts repeated `--require name` arguments and never has `--skip`,
+`--best-effort`, `--allow-missing`, fallback pins, or script-local defaults.
 
-~~~sql
-SET lock_timeout = '5s';
-SET statement_timeout = '30s';
+Use this exact PowerShell 5.1 launcher pattern for both local wrappers:
 
-ALTER TABLE outbox_event
-  ADD COLUMN lease_generation bigint NOT NULL DEFAULT 0
-    CHECK (lease_generation >= 0),
-  ADD COLUMN lease_token uuid,
-  ADD CONSTRAINT outbox_lease_token_state
-    CHECK ((state = 'DELIVERING') = (lease_token IS NOT NULL));
-
-ALTER TABLE inbox_message
-  ADD COLUMN lease_generation bigint NOT NULL DEFAULT 0
-    CHECK (lease_generation >= 0),
-  ADD COLUMN lease_token uuid,
-  ADD CONSTRAINT inbox_lease_token_state
-    CHECK ((state = 'PROCESSING') = (lease_token IS NOT NULL));
-
-CREATE TABLE reliability_tenant_work (
-    tenant_id uuid PRIMARY KEY,
-    available_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
-    lease_owner varchar(255),
-    lease_generation bigint NOT NULL DEFAULT 0
-      CHECK (lease_generation >= 0),
-    lease_token uuid,
-    lease_until timestamptz,
-    updated_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
-    CHECK (
-      (lease_owner IS NULL AND lease_token IS NULL AND lease_until IS NULL)
-      OR
-      (lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_until IS NOT NULL)
-    )
-);
-CREATE INDEX reliability_tenant_work_available_idx
-  ON reliability_tenant_work (available_at, tenant_id);
-
-REVOKE ALL ON reliability_tenant_work
-  FROM PUBLIC, accord_api, accord_worker;
-GRANT SELECT, INSERT, UPDATE ON reliability_tenant_work TO accord_worker;
-
-CREATE FUNCTION accord_security.signal_reliability_work(
-    ready_at timestamptz DEFAULT transaction_timestamp()
-) RETURNS void
-LANGUAGE sql
-SECURITY DEFINER
-SET search_path = pg_catalog, public, accord_security
-AS $body$
-  INSERT INTO public.reliability_tenant_work (tenant_id, available_at)
-  VALUES (accord_security.current_tenant_id(), ready_at)
-  ON CONFLICT (tenant_id) DO UPDATE
-    SET available_at = LEAST(
-      public.reliability_tenant_work.available_at,
-      EXCLUDED.available_at
-    ),
-    updated_at = transaction_timestamp()
-$body$;
-REVOKE ALL ON FUNCTION accord_security.signal_reliability_work(timestamptz)
-  FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION accord_security.signal_reliability_work(timestamptz)
-  TO accord_api, accord_worker;
-~~~
-
-`reliability_tenant_work` intentionally contains only tenant UUIDs and coordination timestamps/fences, never business state, payloads, actors, documents, attachments, or provider data. It is the only unscoped multi-tenant reliability table. Its owner is `accord_migrator`; API cannot select or mutate it directly and can only call the parameter-free tenant signal function, whose tenant comes from the transaction-local RLS context. Worker holds exact `SELECT/INSERT/UPDATE` privileges because it is the cross-tenant dispatcher. No role has `DELETE` or `BYPASSRLS`.
-
-Extend `ReliableEventStore.append` and the accepted branch of `acceptInbox` to call `accord_security.signal_reliability_work()` in the same transaction after inserting the message. Retry scheduling and authorized redrive call it with the next `available_at`. Extend `PlatformMigrationTest` to prove exact columns, ownership, grants, function owner/search path/security mode, and absence of payload-bearing columns.
-
-- [ ] **Step 3: Implement tenant-work and message leases with independent fences**
-
-Create public Java records `TenantWorkLease`, `LeasedEvent`, and `LeasedInboxMessage` in matching files. Each contains owner, monotonically increasing generation, opaque UUID token, and exact lease deadline. Acquisition uses one atomic CTE:
-
-~~~sql
-WITH candidate AS (
-  SELECT tenant_id
-  FROM reliability_tenant_work
-  WHERE available_at <= ?
-    AND (lease_until IS NULL OR lease_until < ?)
-  ORDER BY available_at, tenant_id
-  FOR UPDATE SKIP LOCKED
-  LIMIT 1
-)
-UPDATE reliability_tenant_work work
-SET lease_owner=?,
-    lease_generation=work.lease_generation+1,
-    lease_token=?,
-    lease_until=?,
-    updated_at=?
-FROM candidate
-WHERE work.tenant_id=candidate.tenant_id
-RETURNING work.tenant_id,work.lease_generation,work.lease_token,work.lease_until
-~~~
-
-Release/reschedule compares tenant ID, owner, generation, token, and exact prior lease deadline. A count other than one means the lease was lost; no stale worker may acknowledge a newer lease.
-
-After claiming a tenant, `OutboxRepository.lease` and `InboxRepository.lease` run inside a new worker transaction whose first statement installs `app.tenant_id` and verifies `accord_security.current_tenant_id()`. Their CTEs use `FOR UPDATE SKIP LOCKED` and atomically:
-
-- select only ready `PENDING` rows or expired active rows for that tenant;
-- set active state and owner;
-- increment `lease_generation` independently of attempt count;
-- create a fresh UUID `lease_token`;
-- set the exact lease deadline;
-- increment attempt count only when beginning a delivery attempt.
-
-Completion, failure, renewal, and recovery compare the complete fence. They clear owner, token, and deadline only after the fenced update succeeds. `attempt_count` measures attempts; it is never reused as a lease generation. All durations are positive and bounded by configuration.
-
-- [ ] **Step 4: Implement bounded dispatch, retry, and downstream idempotency**
-
-`EventTransport` and `InboxHandler` are public functional interfaces in matching files. Implement the two dispatchers in Java 21 with these rules:
-
-1. Claim at most 50 messages for one tenant and cap concurrent work per destination/handler.
-2. Transport timeout is shorter than the 30-second lease and includes `event_id` as the downstream idempotency key.
-3. Handler validates `payload_schema` and recomputes/verifies `request_digest` before business use. Its domain command key is `(source, source_message_id)`.
-4. Retry delay is `min(15 minutes, 5 seconds * 2^(attempt-1))` plus deterministic 0-4 second natural-key jitter.
-5. A normalized error code is bounded to 128 characters; stack traces, payloads, tokens, and source material are not persisted.
-6. At `maxAttempts`, transition once to `DEAD` and page on dead count/oldest age. `DEAD` is never polled automatically.
-7. After each batch, reschedule the tenant work slot to the earliest ready outbox/inbox time, or release it with a bounded idle rescan. This update uses the tenant-work fence.
-8. Unknown destination or handler fails closed and follows retry/dead policy; it is never acknowledged as success.
-
-Any idempotency-result cleanup added in this task must use database time and bounded batches, and may delete only rows whose `state='COMPLETED'` and `expires_at < clock_timestamp()`. It must never delete a `STARTED` row, even after its lease or `expires_at` has passed; abandoned `STARTED` work is recovered only through the fenced claim-takeover path.
-
-Add property-based tests with jqwik for delay monotonicity, maximum cap, deterministic jitter, generation growth, and stale-fence rejection. Add fault-injection tests for database disconnect before/after each state transition and process termination after external success but before local acknowledgement.
-
-- [ ] **Step 5: Gate redrive behind fresh authorization and same-transaction audit**
-
-Create one public Java type per file:
-
-~~~java
-package com.inforvans.accord.reliability;
-
-import java.time.OffsetDateTime;
-import java.util.UUID;
-
-public enum ReliableMessageKind {
-    OUTBOX,
-    INBOX
-}
-
-public record VerifiedRedriveApproval(
-    String actorId,
-    String authorizationEvidenceDigest,
-    String reason,
-    String ticketReference
-) {
-    public VerifiedRedriveApproval {
-        if (authorizationEvidenceDigest == null
-                || !authorizationEvidenceDigest.matches("^sha256:[0-9a-f]{64}$")) {
-            throw new IllegalArgumentException("invalid authorization evidence digest");
-        }
-        if (reason == null || reason.length() < 8 || reason.length() > 1024) {
-            throw new IllegalArgumentException("redrive reason must be 8-1024 characters");
-        }
-        if (ticketReference == null
-                || ticketReference.isBlank()
-                || ticketReference.length() > 255) {
-            throw new IllegalArgumentException("invalid ticket reference");
-        }
-    }
-}
-
-public record ReliableMessageRedriveEvidence(
-    UUID tenantId,
-    ReliableMessageKind kind,
-    String naturalKey,
-    int priorAttemptCount,
-    int priorRedriveCount,
-    String priorErrorCode,
-    String actorId,
-    String authorizationEvidenceDigest,
-    String reason,
-    String ticketReference,
-    OffsetDateTime occurredAt
-) {}
-
-@FunctionalInterface
-public interface ReliableMessageRedriveAudit {
-    void append(
-        org.jooq.DSLContext tx,
-        ReliableMessageRedriveEvidence evidence
-    );
-}
-~~~
-
-`ReliableMessageRedriveService` is the only public redrive entry point. It:
-
-1. accepts a `DSLContext` already inside `TenantTransactions.write(tenantId)`;
-2. locks one exact `DEAD` row by natural key, expected attempt count, and expected redrive count;
-3. appends bounded audit evidence without payload data;
-4. changes the row to `PENDING`, resets attempts, increments redrive count, and signals tenant work;
-5. commits all three effects together or rolls all of them back.
-
-Repository `redriveDead` methods are package-private Java methods. Architecture tests forbid controllers, CLI adapters, and schedulers from calling them. Until Identity/Audit binds fresh high-risk authorization, version-bound ActionRequest, tenant transaction, and immutable audit adapter, every production redrive adapter remains absent and fail-closed.
-
-- [ ] **Step 6: Bind polling only in the worker process**
-
-Create `WorkerScheduling.java` with `@ConditionalOnProperty(name = "accord.process-role", havingValue = "control-worker")` and `@EnableScheduling`. It provides:
-
-- one `Clock.systemUTC()` bean unless overridden;
-- one tenant-work repository, outbox dispatcher, inbox dispatcher, and one poller for each;
-- owner from `accord.process.instance-id`;
-- ISO-8601 fixed-delay properties;
-- a fail-closed transport when no bounded destination adapter is registered;
-- a handler registry keyed by the explicit schema/handler key, rejecting duplicate keys at startup.
-
-Create `WorkerHealthCoordinator.java` in production code and wire it only from `WorkerScheduling`. Its contract is exact:
-
-1. On Linux startup it creates `/tmp/accord` as the worker UID with mode `0700`, rejects an existing symlink/non-directory/wrong-owner/group-or-world-writable path, and removes stale `worker-live` and `worker-ready` files. Tests inject a temporary directory through a package-private constructor; production configuration cannot redirect the path.
-2. A dedicated five-second scheduler-progress callback atomically replaces `worker-live` with an ASCII UTC epoch-second plus LF, mode `0600`, only after both poller scheduling loops have completed a turn. It writes a same-directory temporary file with `CREATE_NEW` and `NOFOLLOW_LINKS`, verifies its owner/type/mode, then uses `ATOMIC_MOVE` plus `REPLACE_EXISTING`; unsupported atomic move aborts startup rather than silently weakening the probe contract.
-3. A separate readiness pass has a hard two-second total budget. It requires a fresh JDBC connection whose `session_user` is `accord_worker_login` and `current_user` is `accord_worker`, a zero-row privilege probe against `reliability_tenant_work`, a Temporal `GetSystemInfo` RPC with the remaining deadline, and last-success timestamps for both pollers no older than twice their configured fixed delay plus five seconds.
-4. Only a fully successful pass atomically replaces `worker-ready` with the same bounded timestamp format. Any exception, timeout, role mismatch, stale poller, interrupt, or failed atomic replacement removes `worker-ready` immediately and records only a normalized metric/error code. It never logs a DSN, SQL text, exception message, tenant, payload, or credential.
-5. Liveness does not depend on PostgreSQL, Temporal, or telemetry availability; it expires only when the worker scheduling loop stops making progress. Readiness does depend on PostgreSQL, Temporal, and both pollers. A graceful shutdown deletes both files before closing the scheduler.
-
-`WorkerHealthCoordinatorTest` uses a fake `Clock`, fake readiness checks, and a temporary POSIX filesystem fixture to exercise the full state transition matrix. A Linux-only integration case runs under UID 10002 and proves the final files are regular, non-symlink, owner-only, at most 32 bytes, and never partially readable. Task 16's separate probe consumes this file contract; no shell script is involved.
-
-The worker build remains Groovy DSL:
-
-~~~groovy
-plugins {
-    alias(libs.plugins.spring.boot)
-    id 'java'
-}
-
-dependencies {
-    implementation project(':apps:control-plane:modules:platform-kernel')
-    implementation project(':apps:control-plane:modules:reliability')
-    implementation platform(libs.spring.modulith.bom)
-    implementation libs.spring.modulith.starter.core
-    implementation libs.spring.boot.actuator
-    implementation libs.spring.boot.jooq
-    implementation libs.temporal.sdk
-    runtimeOnly libs.postgresql
-
-    testImplementation libs.spring.boot.test
-    testImplementation libs.archunit.junit
-    testImplementation libs.temporal.testing
-}
-~~~
-
-`WorkerSchedulingTest` uses `ApplicationContextRunner` to prove the worker role creates exactly one of each poller and one health coordinator, while the API role creates none. It also proves duplicate handler keys fail startup. `application.yml` defines ISO-8601 poll delays and the fixed health cadence/max-lag bounds; invalid, zero, or excessive durations fail configuration binding before scheduling begins.
-
-- [ ] **Step 7: Create the operational redrive runbook**
-
-`docs/runbooks/reliable-message-redrive.md` must define:
-
-- page triggers for dead count, oldest deliverable age, and abnormal attempt growth;
-- triage using only tenant, destination/handler, natural key, schema, counts, timestamps, and normalized error;
-- fresh high-risk authorization binding tenant, kind, natural key, expected counts, actor, reason, ticket, and evidence digest;
-- one message per command, with an incident-commander manifest capped at 25 explicit keys;
-- verification of one redrive-count increment, final delivery, duplicate suppression, and downstream receipt;
-- stop conditions for digest/schema/auth/audit/fence failures or unexpected side effects;
-- an explicit prohibition on direct SQL, wildcard, destination-wide, tenant-wide, and unbounded redrive.
-
-- [ ] **Step 8: Run and commit the reliable worker slice**
-
-Run:
-
-~~~bash
-./gradlew :database:control-plane:test
-./gradlew :apps:control-plane:modules:reliability:test
-./gradlew :apps:control-plane:worker:test
-~~~
-
-Expected: parallel workers receive disjoint tenant and message keys; all stale fences fail; retries and dead-letter transitions are exact; handler replay is idempotent; audited redrive commits once or rolls back fully; no message query bypasses tenant context; worker beans exist only in `control-worker`; heartbeat/readiness files follow the tested fail-closed lifecycle; and the implementation uses PostgreSQL only.
-
-~~~bash
-git add database/control-plane/migrations/V003__reliability_coordination_and_fences.sql database/control-plane/src/test/java/com/inforvans/accord/database/PlatformMigrationTest.java apps/control-plane/modules/reliability apps/control-plane/worker docs/runbooks/reliable-message-redrive.md
-git commit -m "feat: dispatch and redrive reliable messages"
-~~~
-
-### Task 13: Provide A Reproducible Local Integration Harness
-
-**Files:**
-- Create: `contracts/capabilities/object-storage-adapter.schema.json`
-- Create: `infra/local/object-storage-capabilities.json`
-- Create: `infra/local/compose.yaml`
-- Create: `infra/local/minio/normal-runtime-policy.json`
-- Create: `infra/local/minio/quarantine-scanner-policy.json`
-- Create: `infra/local/postgres/00-roles-and-databases.sql`
-- Create: `infra/local/wiremock/mappings/get-repository.json`
-- Create: `infra/local/localstack/ready.d/10-create-kms-key.sh`
-- Create: `infra/local/otel-collector.yaml`
-- Create: `scripts/local-up.ps1`
-- Create: `scripts/local-down.ps1`
-- Create: `tests/integration/local-foundation.ps1`
-
-- [ ] **Step 1: Write the failing harness inventory test**
-
-Create `tests/integration/local-foundation.ps1`:
-
-```powershell
+~~~powershell
 $ErrorActionPreference = 'Stop'
-$compose = 'infra/local/compose.yaml'
-$required = @('postgres', 'temporal', 'temporal-ui', 'minio', 'minio-init', 'mock-git-provider', 'mock-kms', 'otel-collector')
-$services = docker compose -f $compose config --services
-$missing = $required | Where-Object { $_ -notin $services }
-if ($missing.Count -gt 0) { throw "Missing local services: $($missing -join ', ')" }
+& node (Join-Path $PSScriptRoot 'local-up.mjs') @args
+exit $LASTEXITCODE
+~~~
 
-$postgres = docker compose -f $compose exec -T postgres pg_isready -U postgres
-if ($LASTEXITCODE -ne 0) { throw "PostgreSQL is not ready: $postgres" }
-function Invoke-PostgresCatalog([string] $Sql) {
-  $rows = @(docker compose -f $compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d postgres -At -c $Sql)
-  if ($LASTEXITCODE -ne 0) { throw "PostgreSQL catalog query failed: $Sql" }
-  return @($rows | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-}
-$signingOwner = @(Invoke-PostgresCatalog "SELECT concat_ws('|',rolname,rolcanlogin,rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolinherit,rolbypassrls) FROM pg_roles WHERE rolname='accord_signing_owner'")
-if ($signingOwner.Count -ne 1 -or $signingOwner[0] -ne 'accord_signing_owner|f|f|f|f|f|f|t') {
-  throw "accord_signing_owner is not the exact approved NOLOGIN BYPASSRLS role: $signingOwner"
-}
-$unexpectedElevated = @(Invoke-PostgresCatalog "SELECT rolname FROM pg_roles WHERE rolname LIKE 'accord_%' AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR (rolbypassrls AND rolname <> 'accord_signing_owner')) ORDER BY rolname")
-if ($unexpectedElevated.Count -ne 0) { throw "Unexpected elevated Accord roles: $unexpectedElevated" }
-$signingMembers = @(Invoke-PostgresCatalog "SELECT concat_ws('|',member.rolname,am.admin_option,am.inherit_option,am.set_option) FROM pg_auth_members am JOIN pg_roles parent ON parent.oid=am.roleid JOIN pg_roles member ON member.oid=am.member WHERE parent.rolname='accord_signing_owner' ORDER BY member.rolname")
-if ($signingMembers.Count -ne 1 -or $signingMembers[0] -ne 'accord_signing_migrator|f|f|t') {
-  throw "Signing owner membership is not migration-only: $signingMembers"
-}
-$webhookMembers = @(Invoke-PostgresCatalog "SELECT concat_ws('|',member.rolname,parent.rolname,am.admin_option,am.inherit_option,am.set_option) FROM pg_auth_members am JOIN pg_roles parent ON parent.oid=am.roleid JOIN pg_roles member ON member.oid=am.member WHERE member.rolname IN ('accord_webhook_migrator_login','accord_webhook_runtime_login') ORDER BY member.rolname")
-$expectedWebhookMembers = @(
-  'accord_webhook_migrator_login|accord_webhook_owner|f|f|t',
-  'accord_webhook_runtime_login|accord_webhook_runtime|f|f|t'
-)
-if (($webhookMembers -join "`n") -cne ($expectedWebhookMembers -join "`n")) {
-  throw "Webhook role memberships are not exact: $webhookMembers"
-}
-$webhookRoleCount = @(Invoke-PostgresCatalog "SELECT count(*) FROM pg_roles WHERE rolname IN ('accord_webhook_owner','accord_webhook_runtime') AND NOT rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolinherit AND NOT rolbypassrls")
-if ($webhookRoleCount.Count -ne 1 -or $webhookRoleCount[0] -ne '2') {
-  throw "Webhook privilege roles are not exact NOLOGIN roles: $webhookRoleCount"
-}
-$runtimeBypassMembership = @(Invoke-PostgresCatalog "WITH RECURSIVE closure(member_oid,role_oid) AS (SELECT member,roleid FROM pg_auth_members UNION SELECT c.member_oid,m.roleid FROM closure c JOIN pg_auth_members m ON m.member=c.role_oid) SELECT DISTINCT member.rolname || '->' || parent.rolname FROM closure c JOIN pg_roles member ON member.oid=c.member_oid JOIN pg_roles parent ON parent.oid=c.role_oid WHERE member.rolname IN ('accord_api_login','accord_worker_login','accord_webhook_runtime_login','accord_signing_runtime') AND parent.rolbypassrls ORDER BY 1")
-if ($runtimeBypassMembership.Count -ne 0) { throw "Runtime role reaches BYPASSRLS transitively: $runtimeBypassMembership" }
-$temporal = Invoke-RestMethod -Uri 'http://localhost:8233/api/v1/namespaces' -TimeoutSec 5
-if (-not $temporal) { throw 'Temporal UI API did not return namespaces' }
-$git = Invoke-RestMethod -Uri 'http://localhost:9080/repos/acme/demo' -TimeoutSec 5
-if ($git.id -ne 77831) { throw "Mock Git immutable repository id was $($git.id)" }
-$capabilitySchema = 'contracts/capabilities/object-storage-adapter.schema.json'
-$capabilityProfile = 'infra/local/object-storage-capabilities.json'
-pnpm exec ajv validate --spec=draft2020 -s $capabilitySchema -d $capabilityProfile
-if ($LASTEXITCODE -ne 0) { throw 'Local object-storage capability profile is invalid' }
-$profile = Get-Content -Raw -Encoding utf8 $capabilityProfile | ConvertFrom-Json -Depth 20
-if ($profile.production_eligible -ne $false) {
-  throw 'The local MinIO profile must never claim production eligibility'
-}
-$requiredLocal = @('immutable_versions','sha256_checksums','worm_retention','legal_hold','multipart','quarantine_isolation')
-$missingLocal = $requiredLocal | Where-Object { $profile.capabilities.$_.status -ne 'SUPPORTED_AND_TESTED' }
-if ($missingLocal.Count -ne 0) { throw "Unproved local object capabilities: $missingLocal" }
-$externalOnly = @('replication_evidence','deletion_receipts')
-$wrongExternal = $externalOnly | Where-Object { $profile.capabilities.$_.status -ne 'EXTERNAL_EVIDENCE_REQUIRED' }
-if ($wrongExternal.Count -ne 0) { throw "Invalid local external-evidence declarations: $wrongExternal" }
-$retention = @(docker compose -f $compose run --rm --entrypoint /bin/sh minio-init -ec "mc alias set local http://minio:9000 accord-local accord-local-secret >/dev/null && mc retention info local/accord-object-lock")
-if ($LASTEXITCODE -ne 0) { throw "Object-lock retention is unavailable: $retention" }
-$retentionText = $retention -join "`n"
-if (-not $retentionText.Contains('GOVERNANCE') -or $retentionText -notmatch '(?i)\b30d\b') {
-  throw "Object-lock default is not 30-day GOVERNANCE: $retentionText"
-}
-$aliases = docker compose -f $compose exec -T mock-kms awslocal kms list-aliases
-if (-not $aliases.Contains('alias/accord-local-signing')) { throw 'Mock KMS signing alias is missing' }
-Write-Output 'local-foundation: PASS'
-```
+`local-down.ps1` differs only in the target module name. Node receives each argument separately.
 
-- [ ] **Step 2: Run the inventory test and verify Compose is absent**
+Run:
 
-Run: `pwsh -NoProfile -File tests/integration/local-foundation.ps1`
+~~~powershell
+node scripts/verification/preflight.mjs --check-id ft13-toolchain --require node --require docker --require docker-buildx --require git --require java
+~~~
 
-Expected: FAIL because `infra/local/compose.yaml` does not exist.
+Expected GREEN on a configured local machine only when every required pin exists and the normalized
+core versions match. If a pin or executable is absent, output is unparsable, or a pinned version
+cannot be established, expected status is `BLOCKED` with reason `BLOCKED_TOOLCHAIN`, complete
+observed version when available, and exit 2.
 
-- [ ] **Step 3: Define isolated local services and PostgreSQL coordination**
+- [ ] **Step 3: Implement and populate the one authoritative image lock**
 
-Create `object-storage-adapter.schema.json` as a closed JSON Schema 2020-12 contract. It requires `schema_version`, `adapter_id`, `adapter_version`, `adapter_artifact_digest`, `environment_class`, `tested_at`, `expires_at`, `evidence_bundle_digest`, `production_eligible`, and exactly these capability objects: `immutable_versions`, `sha256_checksums`, `worm_retention`, `legal_hold`, `multipart`, `quarantine_isolation`, `replication_evidence`, and `deletion_receipts`. Each capability has only `status`, `test_id`, and a non-empty array of immutable evidence references. Status is one of `SUPPORTED_AND_TESTED`, `UNSUPPORTED`, or `EXTERNAL_EVIDENCE_REQUIRED`. Digests use lowercase `sha256:<64 hex>`; timestamps are UTC and expiry must be checked by consumers because JSON Schema cannot compare time values.
+`image-lock.schema.json` fixes `schema_version` to `1.0.0` and the exact ten role keys above.
+`lock-images.mjs` accepts only `--initialize` or `--refresh` followed by one exact lock role; for
+example, `--refresh temporal-server`. Initialization uses the reviewed versions already named in
+this plan for PostgreSQL 17.5, exact Temporal source `temporalio/server:1.28.1`, Temporal UI 2.39.0,
+WireMock 3.13.1, LocalStack 4.6.0, and OTel Collector 0.129.0. It does not invent MinIO tags. MinIO
+sources are closed required inputs `ACCORD_MINIO_SERVER_SOURCE` and
+`ACCORD_MINIO_CLIENT_SOURCE`; each value must be an immutable-reviewed exact
+`registry/repository:source-tag`, and empty, `latest`, digest-only, tagless, or ambiguous values are
+rejected. The two Java source references remain required inputs `ACCORD_JAVA_BUILD_SOURCE` and
+`ACCORD_JAVA_RUNTIME_SOURCE` from the approved authenticated mirror.
 
-The schema's production branch requires `environment_class: production`, `production_eligible: true`, and `SUPPORTED_AND_TESTED` for all eight capabilities. The local profile is closed and has `production_eligible: false`: it marks version IDs, SHA-256 verification, WORM retention, legal hold, multipart, and quarantine isolation as `SUPPORTED_AND_TESTED`, while replication evidence and deletion receipts are `EXTERNAL_EVIDENCE_REQUIRED`. Its artifact/evidence digests are real hashes created during implementation and reviewed with the pinned MinIO image; neither zero/fake digests nor mutable evidence URLs pass validation.
+For every entry, invoke `docker buildx imagetools inspect --raw` with an argument array, hash raw
+manifest bytes locally, resolve each required platform manifest, reject redirects to an unapproved
+registry, and atomically write canonical key-sorted JSON. Missing or invalid required MinIO/Java
+source input, or any source (including the currently failing Temporal registry source) that cannot
+resolve to actual manifest bytes and digest, emits `BLOCKED_EXTERNAL_IMAGE_RESOLUTION` and writes no
+partial lock or temporary replacement. Never preserve registry credentials, response headers, or
+bearer challenges.
 
-Create `infra/local/compose.yaml`:
+Run:
 
-```yaml
-name: accord-local
+~~~powershell
+node scripts/images/lock-images.mjs --initialize --output infra/images/images.lock.json
+node scripts/images/verify-images.mjs --scope local
+node --test tests/integration/image-lock.test.mjs
+~~~
+
+Expected GREEN only when authenticated registry resolution returns actual digest evidence for every
+closed source. With the current registry failure, network disabled, a required MinIO/Java source
+missing/invalid, or any source unresolvable, leave no partial lock and emit
+`BLOCKED_EXTERNAL_IMAGE_RESOLUTION`; that result is not FT13 completion evidence.
+
+- [ ] **Step 4: Write RED Temporal topology, database-authority, and GitLab-facts tests**
+
+Create `temporal-mtls.test.mjs` and `local-foundation.test.mjs`. Parse Compose/server YAML and assert:
+
+- services are `postgres`, `temporal-schema`, `temporal-server`, `temporal-ui`, `minio`,
+  `minio-init`, `mock-gitlab`, `mock-kms`, and `otel-collector`;
+- no Compose image contains a tag or literal digest; every image comes from the rendered lock env;
+- Temporal schema is a one-shot dependency and server is not `auto-setup`/`start-dev`;
+- frontend TLS requires client auth, separate server/client CA paths, and name `temporal`;
+- UI mounts only its client material; worker material is not mounted into UI;
+- Temporal identities have no membership or CONNECT path into an Accord business database;
+- `mock-gitlab` exposes `/api/v4/projects/77831` and no `/repos/` route;
+- tracked files contain no generated PEM/private-key bytes.
+
+`TemporalLocalTopologyIT` uses Task 10's production `TemporalRuntimeConfiguration`,
+`ReadOnlyReconciliationActivity`, `ReconciliationWorkflowRef`, and production
+`FencedReconciliationObservation`. The test supplies only a bounded low-level
+`ProviderObservationPort`; it cannot implement or replace the high-level Temporal port. The
+production orchestrator executes Task 10's full tx1 safe-snapshot/claim, no-JDBC-transaction
+observation, and tx2 finalize boundary on every activity attempt. The low-level adapter fails the
+first observation, the orchestrator atomically marks the acquired attempt unknown, then retries and
+atomically completes `CONVERGED` plus event/outbox using database snapshot scope. Assert exactly two
+claims/reloads, capability only in attempt memory, identifier-only heartbeats/history, and zero
+Provider mutation calls.
+
+Run the Node tests before creating the topology.
+
+Expected RED: Compose, Temporal config, GitLab facts, and local integration are absent.
+
+- [ ] **Step 5: Implement isolated roles, explicit schema setup, and mandatory Temporal mTLS**
+
+`00-roles-and-databases.sql` retains Task 9-12 boundaries and adds:
+
+- NOLOGIN `accord_temporal_owner` and `accord_temporal_visibility_owner`;
+- LOGIN `accord_temporal_schema_login` with set-only owner memberships;
+- NOLOGIN `accord_temporal_runtime` plus LOGIN `accord_temporal_runtime_login` with set-only runtime
+  membership;
+- separate `accord_temporal` and `accord_temporal_visibility` databases;
+- revoked PUBLIC connect/schema privileges and exact schema/runtime grants;
+- explicit revocations between all application and Temporal databases.
+
+`LocalTemporalPki` reuses Task 10's test-only Bouncy Castle version to generate server/client CAs,
+a server certificate, and distinct `worker`, `ui`, and `admin` client certificates under ignored
+`infra/local/state/pki`, plus an untrusted CA/client pair and a trusted-CA wrong-EKU certificate
+carrying only serverAuth. The server EKU is serverAuth; valid client EKUs are clientAuth. SANs are
+exact and private keys are owner-only where supported.
+
+`server.yaml` configures PostgreSQL persistence, committed dynamic config, frontend server
+certificate/key, trusted client CA, mandatory client auth, and TLS 1.3. `temporal-schema` runs the
+pinned server image SQL tool as the schema login, then exits. `temporal-server` runs as the runtime
+login. UI uses its own certificate, CA, host verification, and server name.
+
+The required Compose image form is:
+
+~~~yaml
 services:
-  postgres:
-    image: postgres:17.5
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres-local-only
-    ports: ["5432:5432"]
+  temporal-server:
+    image: ${ACCORD_IMAGE_TEMPORAL_SERVER:?run render-compose-images.mjs}
+    command: ["temporal-server", "start", "--env", "docker"]
     volumes:
-      - ./postgres/00-roles-and-databases.sql:/docker-entrypoint-initdb.d/00-roles-and-databases.sql:ro
-      - ./data/postgres:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 2s
-      timeout: 2s
-      retries: 30
-  temporal:
-    image: temporalio/auto-setup:1.28.1
-    depends_on:
-      postgres: { condition: service_healthy }
-    environment:
-      DB: postgres12
-      DB_PORT: 5432
-      POSTGRES_SEEDS: postgres
-      POSTGRES_USER: postgres
-      POSTGRES_PWD: postgres-local-only
-      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+      - ./temporal/server.yaml:/etc/temporal/config/docker.yaml:ro
+      - ./state/pki:/run/accord/temporal/pki:ro
     ports: ["7233:7233"]
   temporal-ui:
-    image: temporalio/ui:2.39.0
-    depends_on: [temporal]
+    image: ${ACCORD_IMAGE_TEMPORAL_UI:?run render-compose-images.mjs}
     environment:
-      TEMPORAL_ADDRESS: temporal:7233
-    ports: ["8233:8080"]
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-06-13T11-33-47Z
-    command: server /data --console-address :9001
-    environment:
-      MINIO_ROOT_USER: accord-local
-      MINIO_ROOT_PASSWORD: accord-local-secret
-    ports: ["9000:9000", "9001:9001"]
-    volumes: ["./data/minio:/data"]
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 2s
-      timeout: 2s
-      retries: 30
-  minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-05-21T01-59-54Z
-    depends_on:
-      minio: { condition: service_healthy }
-    entrypoint: ["/bin/sh", "-ec"]
-    command:
-      - >-
-        mc alias set local http://minio:9000 accord-local accord-local-secret;
-        mc mb --ignore-existing --with-lock local/accord-object-lock;
-        mc mb --ignore-existing --with-lock local/accord-quarantine;
-        mc version enable local/accord-object-lock;
-        mc version enable local/accord-quarantine;
-        mc retention set --default GOVERNANCE 30d local/accord-object-lock;
-  mock-git-provider:
-    image: wiremock/wiremock:3.13.1
-    command: ["--global-response-templating", "--disable-gzip"]
-    ports: ["9080:8080"]
-    volumes: ["./wiremock:/home/wiremock:ro"]
-  mock-kms:
-    image: localstack/localstack:4.6.0
-    environment:
-      SERVICES: kms
-      AWS_DEFAULT_REGION: ap-northeast-1
-    ports: ["4566:4566"]
-    volumes:
-      - ./localstack/ready.d:/etc/localstack/init/ready.d:ro
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.129.0
-    command: ["--config=/etc/otelcol/config.yaml"]
-    volumes: ["./otel-collector.yaml:/etc/otelcol/config.yaml:ro"]
-    ports: ["4317:4317", "4318:4318", "9464:9464"]
-```
+      TEMPORAL_ADDRESS: temporal-server:7233
+      TEMPORAL_TLS_CA: /run/accord/temporal/pki/client-ca.pem
+      TEMPORAL_TLS_CERT: /run/accord/temporal/pki/ui.pem
+      TEMPORAL_TLS_KEY: /run/accord/temporal/pki/ui-key.pem
+      TEMPORAL_TLS_ENABLE_HOST_VERIFICATION: "true"
+      TEMPORAL_TLS_SERVER_NAME: temporal
+~~~
 
-The init container also installs the two mounted closed MinIO policies and creates separate local-only service accounts: the normal runtime can access `accord-object-lock` but is explicitly denied `accord-quarantine`; the scanner can read/write quarantine but cannot read normal objects. No application receives the root credential. `local-foundation.ps1` uploads a deterministic fixture twice and requires distinct immutable version IDs, checks the provider-reported SHA-256 against a locally recomputed digest on upload and download, applies/reads governance retention and legal hold, completes a forced multi-part upload with no orphaned parts, and proves both directions of the quarantine deny matrix. It then verifies that the two external-only capabilities remain non-production declarations. The fixed test definitions and redacted result bundle are hashed and must match the immutable evidence references in the local profile.
+`render-compose-images.mjs` is the only writer of `infra/local/state/images.env` and refuses any
+missing or extra Compose image variable.
 
-Create `infra/local/postgres/00-roles-and-databases.sql`:
+Run structural tests again. Expected GREEN without starting containers.
 
-```sql
-CREATE ROLE accord_migrator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
-CREATE ROLE accord_api NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
-CREATE ROLE accord_worker NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
-CREATE ROLE accord_migrator_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD 'local-migrator-only';
-CREATE ROLE accord_api_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD 'local-api-only';
-CREATE ROLE accord_worker_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD 'local-worker-only';
-CREATE ROLE accord_webhook_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
-CREATE ROLE accord_webhook_migrator_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD 'local-webhook-migrator-only';
-CREATE ROLE accord_webhook_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
-CREATE ROLE accord_webhook_runtime_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD 'local-webhook-runtime-only';
-CREATE ROLE accord_signing_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT BYPASSRLS;
-CREATE ROLE accord_signing_migrator LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD 'local-signing-migrator-only';
-CREATE ROLE accord_signing_runtime LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD 'local-signing-runtime-only';
+- [ ] **Step 6: Implement GitLab-first and object-storage local contracts**
 
-GRANT accord_migrator TO accord_migrator_login WITH INHERIT FALSE;
-GRANT accord_migrator TO accord_migrator_login WITH SET TRUE;
-GRANT accord_migrator TO accord_migrator_login WITH ADMIN FALSE;
-GRANT accord_api TO accord_api_login WITH INHERIT FALSE;
-GRANT accord_api TO accord_api_login WITH SET TRUE;
-GRANT accord_api TO accord_api_login WITH ADMIN FALSE;
-GRANT accord_worker TO accord_worker_login WITH INHERIT FALSE;
-GRANT accord_worker TO accord_worker_login WITH SET TRUE;
-GRANT accord_worker TO accord_worker_login WITH ADMIN FALSE;
-GRANT accord_webhook_owner TO accord_webhook_migrator_login WITH INHERIT FALSE;
-GRANT accord_webhook_owner TO accord_webhook_migrator_login WITH SET TRUE;
-GRANT accord_webhook_owner TO accord_webhook_migrator_login WITH ADMIN FALSE;
-GRANT accord_webhook_runtime TO accord_webhook_runtime_login WITH INHERIT FALSE;
-GRANT accord_webhook_runtime TO accord_webhook_runtime_login WITH SET TRUE;
-GRANT accord_webhook_runtime TO accord_webhook_runtime_login WITH ADMIN FALSE;
-GRANT accord_signing_owner TO accord_signing_migrator WITH INHERIT FALSE;
-GRANT accord_signing_owner TO accord_signing_migrator WITH SET TRUE;
-GRANT accord_signing_owner TO accord_signing_migrator WITH ADMIN FALSE;
+`gitlab-get-project.json` matches `GET /api/v4/projects/77831` and returns project ID `77831`,
+`path_with_namespace: acme/demo`, `default_branch: main`, archived false, and a fixed
+`last_activity_at`. It has no GitHub `node_id`, `/repos` route, or GitHub header.
 
-CREATE DATABASE accord OWNER accord_migrator;
-CREATE DATABASE accord_webhook OWNER accord_webhook_owner;
-CREATE DATABASE accord_signing OWNER accord_signing_owner;
+`object-storage-adapter.schema.json` is closed and requires exact adapter identity/version/digest,
+environment class, tested/expiry times, evidence digest, eligibility, and exactly immutable
+versions, SHA-256 checksums, WORM, legal hold, multipart, quarantine isolation, replication
+evidence, and deletion receipts. The local profile marks the first six `SUPPORTED_AND_TESTED`, the
+final two `EXTERNAL_EVIDENCE_REQUIRED`, and `production_eligible: false`. Evidence references are
+immutable digests or result paths, never mutable URLs.
 
-\connect accord
-REVOKE CONNECT ON DATABASE accord FROM PUBLIC;
-GRANT CONNECT ON DATABASE accord TO accord_migrator_login, accord_api_login, accord_worker_login;
-GRANT USAGE, CREATE ON SCHEMA public TO accord_migrator;
-GRANT USAGE ON SCHEMA public TO accord_api, accord_worker;
-ALTER DEFAULT PRIVILEGES FOR ROLE accord_migrator IN SCHEMA public
-  REVOKE ALL ON TABLES FROM accord_api, accord_worker;
+The MinIO init service creates separate normal-runtime and scanner accounts. Tests require distinct
+version IDs for two uploads, recomputed upload/download digests, retention and legal hold, a forced
+multipart upload with no orphan, and both quarantine deny directions.
 
-\connect accord_webhook
-REVOKE CONNECT ON DATABASE accord_webhook FROM PUBLIC;
-GRANT CONNECT ON DATABASE accord_webhook TO accord_webhook_migrator_login, accord_webhook_runtime_login;
-GRANT USAGE, CREATE ON SCHEMA public TO accord_webhook_owner;
-GRANT USAGE ON SCHEMA public TO accord_webhook_runtime;
+Expected GREEN: schema, profile, GitLab facts, KMS alias, and MinIO policy tests pass structurally.
 
-\connect accord_signing
-GRANT USAGE, CREATE ON SCHEMA public TO accord_signing_owner;
-GRANT CONNECT ON DATABASE accord_signing TO accord_signing_runtime;
-GRANT USAGE ON SCHEMA public TO accord_signing_runtime;
-```
+- [ ] **Step 7: Add deterministic Node-owned start, TLS negative matrix, and stop**
 
-The control-plane DSNs use only `accord_migrator_login`, `accord_api_login`, and `accord_worker_login`; each session must explicitly set its one paired NOLOGIN role. `accord_webhook_migrator_login` and `accord_signing_migrator` are migration-only credentials and are never mounted into runtime workloads; their table owners are NOLOGIN. Webhook runtime connects only as `accord_webhook_runtime_login` and sets `accord_webhook_runtime`; signing runtime connects only as `accord_signing_runtime`. No runtime login directly or transitively reaches an owner role. The signing table owner is the sole approved Accord `BYPASSRLS` role, and no database installs a default table DML grant. Every migration grants exact table privileges only after forced RLS succeeds.
+`local-up.mjs` runs preflight, verifies/renders images, generates fresh PKI, starts PostgreSQL,
+executes Temporal schema setup, starts the remaining services, runs all local checks, and writes
+`build/verification/ft13-local.json` only through `check-result.mjs`.
 
-Create `infra/local/wiremock/mappings/get-repository.json`:
+Prove this exact matrix:
 
-```json
-{
-  "request": { "method": "GET", "urlPath": "/repos/acme/demo" },
-  "response": {
-    "status": 200,
-    "headers": { "Content-Type": "application/json" },
-    "jsonBody": { "id": 77831, "node_id": "R_kgDOABCD", "name": "demo", "default_branch": "main" }
-  }
-}
-```
+| Client case | Expected |
+| --- | --- |
+| worker cert + trusted CA + server name `temporal` | production worker completes one workflow |
+| UI cert + trusted CA + server name `temporal` | UI namespace request succeeds |
+| plaintext on 7233 | closes without a Temporal response |
+| trusted CA and no client cert | TLS handshake fails |
+| wrong-CA client cert | TLS handshake fails |
+| worker cert with server name `wrong.temporal.test` | hostname verification fails |
+| trusted-CA certificate with serverAuth-only EKU | TLS client-auth handshake fails |
 
-Create `infra/local/localstack/ready.d/10-create-kms-key.sh`:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-key_id="$(awslocal kms create-key --description 'Accord local signing' --key-usage SIGN_VERIFY --key-spec ECC_NIST_P256 --query KeyMetadata.KeyId --output text)"
-awslocal kms create-alias --alias-name alias/accord-local-signing --target-key-id "$key_id"
-```
-
-Create `infra/local/otel-collector.yaml`:
-
-```yaml
-receivers:
-  otlp:
-    protocols:
-      grpc: { endpoint: 0.0.0.0:4317 }
-      http: { endpoint: 0.0.0.0:4318 }
-processors:
-  memory_limiter: { limit_mib: 256, check_interval: 1s }
-  batch: {}
-exporters:
-  debug: { verbosity: basic }
-  prometheus: { endpoint: 0.0.0.0:9464 }
-service:
-  pipelines:
-    traces: { receivers: [otlp], processors: [memory_limiter, batch], exporters: [debug] }
-    metrics: { receivers: [otlp], processors: [memory_limiter, batch], exporters: [prometheus] }
-```
-
-- [ ] **Step 4: Add deterministic start and stop scripts**
-
-Create `scripts/local-up.ps1`:
-
-```powershell
-$ErrorActionPreference = 'Stop'
-$compose = 'infra/local/compose.yaml'
-docker compose -f $compose up -d --wait postgres temporal temporal-ui minio minio-init mock-git-provider mock-kms otel-collector
-$env:ACCORD_DB_URL = 'jdbc:postgresql://localhost:5432/accord'
-$env:ACCORD_DB_MIGRATOR_USER = 'accord_migrator_login'
-$env:ACCORD_DB_MIGRATOR_PASSWORD = 'local-migrator-only'
-./gradlew :database:control-plane:flywayMigrate
-Get-ChildItem -LiteralPath 'database/webhook-edge/migrations' -Filter '*.sql' | Sort-Object Name | ForEach-Object {
-  $migration = "SET ROLE accord_webhook_owner;`n" + (Get-Content -Raw -Encoding utf8 $_.FullName)
-  $migration | docker compose -f $compose exec -T -e PGPASSWORD=local-webhook-migrator-only postgres psql -h 127.0.0.1 -v ON_ERROR_STOP=1 -U accord_webhook_migrator_login -d accord_webhook
-  if ($LASTEXITCODE -ne 0) { throw "Webhook migration failed: $($_.Name)" }
-}
-Write-Output 'Accord local foundation is ready'
-```
-
-Create `scripts/local-down.ps1`:
-
-```powershell
-$ErrorActionPreference = 'Stop'
-docker compose -f infra/local/compose.yaml down --remove-orphans
-if ($LASTEXITCODE -ne 0) { throw 'Failed to stop Accord local services' }
-Write-Output 'Accord local foundation is stopped; persisted data remains under infra/local/data'
-```
-
-- [ ] **Step 5: Start and verify the complete harness**
+`local-down.mjs` preserves data/PKI unless `--purge-local-state` is present. Purge resolves and
+proves the target is exactly `infra/local/state` under the repository before removal.
 
 Run:
 
-```bash
-pwsh -NoProfile -File scripts/local-up.ps1
-./gradlew :apps:control-plane:modules:reliability:test --tests '*TenantWorkRepositoryTest' --tests '*OutboxDispatcherTest' --tests '*InboxDispatcherTest'
-pwsh -NoProfile -File tests/integration/local-foundation.ps1
-```
+~~~powershell
+node scripts/local-up.mjs
+node --test tests/integration/temporal-mtls.test.mjs tests/integration/local-foundation.test.mjs
+./gradlew.bat :apps:control-plane:worker:test --tests '*TemporalLocalTopologyIT' --no-daemon --dependency-verification=strict
+node scripts/local-down.mjs
+~~~
 
-Expected: startup reports all health checks ready and applies both database schemas; the verification proves `accord_signing_owner` is the only Accord `BYPASSRLS` role, is NOLOGIN with only the migration member, and is unreachable from every runtime role; PostgreSQL tenant-work, message-lease generation/token fencing, and stale-acknowledgement rejection pass; MinIO proves the six locally testable capabilities and quarantine deny matrix; the schema rejects using the local profile as production evidence because replication and deletion receipts require external proof; and the run ends with `local-foundation: PASS`.
+Expected GREEN: real server/UI/worker mTLS, database separation, GitLab facts, KMS, and local object
+capabilities pass; every negative TLS case fails for its named reason; no key appears in evidence.
 
-- [ ] **Step 6: Commit the local integration harness**
+- [ ] **Step 8: Verify and commit only FT13 paths**
 
-```bash
-git add contracts/capabilities/object-storage-adapter.schema.json infra/local/object-storage-capabilities.json infra/local/compose.yaml infra/local/minio infra/local/postgres/00-roles-and-databases.sql infra/local/wiremock/mappings/get-repository.json infra/local/localstack/ready.d/10-create-kms-key.sh infra/local/otel-collector.yaml scripts/local-up.ps1 scripts/local-down.ps1 tests/integration/local-foundation.ps1
-git commit -m "build: add local Accord integration harness"
-```
+~~~powershell
+node scripts/images/verify-images.mjs --scope local
+node --test tests/integration/image-lock.test.mjs tests/integration/local-foundation.test.mjs tests/integration/temporal-mtls.test.mjs
+./gradlew.bat :apps:control-plane:worker:test --tests '*TemporalLocalTopologyIT' --no-daemon --dependency-verification=strict
+git diff --check
+$task13Paths = @(
+  'contracts/capabilities/object-storage-adapter.schema.json'
+  'contracts/supply-chain/image-lock.schema.json'
+  'contracts/verification/check-result.schema.json'
+  'infra/images/images.lock.json'
+  'infra/local/compose.yaml'
+  'infra/local/postgres/00-roles-and-databases.sql'
+  'infra/local/temporal/server.yaml'
+  'infra/local/temporal/dynamicconfig/development-sql.yaml'
+  'infra/local/minio/normal-runtime-policy.json'
+  'infra/local/minio/quarantine-scanner-policy.json'
+  'infra/local/wiremock/mappings/gitlab-get-project.json'
+  'infra/local/localstack/ready.d/10-create-kms-key.sh'
+  'infra/local/otel-collector.yaml'
+  'infra/local/object-storage-capabilities.json'
+  'scripts/verification/check-result.mjs'
+  'scripts/verification/preflight.mjs'
+  'scripts/images/lock-images.mjs'
+  'scripts/images/render-compose-images.mjs'
+  'scripts/images/verify-images.mjs'
+  'scripts/local-up.mjs'
+  'scripts/local-down.mjs'
+  'scripts/local-up.ps1'
+  'scripts/local-down.ps1'
+  'tests/integration/image-lock.test.mjs'
+  'tests/integration/local-foundation.test.mjs'
+  'tests/integration/temporal-mtls.test.mjs'
+  'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/LocalTemporalPki.java'
+  'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/TemporalLocalTopologyIT.java'
+  'apps/control-plane/worker/build.gradle'
+  '.tool-versions'
+  '.gitignore'
+)
+git add -- $task13Paths
+git diff --cached --name-only
+git commit -m "build: add digest-locked Temporal mTLS topology"
+~~~
 
-### Task 14: Wire OpenTelemetry With Sensitive-Data Guardrails
+Expected: the staged set contains the single image lock and `.tool-versions` core pins, no generated
+PKI/state, no GitHub product mock, and no undeclared Task 12-or-earlier implementation or migration change. The shared
+`apps/control-plane/worker/build.gradle` is the only intentional pre-existing implementation path.
+Missing external image resolution leaves FT13 `BLOCKED` and does not produce a partial commit.
+
+### Task 14: Enforce Typed, Fail-Closed OpenTelemetry
+
+**Goal:** Expose only closed typed telemetry attributes to Accord code, reject sensitive candidates
+without partial export, and place a final SDK exporter guard after automatic instrumentation so
+unknown or invalid span, metric, and log records cannot escape.
 
 **Files:**
-- Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/SafeTelemetryAttributes.java`
-- Create: `libs/java/observability/src/test/java/com/inforvans/accord/observability/SafeTelemetryAttributesTest.java`
+- Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/TelemetryAttributeKey.java`
+- Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/TelemetryIdentifiers.java`
+- Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/TelemetryOperation.java`
+- Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/TelemetryProvider.java`
+- Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/TelemetryResultCode.java`
+- Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/TelemetryAttributes.java`
+- Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/SensitiveTelemetryCandidate.java`
+- Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/TelemetryDropReason.java`
+- Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/TelemetryRecordGuard.java`
+- Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/TelemetryGuardMetrics.java`
+- Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/GuardedSpanExporter.java`
+- Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/GuardedMetricExporter.java`
+- Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/GuardedLogRecordExporter.java`
+- Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/AccordOpenTelemetryConfiguration.java`
+- Create: `libs/java/observability/src/test/java/com/inforvans/accord/observability/TelemetryAttributesTest.java`
+- Create: `libs/java/observability/src/test/java/com/inforvans/accord/observability/TelemetryRecordGuardTest.java`
+- Create: `libs/java/observability/src/test/java/com/inforvans/accord/observability/TelemetryExporterGuardTest.java`
+- Create: `tests/security-negative/src/test/java/com/inforvans/accord/security/TelemetryApiBoundaryTest.java`
 - Create: `tests/security-negative/src/test/java/com/inforvans/accord/security/TelemetryLeakTest.java`
 - Modify: `libs/java/observability/build.gradle`
+- Modify: `libs/java/observability/gradle.lockfile`
 - Modify: `gradle/libs.versions.toml`
+- Modify: `gradle/verification-metadata.xml`
 - Modify: `apps/control-plane/api/build.gradle`
+- Modify: `apps/control-plane/api/gradle.lockfile`
 - Modify: `apps/control-plane/worker/build.gradle`
+- Modify: `apps/control-plane/worker/gradle.lockfile`
 - Modify: `apps/webhook-edge/build.gradle`
+- Modify: `apps/webhook-edge/gradle.lockfile`
 - Modify: `apps/control-plane/api/src/main/resources/application.yml`
 - Modify: `apps/control-plane/worker/src/main/resources/application.yml`
 - Modify: `apps/webhook-edge/src/main/resources/application.yml`
+- Modify: `infra/local/otel-collector.yaml`
 
-- [ ] **Step 1: Write failing allowlist and end-to-end leak tests**
+The library is the only Accord package allowed to import OpenTelemetry SDK exporters, construct
+`AttributesBuilder`, call span `setAttribute`/`addEvent`, create metric tag sets, or populate OTel
+log attributes. Application packages receive typed operations only.
 
-`SafeTelemetryAttributesTest` supplies allowed scope fields plus authorization, cookie, token, webhook body, attachment text, source, diff, prompt, and arbitrary user text. Assert that only the exact allowlist remains, values are capped at 255 Unicode code points, control characters are rejected, and caller-owned maps cannot mutate the result.
+**Authoritative invariants:**
 
-`TelemetryLeakTest` starts API, worker, and Webhook Edge with an in-memory OpenTelemetry exporter and a JSON log appender, submits sentinel secrets through headers and bodies, and asserts the sentinels do not occur in:
+1. No public method accepts `Map<String, String>`, `Map<String, ?>`, arbitrary attribute names,
+   headers, request/response objects, exceptions, or `Object.toString()`. `TelemetryAttributes`
+   accepts only the closed value types and returns immutable OTel `Attributes`.
+2. `TelemetryAttributeKey` is exhaustive. Trace-only identifier keys are tenant ID, scope type/ID,
+   correlation ID, and causation ID. Bounded keys are operation, provider, result code, aggregate
+   type, event type, HTTP method, locked route template, and HTTP status. Tenant/scope/correlation
+   identifiers are forbidden metric labels.
+3. `TelemetryOperation`, `TelemetryProvider`, and `TelemetryResultCode` are enums.
+   `TelemetryOperation` declares whether provider context applies: non-provider operations require
+   `TelemetryProvider.NOT_APPLICABLE`, while provider operations forbid it. Identifier value objects
+   accept only canonical UUIDs or the task's existing bounded identifier syntax. `HttpMethod`,
+   `AggregateType`, and `EventType` are closed enums nested in `TelemetryAttributes`; nested
+   `RouteTemplate` and `HttpStatus` records accept only registered templates and status 100-599.
+   No value is truncated: an over-limit or invalid value rejects the record.
+4. `SensitiveTelemetryCandidate` uses a fixed, tested ruleset: authorization/basic/bearer prefixes,
+   cookie/session/CSRF names, `glpat-`, `ghp_`, `whsec_`, PEM headers, three-segment JWT shape,
+   URI query/fragment text, control characters, and configured sentinels. Matching any key or value
+   drops the complete record; it never exports a redacted prefix or remaining attributes.
+5. The final guard validates resource attributes, span name, every span/event/link attribute,
+   metric name/unit/description/point attributes/exemplars, and log body/attributes. Unknown key,
+   invalid typed value, sensitive candidate, raw URL, exception message, or non-registered name
+   drops that complete span, metric point, or log record before the delegate exporter sees it.
+6. Drop handling increments only `accord.telemetry.records.dropped` with closed dimensions
+   `signal=span|metric|log` and `reason=<TelemetryDropReason>`. The counter contains no tenant,
+   route, value, exception, class name, or caller-provided text.
+7. Export failure, queue saturation, timeout, and collector outage never block business work or make
+   readiness false. Batches and queues are bounded; shutdown attempts one flush for at most five
+   seconds, records a fixed outcome, and terminates.
+8. Automatic instrumentation cannot capture request/response headers, cookies, bodies, form data,
+   query strings, raw URLs, baggage, stack traces, or exception messages. HTTP spans use the locked
+   route template.
+9. The default local collector has no debug exporter. It writes bounded JSONL under ignored
+   `infra/local/state/otel` and exposes Prometheus metrics. A collector-side keep-list is defense in
+   depth, not the primary application guard.
+10. Security/audit events remain PostgreSQL business records. Sampling or collector availability
+    never decides whether those records exist.
 
-- span names, attributes, events, links, resource attributes, or baggage;
-- metric names, tags, exemplars, or descriptions;
-- structured log fields, exception messages, or MDC;
-- health responses and error details.
+- [ ] **Step 1: Write RED compile-time typed-API tests**
 
-It also proves HTTP spans use locked route templates rather than raw paths/query strings and that error telemetry records a bounded result code rather than an exception message containing input.
+`TelemetryApiBoundaryTest` scans compiled application classes and source imports. It rejects:
 
-Run:
+- `Map`, `Object`, `Throwable`, servlet, Spring HTTP, header, cookie, or request/response parameters
+  in public observability methods;
+- direct OTel `Attributes.builder`, `setAttribute`, `addEvent`, exporter, or Micrometer tag calls
+  outside `libs/java/observability` and generated instrumentation;
+- application-defined telemetry key string literals;
+- tenant/scope/correlation keys used by a meter operation;
+- any catch block that sends `Throwable.getMessage()` or `toString()` to telemetry.
 
-~~~bash
-./gradlew :libs:java:observability:test :tests:security-negative:test --tests '*TelemetryLeakTest'
-~~~
-
-Expected: FAIL because the bounded observability library and process wiring are absent.
-
-- [ ] **Step 2: Implement one immutable Java allowlist**
-
-Create `SafeTelemetryAttributes.java`:
+Use this closed public shape. All variant and variant-only value types remain in
+`TelemetryAttributes.java`; no generic attribute-value container is exposed:
 
 ~~~java
-package com.inforvans.accord.observability;
-
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.Set;
-
-public final class SafeTelemetryAttributes {
-    private static final Set<String> ALLOWED = Set.of(
-        "tenant_id",
-        "scope_type",
-        "scope_id",
-        "correlation_id",
-        "causation_id",
-        "aggregate_type",
-        "event_type",
-        "operation",
-        "provider",
-        "result_code"
-    );
-    private static final int MAX_CODE_POINTS = 255;
-
-    private SafeTelemetryAttributes() {}
-
-    public static Map<String, String> from(Map<String, String> input) {
-        Map<String, String> output = new LinkedHashMap<>();
-        input.forEach((key, value) -> {
-            if (!ALLOWED.contains(key) || value == null) {
-                return;
-            }
-            if (value.codePoints().anyMatch(codePoint ->
-                    Character.isISOControl(codePoint))) {
-                throw new IllegalArgumentException(
-                    "telemetry attribute contains a control character");
-            }
-            int end = value.offsetByCodePoints(
-                0,
-                Math.min(value.codePointCount(0, value.length()), MAX_CODE_POINTS));
-            output.put(key, value.substring(0, end));
-        });
-        return Map.copyOf(output);
+public sealed interface TelemetryAttributes
+        permits TelemetryAttributes.Http, TelemetryAttributes.Workflow,
+                TelemetryAttributes.DomainEvent, TelemetryAttributes.Metric {
+    default Attributes toOtelAttributes() {
+        return TelemetryRecordGuard.validatedAttributes(this);
     }
+
+    record Http(
+            TelemetryIdentifiers identifiers,
+            TelemetryOperation operation,
+            TelemetryProvider provider,
+            TelemetryResultCode resultCode,
+            HttpMethod method,
+            RouteTemplate route,
+            HttpStatus status) implements TelemetryAttributes {}
+
+    record Workflow(
+            TelemetryIdentifiers identifiers,
+            TelemetryOperation operation,
+            TelemetryProvider provider,
+            TelemetryResultCode resultCode) implements TelemetryAttributes {}
+
+    record DomainEvent(
+            TelemetryIdentifiers identifiers,
+            TelemetryOperation operation,
+            TelemetryProvider provider,
+            TelemetryResultCode resultCode,
+            AggregateType aggregateType,
+            EventType eventType) implements TelemetryAttributes {}
+
+    record Metric(
+            TelemetryOperation operation,
+            TelemetryProvider provider,
+            TelemetryResultCode resultCode) implements TelemetryAttributes {}
+
+    enum HttpMethod { GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS }
+    record RouteTemplate(String value) {}
+    record HttpStatus(int value) {}
+    enum AggregateType { CONTRACT_VALIDATION }
+    enum EventType { CONTRACT_VALIDATION_COMPLETED }
 }
 ~~~
 
-No overload accepts arbitrary objects, request/response types, headers, exception instances, or `toString()` values. Instrumentation must construct an explicit string map and pass it through this method. A build-time ArchUnit rule forbids direct calls to span `setAttribute` from Accord packages outside `libs/java/observability` and generated instrumentation.
+Each variant's compact constructor rejects a null field, an invalid provider/operation pairing, or
+a value outside its declared variant. `RouteTemplate` checks the immutable route registry and
+`HttpStatus` enforces 100-599. `Metric` structurally cannot carry tenant, scope, correlation,
+causation, route, aggregate, or event values. `TelemetryIdentifiers` contains typed optional tenant,
+scope, correlation, and causation fields; it does not implement a generic key/value container.
 
-- [ ] **Step 3: Configure Spring Boot OpenTelemetry consistently in all Java processes**
+Run:
 
-Add version-catalog aliases:
-
-~~~toml
-micrometer-tracing-otel = { module = "io.micrometer:micrometer-tracing-bridge-otel" }
-micrometer-registry-prometheus = { module = "io.micrometer:micrometer-registry-prometheus" }
-otel-exporter-otlp = { module = "io.opentelemetry:opentelemetry-exporter-otlp" }
-otel-sdk-testing = { module = "io.opentelemetry:opentelemetry-sdk-testing" }
+~~~powershell
+./gradlew.bat :tests:security-negative:test --tests '*TelemetryApiBoundaryTest' --no-daemon
 ~~~
 
-`libs/java/observability/build.gradle` uses `java-library` and exposes only the OpenTelemetry API needed by its bounded adapter. API, worker, and Webhook Edge each depend on that library plus Micrometer bridge, Prometheus registry, and OTLP exporter. They remain separate processes and emit distinct `service.name` values.
+Expected RED: the closed API and boundary rule do not exist.
 
-Merge this management configuration into all three `application.yml` files without removing their existing datasource, Modulith, process-role, or health settings:
+- [ ] **Step 2: Write RED value, sensitive-candidate, and whole-record-drop tests**
+
+`TelemetryAttributesTest` covers canonical identifiers, every enum value, route-template
+registration, immutability, deterministic key order, and exact OTel scalar types. It rejects null,
+blank, non-canonical UUID, unregistered route/operation/provider/result, control characters, and a
+value above 255 Unicode code points without truncation.
+
+`TelemetryRecordGuardTest` constructs final SDK data, including data that bypasses the typed API as
+automatic instrumentation would, and proves:
+
+- one unknown attribute among otherwise valid attributes drops the entire record;
+- each sensitive-candidate rule drops the complete record;
+- raw path, query, URL, exception message, event, link, resource, exemplar, and log-body sentinels
+  never reach an exporter;
+- allowed OTel semantic-convention keys have exact type and bounded value validators;
+- a rejected record increments exactly one fixed reason counter;
+- the counter itself passes the guard and cannot recursively produce another drop.
+
+Run:
+
+~~~powershell
+./gradlew.bat :libs:java:observability:test --tests '*TelemetryAttributesTest' --tests '*TelemetryRecordGuardTest' --no-daemon
+~~~
+
+Expected RED: typed values, sensitive classifier, and final record guard are absent.
+
+- [ ] **Step 3: Implement the typed attribute model and fixed rejection taxonomy**
+
+`TelemetryAttributeKey` maps each closed key to its OTel `AttributeKey<?>`, allowed signal set, value
+kind, and maximum length. Only this enum contains OTel key strings. `TelemetryIdentifiers` validates
+canonical values at construction. The three behavior enums expose stable lowercase wire names and
+reject unknown external strings before telemetry construction.
+
+Use this exact drop taxonomy:
+
+~~~java
+public enum TelemetryDropReason {
+    UNKNOWN_KEY,
+    INVALID_TYPE,
+    INVALID_VALUE,
+    SENSITIVE_KEY,
+    SENSITIVE_VALUE,
+    RAW_URL,
+    EXCEPTION_CONTENT,
+    UNREGISTERED_NAME,
+    CARDINALITY_POLICY,
+    EXPORT_QUEUE_FULL,
+    EXPORT_TIMEOUT
+}
+~~~
+
+`SensitiveTelemetryCandidate` returns only an enum reason and never includes the examined text in
+an exception or `toString()`. `TelemetryAttributes.toOtelAttributes()` delegates to the same guard
+rules used at export.
+
+Run the focused tests again. Expected GREEN: every accepted typed value becomes exact immutable
+`Attributes` and every invalid input fails with a fixed non-sensitive reason.
+
+- [ ] **Step 4: Write RED final exporter, cardinality, outage, and shutdown tests**
+
+`TelemetryExporterGuardTest` wraps recording span, metric, and log exporters and proves:
+
+- valid records are delegated byte-for-byte;
+- invalid records are individually removed from a mixed batch and the delegate never sees them;
+- 10,000 distinct tenant/scope IDs create zero new metric label combinations;
+- operation/provider/result labels remain bounded by the enum Cartesian product;
+- a delegate failure returns a normalized exporter failure without throwing into application code;
+- queue saturation drops new telemetry with `EXPORT_QUEUE_FULL`;
+- a delegate that never completes is abandoned at the configured timeout;
+- shutdown performs at most one flush and returns within five seconds;
+- guard/drop metrics do not recurse.
+
+Run the focused exporter test. Expected RED: exporter decorators and guard metrics are absent.
+
+- [ ] **Step 5: Implement final guards around every SDK exporter**
+
+`GuardedSpanExporter`, `GuardedMetricExporter`, and `GuardedLogRecordExporter` filter individual
+records through `TelemetryRecordGuard` immediately before delegation. They use bounded immutable
+copies and return the SDK's success result when all records were intentionally dropped; the fixed
+drop counter makes the loss visible. Delegate exceptions and failed futures are normalized and
+never include delegate exception text.
+
+`AccordOpenTelemetryConfiguration` owns SDK construction, installs all three guarded exporters,
+sets bounded batch/queue/timeout values, disables baggage, and registers graceful shutdown. No
+application creates a second SDK/exporter bean. The library depends on OTel API/SDK/exporter SPI;
+applications depend on the library and Micrometer bridge only.
+
+Run:
+
+~~~powershell
+./gradlew.bat :libs:java:observability:test --no-daemon
+~~~
+
+Expected GREEN: typed, guard, exporter, cardinality, outage, recursion, and shutdown tests pass.
+
+- [ ] **Step 6: Write RED end-to-end leak tests for all executable processes**
+
+`TelemetryLeakTest` starts API, worker, and Webhook Edge with in-memory final exporters and a JSON
+log appender. Send a distinct sentinel through authorization, cookies, CSRF, path/query, GitLab
+headers/body, contract body, attachment/source/diff/prompt-shaped fields, and a thrown exception.
+Assert no sentinel appears in:
+
+- span names, resources, attributes, events, links, status descriptions, or baggage;
+- metric names, units, descriptions, points, labels, or exemplars;
+- log body, structured fields, MDC, exception field, or stack trace;
+- health responses, RFC 7807 bodies, collector JSONL, or Prometheus labels.
+
+Also assert route templates rather than raw IDs, a fixed result code rather than exception text,
+readiness 200 during collector outage, and increasing fixed exporter failure/drop metrics.
+
+Run:
+
+~~~powershell
+./gradlew.bat :tests:security-negative:test --tests '*TelemetryLeakTest' --no-daemon
+~~~
+
+Expected RED: process wiring and final guards are not installed.
+
+- [ ] **Step 7: Wire the three processes and collector without broad capture**
+
+Add version-catalog aliases for the Micrometer OTel bridge, Prometheus registry, OTel SDK/exporter
+SPI/testing, and OTLP exporters at versions governed by the Spring Boot BOM where available.
+Each process has a distinct immutable `service.name`.
+
+Merge these properties without removing Task 9-13 datasource, process-role, Temporal, or health
+configuration:
 
 ~~~yaml
 management:
-  endpoints.web.exposure.include: health,prometheus
-  endpoint.health.probes.enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
   tracing:
-    sampling.probability: ${ACCORD_TRACE_SAMPLE_RATE:0.1}
-    baggage.enabled: false
-  otlp:
-    tracing.endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318}/v1/traces
-    metrics.export.url: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318}/v1/metrics
-  metrics.tags:
-    service: ${spring.application.name}
-server:
-  forward-headers-strategy: framework
+    sampling:
+      probability: ${ACCORD_TRACE_SAMPLE_RATE:0.1}
+    baggage:
+      enabled: false
+  metrics:
+    tags:
+      service: ${spring.application.name}
+accord:
+  telemetry:
+    endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318}
+    queue-capacity: 2048
+    batch-size: 256
+    export-timeout: PT2S
+    shutdown-timeout: PT5S
 ~~~
 
-Configure instrumentation to suppress request/response headers, query strings, bodies, form values, cookies, and exception messages. Only normalized method, locked route template, status code, duration, and `SafeTelemetryAttributes` output are permitted. The Webhook Edge continues to store only body digest plus normalized signal; telemetry never receives raw bytes.
+Explicitly disable HTTP header/body/query capture, log correlation fields outside the closed set,
+and exception-message/status-description capture. Collector `transform`/`filter` processors keep
+only the documented semantic and Accord keys; the file exporter writes rotated bounded JSONL to
+`infra/local/state/otel`. There is no debug exporter.
 
-- [ ] **Step 4: Add cardinality, failure, and shutdown controls**
+Run the leak test and then stop the collector during one authenticated API request.
 
-For each process:
+Expected GREEN: business response and readiness remain correct; final exporters and collector
+contain zero sentinel values; only fixed drop/outage metrics increase.
 
-1. Bound route, operation, provider, result, aggregate, and event values to registered enums/templates; never use IDs as metric names or span names.
-2. Apply tenant/scope IDs only to traces and structured audit correlation, not Prometheus labels.
-3. Use batch span export with bounded queue, export timeout, and drop counters; application work must not block on collector failure.
-4. Flush exporters during graceful shutdown with a five-second cap, then terminate without extending the pod grace period indefinitely.
-5. Keep readiness independent from collector availability; expose exporter failure/drop metrics.
-6. Use head sampling defaults locally and a production parent-based sampler configured by environment. Security/audit events are business records, not guaranteed by trace sampling.
-7. Prohibit automatic log capture of MDC keys not explicitly installed by the observability adapter.
+- [ ] **Step 8: Refresh locks, run regression, and commit only FT14 paths**
 
-Add tests for collector outage, queue saturation, shutdown timeout, long Unicode values, metric-cardinality bounds, and no telemetry recursion.
-
-- [ ] **Step 5: Verify collector ingestion and negative sentinels**
-
-Run:
-
-~~~bash
-./gradlew :libs:java:observability:test :tests:security-negative:test
-pwsh -NoProfile -File scripts/local-up.ps1
-./gradlew :apps:control-plane:api:bootRun --args='--server.port=18080'
+~~~powershell
+./gradlew.bat :libs:java:observability:dependencies :apps:control-plane:api:dependencies :apps:control-plane:worker:dependencies :apps:webhook-edge:dependencies --write-locks --no-configuration-cache --no-daemon --dependency-verification=strict
+./gradlew.bat resolveAndLockAll --write-verification-metadata sha256,pgp --no-configuration-cache --no-daemon
+./gradlew.bat resolveAndLockAll --no-configuration-cache --no-daemon --dependency-verification=strict
+./gradlew.bat :libs:java:observability:test :tests:security-negative:test :apps:control-plane:api:test :apps:control-plane:worker:test :apps:webhook-edge:test --no-daemon --dependency-verification=strict
+git diff --check
+$task14Paths = @(
+  'libs/java/observability/src/main/java/com/inforvans/accord/observability/TelemetryAttributeKey.java'
+  'libs/java/observability/src/main/java/com/inforvans/accord/observability/TelemetryIdentifiers.java'
+  'libs/java/observability/src/main/java/com/inforvans/accord/observability/TelemetryOperation.java'
+  'libs/java/observability/src/main/java/com/inforvans/accord/observability/TelemetryProvider.java'
+  'libs/java/observability/src/main/java/com/inforvans/accord/observability/TelemetryResultCode.java'
+  'libs/java/observability/src/main/java/com/inforvans/accord/observability/TelemetryAttributes.java'
+  'libs/java/observability/src/main/java/com/inforvans/accord/observability/SensitiveTelemetryCandidate.java'
+  'libs/java/observability/src/main/java/com/inforvans/accord/observability/TelemetryDropReason.java'
+  'libs/java/observability/src/main/java/com/inforvans/accord/observability/TelemetryRecordGuard.java'
+  'libs/java/observability/src/main/java/com/inforvans/accord/observability/TelemetryGuardMetrics.java'
+  'libs/java/observability/src/main/java/com/inforvans/accord/observability/GuardedSpanExporter.java'
+  'libs/java/observability/src/main/java/com/inforvans/accord/observability/GuardedMetricExporter.java'
+  'libs/java/observability/src/main/java/com/inforvans/accord/observability/GuardedLogRecordExporter.java'
+  'libs/java/observability/src/main/java/com/inforvans/accord/observability/AccordOpenTelemetryConfiguration.java'
+  'libs/java/observability/src/test/java/com/inforvans/accord/observability/TelemetryAttributesTest.java'
+  'libs/java/observability/src/test/java/com/inforvans/accord/observability/TelemetryRecordGuardTest.java'
+  'libs/java/observability/src/test/java/com/inforvans/accord/observability/TelemetryExporterGuardTest.java'
+  'libs/java/observability/build.gradle'
+  'libs/java/observability/gradle.lockfile'
+  'tests/security-negative/src/test/java/com/inforvans/accord/security/TelemetryApiBoundaryTest.java'
+  'tests/security-negative/src/test/java/com/inforvans/accord/security/TelemetryLeakTest.java'
+  'gradle/libs.versions.toml'
+  'gradle/verification-metadata.xml'
+  'apps/control-plane/api/build.gradle'
+  'apps/control-plane/api/gradle.lockfile'
+  'apps/control-plane/worker/build.gradle'
+  'apps/control-plane/worker/gradle.lockfile'
+  'apps/webhook-edge/build.gradle'
+  'apps/webhook-edge/gradle.lockfile'
+  'apps/control-plane/api/src/main/resources/application.yml'
+  'apps/control-plane/worker/src/main/resources/application.yml'
+  'apps/webhook-edge/src/main/resources/application.yml'
+  'infra/local/otel-collector.yaml'
+)
+git add -- $task14Paths
+git diff --cached --name-only
+git commit -m "feat: enforce typed fail-closed telemetry"
 ~~~
 
-From a second shell, invoke readiness and one authenticated fixture request, then inspect collector output. Expected:
+Expected: strict dependency resolution is stable, the staged set contains no unrelated application
+code, direct application OTel attribute calls are zero, every leak/outage/cardinality test passes,
+and no telemetry record is partially exported after a policy violation.
 
-- resources identify `accord-control-api`, `accord-control-worker`, and `accord-webhook-edge` independently;
-- readiness remains 200 when the collector is stopped;
-- exporter failure/drop metrics increase as designed;
-- searching logs/exported telemetry for every sentinel secret returns zero matches;
-- no header, body, raw URL, attachment text, source, prompt, token, or cookie is present.
+### Task 15: Bind Workload Identity, Deployment, Network, And GitOps Authority
 
-- [ ] **Step 6: Commit observable, redacted process wiring**
-
-~~~bash
-git add gradle/libs.versions.toml libs/java/observability apps/control-plane/api/build.gradle apps/control-plane/worker/build.gradle apps/webhook-edge/build.gradle apps/control-plane/api/src/main/resources/application.yml apps/control-plane/worker/src/main/resources/application.yml apps/webhook-edge/src/main/resources/application.yml tests/security-negative
-git commit -m "feat: add redacted OpenTelemetry instrumentation"
-~~~
-
-### Task 15: Encode Kubernetes Process Isolation With Helm, OpenTofu, And Argo CD
+**Goal:** Render and provision three independently identified workloads from one closed component
+contract, enforce exact secret/database/network bindings, use a real OpenTofu environment adapter,
+and make Argo CD deploy only an immutable authoritative Accord source SHA.
 
 **Files:**
+- Create: `contracts/deployment/component-identity.schema.json`
+- Create: `contracts/deployment/promotion-input.schema.json`
 - Create: `infra/helm/accord/Chart.yaml`
 - Create: `infra/helm/accord/values.yaml`
 - Create: `infra/helm/accord/values.schema.json`
+- Create: `infra/helm/accord/templates/_helpers.tpl`
 - Create: `infra/helm/accord/templates/serviceaccounts.yaml`
+- Create: `infra/helm/accord/templates/externalsecrets.yaml`
 - Create: `infra/helm/accord/templates/workloads.yaml`
 - Create: `infra/helm/accord/templates/services.yaml`
 - Create: `infra/helm/accord/templates/networkpolicies.yaml`
+- Create: `infra/helm/accord/templates/cilium-networkpolicies.yaml`
 - Create: `infra/helm/accord/templates/poddisruptionbudgets.yaml`
 - Create: `infra/policy/accord.rego`
 - Create: `infra/opentofu/modules/accord-foundation-contract/variables.tf`
-- Create: `infra/opentofu/modules/accord-foundation-contract/main.tf`
+- Create: `infra/opentofu/modules/accord-foundation-contract/checks.tf`
 - Create: `infra/opentofu/modules/accord-foundation-contract/outputs.tf`
-- Create: `infra/argocd/accord.yaml`
+- Create: `infra/opentofu/environments/local-kubernetes/versions.tf`
+- Create: `infra/opentofu/environments/local-kubernetes/variables.tf`
+- Create: `infra/opentofu/environments/local-kubernetes/main.tf`
+- Create: `infra/opentofu/environments/local-kubernetes/outputs.tf`
+- Create: `infra/opentofu/environments/local-kubernetes/tests/local-kubernetes.tftest.hcl`
+- Create: `infra/argocd/project.yaml`
+- Generate: `infra/argocd/application.yaml`
+- Create: `scripts/deployment/render-values.mjs`
+- Create: `scripts/deployment/render-argocd.mjs`
+- Create: `scripts/deployment/verify-deployment.mjs`
+- Create: `tests/integration/deployment-contract.test.mjs`
 - Create: `tests/integration/deployment-contract.ps1`
+- Create: `tests/integration/fixtures/deployment/valid-test-promotion.json`
+- Create: `tests/integration/fixtures/deployment/invalid-shared-identity.json`
+- Create: `tests/integration/fixtures/deployment/invalid-broad-egress.json`
+- Create: `tests/integration/fixtures/deployment/invalid-plaintext-secret.json`
 
-- [ ] **Step 1: Write the failing rendered-deployment contract**
+`values.yaml` contains safe non-secret defaults but no image reference. `render-values.mjs` consumes a
+schema-valid promotion input and writes an ignored rendered values file. Production rendering
+cannot substitute a syntactic test digest for Task 16's verified promotion manifest.
 
-`deployment-contract.ps1` must run `helm lint --strict`, render every production value variant, validate with Kubeconform, and run Conftest. Parse the rendered YAML structurally and fail unless all of the following hold:
+**Authoritative invariants:**
 
-1. `control-api`, `control-worker`, and `webhook-edge` have different ServiceAccounts, database Secrets, login roles, session roles, Deployments, and immutable image-digest references.
-2. API uses `accord_api_login` then `accord_api`; worker uses `accord_worker_login` then `accord_worker`; Webhook Edge uses `accord_webhook_runtime_login` then `accord_webhook_runtime`.
-3. API and Webhook Edge probes use `/actuator/health/readiness` and `/actuator/health/liveness`. Worker uses bounded exec probes backed by its database/Temporal readiness and scheduler heartbeat, never `kill -0 1` alone.
-4. No workload receives another workload's Secret, ServiceAccount, role, projected webhook secret, or network destination.
-5. No control-plane workload receives a Git content/source/archive credential. Webhook binding projection contains webhook verification secrets only.
-6. Every container runs non-root with a fixed UID/GID, read-only root filesystem, default seccomp, all capabilities dropped, no privilege escalation, bounded `/tmp`, resource requests/limits, termination grace period, and rolling-update constraints.
-7. Every replicated process has topology spread, anti-affinity, and a PodDisruptionBudget that preserves one ready replica.
-8. Default-deny ingress/egress is present; every allowed edge matches the explicit matrix below.
-9. ServiceAccount token automount is false unless a later plan supplies an explicit workload-identity projection.
-10. Production values use digest-pinned images and external secret references; plaintext credentials fail schema/policy validation.
+1. The component object has exactly `control-api`, `control-worker`, and `webhook-edge`. Each binds
+   one unique ServiceAccount name, workload-identity provider, subject, audience, external-secret
+   store/reference, database secret, login role, session role, image digest, run UID/GID, probes,
+   and network profile. There is no positional `workload_identity_ids` list.
+2. Exact database pairs are API `accord_api_login -> accord_api`, worker
+   `accord_worker_login -> accord_worker`, and edge
+   `accord_webhook_runtime_login -> accord_webhook_runtime`. Secret, role, subject, and
+   ServiceAccount tuples are compared in both JSON Schema and Rego. Cross-component reuse fails.
+3. ServiceAccount token automount is false. When workload federation requires a projected token,
+   the pod mounts only a bounded token with the component's exact audience and expiration. Provider
+   annotations are rendered from closed AWS/GCP/Azure/Kubernetes branches rather than an arbitrary
+   annotations map.
+4. ExternalSecret objects contain only remote secret references and target-key names. Helm values,
+   Terraform state inputs, Argo manifests, environment variables, and Git contain no credential
+   value. Worker alone receives its Temporal client certificate reference; UI identity remains in
+   the local topology and is not mounted into an Accord workload.
+5. Each Deployment runs a distinct artifact, ServiceAccount, secret set, fixed non-root UID/GID,
+   read-only root, default seccomp, no privilege escalation, dropped capabilities, bounded
+   memory-backed `/tmp`, requests/limits, rolling update, topology spread, anti-affinity, and PDB.
+6. Network reachability and application TLS are different proofs. Standard NetworkPolicy proves
+   only L3/L4. PostgreSQL verify-full, Temporal mTLS, and OTLP TLS configuration/certificate
+   handshakes are validated separately and cannot be inferred from an allowed port.
+7. Every destination selects one closed route mode:
+   `KUBERNETES_SERVICE` requires namespace plus pod selectors;
+   `EGRESS_GATEWAY` requires the exact gateway namespace/pod/service;
+   `CILIUM_FQDN` requires a non-wildcard FQDN and Cilium policy;
+   `AUDITED_CIDR` requires bounded non-zero CIDRs, evidence digest, expiry, and owner.
+   Standard NetworkPolicy never claims to select a managed external endpoint by pod label.
+8. API has ingress-gateway, control PostgreSQL, OTLP, and DNS edges only. Worker has control
+   PostgreSQL, Temporal frontend, OTLP, and DNS only. Webhook Edge has edge-gateway, webhook
+   PostgreSQL, OTLP, and DNS only. Foundation grants no Provider/content/object-storage egress.
+9. The contract-only OpenTofu module uses variable validation, `check` blocks, and outputs; it
+   creates no fake resource. The `local-kubernetes` adapter is real: it configures pinned
+   Kubernetes and Helm providers, creates a namespace, and installs the chart with
+   `kubernetes_namespace_v1` and `helm_release` resources. Tests use OpenTofu mock providers to
+   assert the resource graph without contacting a cluster.
+10. Production object storage remains blocked until the Task 13 capability report and its signed
+    verification receipt prove all eight capabilities. OpenTofu consumes immutable report/receipt
+    digests, never caller-supplied booleans.
+11. `infra/argocd/application.yaml` is generated only after the infrastructure commit is present on
+    the authoritative remote. `spec.source.targetRevision` is the exact lowercase remote commit SHA,
+    never a branch, tag, `HEAD`, local branch, or remote-tracking guess.
+12. GitHub may host Accord deployment Git and its thin CI adapter. Argo receives no GitLab product
+    token; GitLab remains the product Provider exercised by Task 11/13.
 
-Run the test before creating the chart. Expected: FAIL because the chart is absent.
+- [ ] **Step 1: Write RED closed identity and promotion contract tests**
 
-- [ ] **Step 2: Define strict chart values and process-specific workloads**
+`component-identity.schema.json` uses `additionalProperties: false` recursively and a discriminator
+for `KUBERNETES`, `AWS`, `GCP`, or `AZURE` workload identity. Each branch requires exact subject and
+audience syntax and only its named provider fields.
 
-`Chart.yaml` pins the Kubernetes floor to 1.31. `values.schema.json` sets `additionalProperties: false` at every owned object, requires all three components, validates image digests, positive replica/resource/probe values, exact role names, and unique secret/account names.
+`promotion-input.schema.json` requires `schema_version`, environment class, authoritative remote
+SHA/tree, three component image repository-digest references, release-manifest digest, DSSE
+envelope digest, verification receipt digest, and creation time. Production requires
+`signature_verified: true` and `scan_policy_passed: true`; test fixtures explicitly use
+`environment_class: test` and can never render a production release.
 
-The baseline values are:
+`deployment-contract.test.mjs` first proves:
 
-~~~yaml
-global:
-  imagePullPolicy: IfNotPresent
-  otlpEndpoint: http://otel-collector.observability.svc:4318
-  terminationGracePeriodSeconds: 30
-components:
-  control-api:
-    image: registry.example.invalid/accord-control-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-    replicas: 2
-    port: 8080
-    processRole: control-api
-    databaseSecret: accord-control-api-db
-    databaseLoginRole: accord_api_login
-    databaseSessionRole: accord_api
-    readinessPath: /actuator/health/readiness
-    livenessPath: /actuator/health/liveness
-    serviceAccount: accord-control-api
-    runAsUser: 10001
-  control-worker:
-    image: registry.example.invalid/accord-control-worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-    replicas: 2
-    processRole: control-worker
-    databaseSecret: accord-control-worker-db
-    databaseLoginRole: accord_worker_login
-    databaseSessionRole: accord_worker
-    readinessCommand: ["/usr/bin/java", "-jar", "/opt/accord/bin/worker-probe.jar", "ready", "20"]
-    livenessCommand: ["/usr/bin/java", "-jar", "/opt/accord/bin/worker-probe.jar", "live", "20"]
-    serviceAccount: accord-control-worker
-    runAsUser: 10002
-  webhook-edge:
-    image: registry.example.invalid/accord-webhook-edge@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-    replicas: 2
-    port: 8080
-    processRole: webhook-edge
-    databaseSecret: accord-webhook-edge-db
-    databaseLoginRole: accord_webhook_runtime_login
-    databaseSessionRole: accord_webhook_runtime
-    webhookBindingSecret: accord-webhook-bindings
-    readinessPath: /actuator/health/readiness
-    livenessPath: /actuator/health/liveness
-    serviceAccount: accord-webhook-edge
-    runAsUser: 10003
+- exactly three component keys and exact role tuples;
+- unique SA, subject, secret target, DB secret, and image repository;
+- audience equals the component's registered workload audience;
+- wrong role, shared identity/secret, plaintext value, unknown field, mutable image, or test
+  promotion under production is rejected;
+- `values.yaml` has no fake/default image.
+
+Run:
+
+~~~powershell
+node --test tests/integration/deployment-contract.test.mjs
 ~~~
 
-The templates render one workload per component, not one shared pod. Database secret keys map only to the owning process's URL/login/password environment names. Webhook bindings mount read-only at `/run/secrets/accord/webhook-bindings.json` on a memory-backed Secret/CSI projection and are never exposed as environment values.
+Expected RED: schemas, fixtures, chart, and renderers are absent.
 
-This Foundation checkpoint renders only the repository-event `webhook-edge` profile because the Provider authorization callback contract and edge-local V003 inbox do not exist until Git Delivery Task 5. The canonical V1 boundary manifest already reserves the required `provider-auth-callback-edge` runtime profile; Git Delivery Task 5 must extend this same central chart with that second profile using the same signed image digest and a distinct ServiceAccount, database role, encryption key, ingress path, mTLS audience, queue and NetworkPolicy. M0 must not expose a callback route or create a placeholder identity that can receive traffic.
+- [ ] **Step 2: Implement closed values and cross-bound Helm resources**
 
-Worker implementation from Task 12 maintains `/tmp/accord/worker-live` and `worker-ready` with distinct liveness/readiness semantics. The exec command starts the independently packaged, JDK-only `worker-probe.jar` with the Java executable already present in the approved distroless runtime; it never invokes `/bin/sh`. The probe validates argument bounds, ownership, owner-only mode, regular-file type with `NOFOLLOW_LINKS`, bounded content, timestamp parsing, future-clock skew, and maximum age, and exits within the Kubernetes two-second timeout.
+`render-values.mjs` validates promotion input and component identity before producing the Helm
+values. It hashes both inputs into output annotations and refuses a remote SHA/tree or image digest
+mismatch. The three keyed component values have this exact ownership:
 
-- [ ] **Step 3: Encode the exact network and workload policy**
+| Component | ServiceAccount | Login/session role | Workload audience |
+| --- | --- | --- | --- |
+| `control-api` | `accord-control-api` | `accord_api_login` / `accord_api` | `accord-control-api` |
+| `control-worker` | `accord-control-worker` | `accord_worker_login` / `accord_worker` | `accord-control-worker` |
+| `webhook-edge` | `accord-webhook-edge` | `accord_webhook_runtime_login` / `accord_webhook_runtime` | `accord-webhook-edge` |
 
-Create separate NetworkPolicies, never one broad control-plane policy:
+`serviceaccounts.yaml` renders fixed token automount and the selected closed identity binding.
+`externalsecrets.yaml` renders one ExternalSecret per workload and no inline Secret.
+`workloads.yaml` cross-references the same component key for SA, image, secret, DB roles, TLS
+mounts, probes, UID/GID, and policy labels. It cannot index a separate positional list.
 
-| Source | Allowed destination | Port/purpose |
-| --- | --- | --- |
-| ingress gateway | control-api | TCP 8080 |
-| edge gateway | webhook-edge | TCP 8080 |
-| control-api | control-plane PostgreSQL | TCP 5432 |
-| control-worker | control-plane PostgreSQL | TCP 5432 |
-| control-worker | Temporal frontend | TCP 7233 mTLS |
-| each process | OTel collector | TCP 4318 |
-| each process | cluster DNS | UDP/TCP 53 |
-| webhook-edge | webhook PostgreSQL | TCP 5432 |
+API/edge use actuator readiness/liveness paths. Worker uses the independently packaged JDK
+`worker-probe.jar` from Task 16 and never invokes a shell. Until that artifact exists,
+`verify-deployment.mjs` reports `BLOCKED_TOOLCHAIN` for the container-execution check while
+structural chart tests remain executable.
 
-API has no Temporal or provider egress. Webhook Edge has no control-plane database, Temporal, object-storage, or provider egress. Worker provider/object-storage egress is absent until an owning feature plan adds a destination-specific policy. Namespace selectors and pod selectors are both required; IP-wide or namespace-only data-plane allows fail policy.
+Run the Node test again. Expected GREEN for schema and rendered identity cross-binding.
 
-`accord.rego` denies mutable image tags in production, missing security context/resources/probes/PDB/spread constraints, automatic tokens, host namespaces/paths, privileged ports, broad egress, inline Secret data, and any environment/volume name implying source credentials in control plane. It also compares component role/secret/account tuples against the locked matrix.
+- [ ] **Step 3: Write RED L3/L4 route-mode and application-TLS tests**
 
-- [ ] **Step 4: Bind environment capabilities in OpenTofu**
+Add positive/negative fixture generation inside `deployment-contract.test.mjs`. Prove:
 
-Create variables for:
+- `KUBERNETES_SERVICE` emits standard NetworkPolicy with both namespace and pod selectors;
+- `EGRESS_GATEWAY` permits only the named gateway workload;
+- `CILIUM_FQDN` emits only CiliumNetworkPolicy, rejects `*` and suffix wildcards, and has no claim
+  that standard NetworkPolicy selects the FQDN;
+- `AUDITED_CIDR` rejects `0.0.0.0/0`, `::/0`, overlap with metadata endpoints, missing digest,
+  expired evidence, and absent owner;
+- cross-component destinations and broad namespace-only policies fail;
+- Temporal port 7233 is insufficient without worker CA/client-cert/server-name binding;
+- PostgreSQL endpoints require verify-full plus CA/server name; OTLP production endpoints require
+  HTTPS/gRPC TLS and a CA reference;
+- a network-pass/TLS-fail fixture remains failed.
 
-- separate TLS endpoints for control-plane PostgreSQL, Webhook PostgreSQL, and the dedicated Temporal PostgreSQL cluster;
-- Temporal frontend `grpcs://` mTLS endpoint;
-- private object-storage endpoint and provider adapter name;
-- a path to the closed object-storage capability report and a path to the CI-generated signature-verification receipt; individual capability booleans are not accepted as infrastructure inputs;
-- unique workload identity/service-account IDs for all three processes;
-- external secret references, encryption key references, backup/PITR policy IDs, and network-policy namespace labels.
+Run the Node test. Expected RED: network templates and policy are absent.
 
-`main.tf` validates the contract with `terraform_data` preconditions:
+- [ ] **Step 4: Implement exact network and TLS policies**
+
+`networkpolicies.yaml` renders default-deny ingress/egress, DNS limited to the selected cluster DNS
+pods, component ingress, Kubernetes-service destinations, and egress-gateway destinations.
+`cilium-networkpolicies.yaml` renders only the selected exact FQDN mode. Audited CIDRs render exact
+`ipBlock` entries with evidence/expiry annotations that Rego verifies.
+
+`accord.rego` rejects mutable images, missing security context/resources/probes/PDB/spread, shared
+identity/secret/role tuples, automatic tokens, host namespaces/paths, privileged ports, broad
+egress, inline secret data, source/content credential names, a route-mode/template mismatch, and
+any attempt to label a port allow as TLS evidence.
+
+Application TLS evidence is checked from rendered Deployment configuration plus Task 13/17
+handshake receipts. The policy never reports TLS `PASS` from YAML alone.
+
+Run:
+
+~~~powershell
+node scripts/verification/preflight.mjs --check-id ft15-policy-toolchain --require helm --require kubeconform --require conftest
+node scripts/deployment/verify-deployment.mjs --mode test
+~~~
+
+On the known machine without Helm/Kubeconform/Conftest, expected result is `BLOCKED_TOOLCHAIN` and
+exit 2. On a provisioned runner, expected GREEN includes Helm lint, structural parse, Kubeconform,
+Conftest, and every named negative fixture failing for its intended rule.
+
+- [ ] **Step 5: Write RED OpenTofu contract and real-adapter tests**
+
+The contract module variables are closed objects for components, route modes, TLS endpoints,
+external-secret references, workload identity, object capability report/receipt, backup/PITR
+policy, and remote SHA/tree. Variable validation and `check` blocks enforce all cross-field
+conditions. Outputs are nonsensitive IDs/digests only.
+
+`local-kubernetes.tftest.hcl` uses `mock_provider "kubernetes"` and `mock_provider "helm"`. Assert
+the plan has exactly one namespace and one Helm release, passes one rendered values path, exposes
+no secret value, and fails for shared identity, wrong role, mutable image, broad network, missing
+TLS binding, expired CIDR evidence, local object profile used as production, and mismatched remote
+SHA.
+
+Run:
+
+~~~powershell
+node scripts/verification/preflight.mjs --check-id ft15-tofu-toolchain --require tofu
+tofu -chdir=infra/opentofu/environments/local-kubernetes init -backend=false
+tofu -chdir=infra/opentofu/environments/local-kubernetes validate
+tofu -chdir=infra/opentofu/environments/local-kubernetes test
+~~~
+
+Expected RED on a provisioned runner because modules do not exist. On the known machine the
+preflight must instead emit `BLOCKED_TOOLCHAIN`; the missing executable is not a test pass.
+
+- [ ] **Step 6: Implement contract checks and the real local Kubernetes adapter**
+
+`accord-foundation-contract` declares no provider and no resource. `checks.tf` validates exact
+component keys/tuples, endpoint TLS schemes, unique identities, route-mode branches, immutable
+digests, and the capability report/receipt binding. It returns normalized nonsensitive objects.
+
+`local-kubernetes/versions.tf` pins OpenTofu `= 1.9.1`, the HashiCorp Kubernetes provider, and the
+HashiCorp Helm provider. `main.tf` contains these real resources:
 
 ~~~hcl
-terraform {
-  required_version = "= 1.9.1"
-}
-
-locals {
-  required_object_capabilities = toset([
-    "immutable_versions",
-    "sha256_checksums",
-    "worm_retention",
-    "legal_hold",
-    "multipart",
-    "quarantine_isolation",
-    "replication_evidence",
-    "deletion_receipts"
-  ])
-  object_capability_report = jsondecode(
-    file(var.object_store_capability_report_path)
-  )
-  object_capability_receipt = jsondecode(
-    file(var.object_store_capability_verification_receipt_path)
-  )
-  object_capability_report_digest = format(
-    "sha256:%s",
-    filesha256(var.object_store_capability_report_path)
-  )
-}
-
-resource "terraform_data" "foundation_contract" {
-  input = {
-    control_postgres_endpoint = var.control_postgres_tls_endpoint
-    webhook_postgres_endpoint = var.webhook_postgres_tls_endpoint
-    temporal_postgres_endpoint = var.temporal_postgres_tls_endpoint
-    temporal_endpoint = var.temporal_mtls_endpoint
-    object_store_endpoint = var.object_store_endpoint
-    object_store_adapter = var.object_store_adapter
-    object_store_capability_report_digest = local.object_capability_report_digest
-  }
-
-  lifecycle {
-    precondition {
-      condition = alltrue([
-        startswith(var.control_postgres_tls_endpoint, "postgresql://"),
-        startswith(var.webhook_postgres_tls_endpoint, "postgresql://"),
-        startswith(var.temporal_postgres_tls_endpoint, "postgresql://")
-      ])
-      error_message = "All PostgreSQL endpoints must use the approved TLS configuration."
-    }
-    precondition {
-      condition = length(distinct([
-        var.control_postgres_tls_endpoint,
-        var.webhook_postgres_tls_endpoint,
-        var.temporal_postgres_tls_endpoint
-      ])) == 3
-      error_message = "Control, webhook, and Temporal production databases must be isolated endpoints."
-    }
-    precondition {
-      condition = startswith(var.temporal_mtls_endpoint, "grpcs://")
-      error_message = "Temporal frontend must use mTLS."
-    }
-    precondition {
-      condition = (
-        local.object_capability_report.environment_class == "production" &&
-        local.object_capability_report.production_eligible == true &&
-        timecmp(timestamp(), local.object_capability_report.expires_at) < 0 &&
-        alltrue([
-          for name in local.required_object_capabilities :
-          local.object_capability_report.capabilities[name].status == "SUPPORTED_AND_TESTED" &&
-          length(local.object_capability_report.capabilities[name].evidence) > 0
-        ]) &&
-        local.object_capability_receipt.result == "VERIFIED" &&
-        local.object_capability_receipt.report_digest == local.object_capability_report_digest &&
-        local.object_capability_receipt.adapter_artifact_digest ==
-          local.object_capability_report.adapter_artifact_digest
-      )
-      error_message = "The selected object-store adapter has not proved every production capability."
-    }
-    precondition {
-      condition = length(distinct(var.workload_identity_ids)) == 3
-      error_message = "API, worker, and Webhook Edge require distinct workload identities."
+resource "kubernetes_namespace_v1" "accord" {
+  metadata {
+    name = var.namespace
+    labels = {
+      "accord.inforvans.com/environment" = var.environment_name
     }
   }
 }
+
+resource "helm_release" "accord" {
+  name             = "accord"
+  namespace        = kubernetes_namespace_v1.accord.metadata[0].name
+  chart            = abspath("../../../helm/accord")
+  dependency_update = false
+  atomic           = true
+  wait             = true
+  timeout          = 600
+  values           = [file(var.rendered_values_path)]
+}
 ~~~
 
-Before OpenTofu runs, `deployment-contract.ps1` validates the report against the Task 13 schema, canonicalizes it with JCS, checks time bounds and exact adapter artifact digest, verifies the capability authority's DSSE signature against the environment trust policy, and verifies every immutable evidence reference. Only that verifier emits the short-lived receipt consumed above; a caller-supplied `VERIFIED` JSON file, local profile, expired report, missing capability, changed report byte, or mismatched adapter digest fails a negative fixture. The receipt and report digests are retained with the deployment evidence.
+The adapter never provisions production cloud identity or claims it has. A selected production
+provider/environment adapter and its OIDC, secret-store, network, backup, and restore evidence are
+required by the environment verdict in Task 17.
 
-Do not declare any additional cache or coordination database. PostgreSQL lease/fence migrations and their backup/PITR contract are mandatory outputs. Mark secret values sensitive; the module accepts secret references, not credential contents.
+Run validate/tests again on a provisioned runner. Expected GREEN with two real resource addresses
+and all negative runs rejected.
 
-- [ ] **Step 5: Configure GitOps without weakening supply-chain gates**
+- [ ] **Step 7: Write RED Argo immutable-revision tests and generate from remote authority**
 
-`infra/argocd/accord.yaml` uses a dedicated AppProject, destination namespace allowlist, sync windows, Server-Side Apply, prune/self-heal, and revision history. Production image values are digest pinned and updated only by the signed promotion workflow from Task 16. Argo CD may read deployment Git metadata but receives no customer source credentials, database owner credential, signing key, or runtime secret value.
+`project.yaml` defines one AppProject with repository/destination allowlists, namespace-scoped
+resource kinds, sync windows, and no cluster-admin or Secret write permission.
 
-Add a policy test that rejects a production `targetRevision` or values reference not protected by the organization's reviewed GitOps promotion rule. Health checks wait for Deployments and PDBs; failed policy/pre-sync migrations stop rollout.
+`render-argocd.mjs` accepts a canonical CI context from Task 16 or explicit `--remote-url`,
+`--remote-ref`, and `--remote-sha`. It performs `git ls-remote --exit-code <url> <ref>`, requires the
+returned SHA to equal the input, and writes `application.yaml` atomically. Without authoritative
+network evidence it emits `BLOCKED_EXTERNAL_ENVIRONMENT` and does not write a mutable revision.
 
-- [ ] **Step 6: Run deployment and infrastructure contract checks**
+The generator assigns the verified value directly rather than substituting text into a shell or
+committed template:
 
-~~~bash
-pwsh -NoProfile -File tests/integration/deployment-contract.ps1
-tofu -chdir=infra/opentofu/modules/accord-foundation-contract init -backend=false
-tofu -chdir=infra/opentofu/modules/accord-foundation-contract validate
-tofu -chdir=infra/opentofu/modules/accord-foundation-contract test
+~~~javascript
+application.spec.source.path = 'infra/helm/accord';
+application.spec.source.targetRevision = context.remote_sha;
+application.spec.syncPolicy = {
+  automated: { prune: true, selfHeal: true },
+  syncOptions: ['ServerSideApply=true'],
+};
+await writeYamlAtomically(outputPath, application);
 ~~~
 
-Expected: Helm, JSON schema, Kubeconform, Conftest, OpenTofu validation/tests, and role/credential/network assertions pass. Negative fixtures for shared identity, mutable image, broad network, wrong database role, missing object capability, plaintext secret, and control-plane source credential all fail for the intended reason.
+Tests reject branch names, tags, `HEAD`, a local SHA not returned by
+`ls-remote`, a mismatched promotion SHA, mutable image values, and a repository URL outside the
+AppProject allowlist.
 
-- [ ] **Step 7: Commit deployment and policy contracts**
+- [ ] **Step 8: Verify, stage the infrastructure commit, then bind Argo to its remote SHA**
 
-~~~bash
-git add infra/helm/accord infra/policy/accord.rego infra/opentofu/modules/accord-foundation-contract infra/argocd/accord.yaml tests/integration/deployment-contract.ps1
-git commit -m "build: enforce platform deployment isolation"
+First run all locally executable tests and the tool preflight:
+
+~~~powershell
+node --test tests/integration/deployment-contract.test.mjs
+node scripts/verification/preflight.mjs --check-id ft15-toolchain --require node --require helm --require tofu --require conftest --require kubeconform
+node scripts/deployment/verify-deployment.mjs --mode test
+tofu -chdir=infra/opentofu/environments/local-kubernetes test
+git diff --check
 ~~~
 
-### Task 16: Enforce Dependency Locks, SBOMs, Image Provenance, And Signatures In CI
+The exact `ft15-toolchain` preflight runs before any Helm, OpenTofu, Conftest, or Kubeconform
+invocation in this step. Exit 2 preserves its closed receipt and stops immediately: do not run the
+deployment verifier, raw `tofu`, or any dependent tool, and do not stage a pass claim. Only exit 0
+may proceed. An absent `helm`, `tofu`, `conftest`, or `kubeconform` produces
+`BLOCKED_TOOLCHAIN`; raw command-not-found output is never accepted as blocked evidence.
+
+On a provisioned runner, stage the exact infrastructure paths excluding the not-yet-generated
+Argo Application:
+
+~~~powershell
+$task15InfrastructurePaths = @(
+  'contracts/deployment/component-identity.schema.json'
+  'contracts/deployment/promotion-input.schema.json'
+  'infra/helm/accord/Chart.yaml'
+  'infra/helm/accord/values.yaml'
+  'infra/helm/accord/values.schema.json'
+  'infra/helm/accord/templates/_helpers.tpl'
+  'infra/helm/accord/templates/serviceaccounts.yaml'
+  'infra/helm/accord/templates/externalsecrets.yaml'
+  'infra/helm/accord/templates/workloads.yaml'
+  'infra/helm/accord/templates/services.yaml'
+  'infra/helm/accord/templates/networkpolicies.yaml'
+  'infra/helm/accord/templates/cilium-networkpolicies.yaml'
+  'infra/helm/accord/templates/poddisruptionbudgets.yaml'
+  'infra/policy/accord.rego'
+  'infra/opentofu/modules/accord-foundation-contract/variables.tf'
+  'infra/opentofu/modules/accord-foundation-contract/checks.tf'
+  'infra/opentofu/modules/accord-foundation-contract/outputs.tf'
+  'infra/opentofu/environments/local-kubernetes/versions.tf'
+  'infra/opentofu/environments/local-kubernetes/variables.tf'
+  'infra/opentofu/environments/local-kubernetes/main.tf'
+  'infra/opentofu/environments/local-kubernetes/outputs.tf'
+  'infra/opentofu/environments/local-kubernetes/tests/local-kubernetes.tftest.hcl'
+  'infra/argocd/project.yaml'
+  'scripts/deployment/render-values.mjs'
+  'scripts/deployment/render-argocd.mjs'
+  'scripts/deployment/verify-deployment.mjs'
+  'tests/integration/deployment-contract.test.mjs'
+  'tests/integration/deployment-contract.ps1'
+  'tests/integration/fixtures/deployment/valid-test-promotion.json'
+  'tests/integration/fixtures/deployment/invalid-shared-identity.json'
+  'tests/integration/fixtures/deployment/invalid-broad-egress.json'
+  'tests/integration/fixtures/deployment/invalid-plaintext-secret.json'
+)
+git add -- $task15InfrastructurePaths
+git diff --cached --name-only
+git commit -m "build: bind isolated deployment identities"
+~~~
+
+After that commit is pushed by the authorized operator/CI and its exact remote SHA is known:
+
+~~~powershell
+node scripts/deployment/render-argocd.mjs --remote-url $env:ACCORD_REMOTE_URL --remote-ref $env:ACCORD_REMOTE_REF --remote-sha $env:ACCORD_REMOTE_SHA --output infra/argocd/application.yaml
+git add -- infra/argocd/application.yaml
+git diff --cached --name-only
+git commit -m "build: pin Accord GitOps revision"
+~~~
+
+Expected: the first staged set has no application with a guessed revision; the second contains only
+the generated Application; its `targetRevision` is the verified remote SHA. Without remote,
+Kubernetes, Argo, external-secret, OIDC, PKI, and production capability evidence, Task 17 records
+the environment checks as `BLOCKED` rather than treating rendered YAML as deployment success.
+
+### Task 16: Produce Provider-Neutral, Digest-Bound Release Evidence
+
+**Goal:** Run one provider-neutral verification/release core, build reproducible runtime artifacts from
+Task 13's sole image lock, emit SBOMs and scans, sign and attest exact digests with Cosign/ORAS and
+closed DSSE predicates, and use GitHub Actions only as the thin adapter for the Accord source
+repository.
 
 **Files:**
+- Create: `contracts/ci/ci-context.schema.json`
+- Create: `contracts/dsse-payloads/build-provenance.schema.json`
+- Create: `contracts/supply-chain/release-manifest.schema.json`
+- Create: `contracts/golden-fixtures/supply-chain/ci-context.json`
+- Create: `contracts/golden-fixtures/supply-chain/build-provenance.json`
 - Create: `apps/control-plane/api/Dockerfile`
 - Create: `apps/control-plane/worker/Dockerfile`
-- Modify: `apps/control-plane/worker/build.gradle`
+- Create: `apps/webhook-edge/Dockerfile`
 - Create: `apps/control-plane/worker/src/probe/java/com/inforvans/accord/controlplane/worker/probe/WorkerProbe.java`
 - Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/probe/WorkerProbeTest.java`
-- Create: `apps/webhook-edge/Dockerfile`
 - Create: `.dockerignore`
-- Modify: `.gitignore`
+- Create: `scripts/ci/create-ci-context.mjs`
+- Create: `scripts/ci/adapters/github-actions-context.mjs`
+- Create: `scripts/ci/render-runtime-dockerfiles.mjs`
+- Create: `scripts/ci/seed-gradle-cache.mjs`
+- Create: `scripts/ci/build-images.mjs`
+- Create: `scripts/ci/generate-sboms.mjs`
+- Create: `scripts/ci/scan-artifacts.mjs`
+- Create: `scripts/ci/attest-artifacts.mjs`
+- Create: `scripts/ci/verify-release-chain.mjs`
+- Create: `scripts/ci/package-accordctl.mjs`
+- Create: `scripts/ci/verify.mjs`
 - Create: `scripts/ci/verify.ps1`
-- Create: `scripts/ci/lock-base-images.ps1`
-- Create: `scripts/ci/lock-local-images.ps1`
-- Create: `scripts/ci/verify-local-images.ps1`
-- Create: `scripts/ci/render-runtime-dockerfiles.ps1`
-- Create: `scripts/ci/seed-gradle-cache.ps1`
-- Create: `scripts/ci/package-accordctl.ps1`
-- Create: `tests/bootstrap/verify-supply-chain.ps1`
+- Create: `tests/bootstrap/supply-chain-policy.test.mjs`
+- Create: `tests/bootstrap/ci-provider-neutral.test.mjs`
+- Create: `tests/bootstrap/release-chain.test.mjs`
 - Create: `.github/workflows/verify.yml`
 - Create: `.github/workflows/release-images.yml`
 - Create: `.github/workflows/release-accordctl.yml`
 - Create: `renovate.json`
-- Generate: `infra/local/images.lock.json`
-- Generate: `infra/images/base-images.lock.json`
+- Modify: `.tool-versions`
+- Modify: `.gitignore`
+- Modify: `apps/control-plane/worker/build.gradle`
+- Modify: `apps/control-plane/worker/gradle.lockfile`
+- Modify: `gradle/verification-metadata.xml`
 
-- [ ] **Step 1: Write the failing supply-chain policy test**
+Task 16 does not create or rewrite an image lock. All Dockerfile base references come from
+`infra/images/images.lock.json`. First-party image/archive digests are outputs in the release
+manifest, not third-party lock entries.
 
-`verify-supply-chain.ps1` must parse, not substring-match, the workflow YAML and image-lock JSON. It fails unless:
+**Authoritative invariants:**
 
-- all Java Dockerfiles, Java worker-probe source/test/JAR task, verification scripts, three workflows, and both lock files exist;
-- every Dockerfile `ARG` used by `FROM` has a digest-pinned default, every effective `FROM` resolves to a real `@sha256:<64 hex>` reference present in `base-images.lock.json`, and the approved runtime exposes Java at `/usr/bin/java`;
-- release builds request maximal provenance and SBOM, scan the pushed digest, sign by digest, attest SBOM/provenance, and verify both before promotion;
-- GitHub Actions use full commit SHAs and minimum permissions; release jobs use protected environments and OIDC, not stored signing keys;
-- Gradle strict verification/locks, pnpm frozen lock, uv locked sync, Buf compatibility, Java tests, Python tests/type/lint, deployment policy, image lock, and no-diff checks all run;
-- `accordctl` is built/tested as a Picocli modular application and packaged with a host-specific `jlink` runtime on Windows, Linux, and macOS;
-- no obsolete runtime source/module/command, extra coordination database, or mutable production image reference occurs.
+1. `ci-context.schema.json` is provider-neutral and closed. It binds CI system, authoritative remote
+   URL/ref/SHA, base SHA, tree SHA, run/workflow IDs, builder issuer/subject/audience, registry
+   repository, protected environment, and creation time. Core scripts read only that JSON, never
+   `GITHUB_*`, `CI_*`, branch aliases, or `origin/main`.
+2. `github-actions-context.mjs` is the only code that reads GitHub environment names. It maps the
+   Accord repository event into the canonical context after verifying the event SHA/ref and remote.
+   GitHub hosting Accord does not make GitHub the product Git Provider; product fixtures remain
+   GitLab-first.
+3. Preflight verifies exact versions for Node, Java, Gradle wrapper, pnpm, uv, Buf, Helm, OpenTofu,
+   Conftest, Kubeconform, Syft, Cosign, Trivy, ORAS, Docker/Buildx, and Git. Add
+   only `oras 1.2.2` to the Task 13 `.tool-versions`; do not replace or rewrite its normalized core
+   pins `docker 29.4.2`, `docker-buildx 0.33.0`, or `git 2.52.0`. Missing or mismatched tools emit one
+   `BLOCKED_TOOLCHAIN` result with required/complete observed version and exit 2; no check is skipped
+   or converted to pass. Full FT16 preflight and Task 17 acceptance require an independent
+   `docker-buildx` result; a passing `docker` result cannot satisfy or subsume it.
+4. All native execution uses argument arrays with `shell: false`. The PowerShell 5.1 wrapper only
+   launches `node scripts/ci/verify.mjs` and propagates its exit code.
+5. Dockerfiles are rendered from the `java-build` and `java-runtime` entries in the Task 13 lock.
+   Every effective `FROM` is an exact canonical repository digest. Overrides are accepted only when
+   byte-equal to the same locked role/platform reference.
+6. Build stages use a verified content-addressed Gradle cache, `--offline`,
+   `--dependency-verification=strict`, and BuildKit `RUN --network=none`. Runtime images are
+   shell-free, fixed non-root UIDs, read-only-root compatible, and contain one application JAR.
+7. Source, each runtime image, and each platform `accordctl` archive receive CycloneDX JSON and SPDX
+   JSON SBOMs. Every SBOM names the exact subject digest; schema/subject/package/license validation
+   occurs before signing.
+8. Trivy scans exact pushed image/archive digests and source dependencies. A HIGH or CRITICAL
+   finding fails unless a separately signed, unexpired exception names the same finding and subject
+   digest. Foundation creates no unsigned exception path.
+9. Cosign signatures and attestations are keyless and bind the immutable subject. ORAS attaches
+   SBOM, scan, DSSE bundle, and release manifest artifacts by subject digest, then lists/refetches
+   referrers and verifies their digests. A tag is never a verification subject.
+10. Build provenance is a DSSE envelope with exact `payloadType:
+    application/vnd.in-toto+json`, predicate type
+    `https://schemas.accord.inforvans.com/provenance/build/v1`, and domain
+    `accord.build-provenance.v1`. The predicate binds builder issuer/subject/audience, CI system,
+    remote SHA/tree/base SHA, image-lock digest, dependency-lock digests, build parameters, subject
+    digest, SBOM digests, and scan digest.
+11. Verification checks DSSE envelope structure, payload type, predicate type/domain, canonical
+    subject digest, builder identity/trust policy, certificate issuer, remote SHA/tree, lock
+    materials, SBOM subjects, scan policy, signature bundle, and ORAS referrer digests. Any mismatch
+    prevents promotion.
+12. The release manifest is closed and lists every artifact with exact digest, platform, SBOMs,
+    scan, signature bundle, provenance envelope, and immutable locator. GitOps receives only entries
+    whose entire chain verifies.
+13. Workflows use full action commit SHAs, minimum permissions, bounded timeouts, protected release
+    environments, and OIDC. Artifact upload on failure may use `if: always()`, but verification,
+    build, scan, sign, attest, verify, and promotion steps never use `continue-on-error` or `|| true`.
 
-Expected red result: missing delivery files are listed before any build starts.
+- [ ] **Step 1: Write RED canonical CI-context and provider-neutrality tests**
 
-- [ ] **Step 2: Create reproducible Java runtime images**
+`ci-provider-neutral.test.mjs` validates the schema and golden fixture, then scans every core file
+under `scripts/ci` except `adapters`. Reject `GITHUB_`, `github.com`, `CI_COMMIT`,
+`origin/main`, branch-derived acceptance SHA, provider API calls, shell-built commands, and
+environment-specific OIDC assumptions.
+It also proves Task 16's `.tool-versions` delta adds only `oras 1.2.2` and preserves Task 13's Docker,
+Buildx, and Git pins byte-for-byte.
 
-`lock-base-images.ps1` resolves the approved Java 21 build image and shell-free Java 21 runtime image through the authenticated corporate mirror. `base-images.lock.json` records a schema version and, for each purpose, the canonical registry/repository, reviewed tag, manifest-list digest, per-platform digests for `linux/amd64` and `linux/arm64`, retrieval time, upstream license, end-of-support date, and runtime Java path. The command verifies registry TLS, the manifest bytes/digest, both required platforms, Java 21, non-root execution, and `/usr/bin/java`; it rejects a mutable/tag-only result. Ordinary CI reads this lock and never rewrites it.
+The canonical fixture has these exact field classes:
 
-`render-runtime-dockerfiles.ps1` is the only writer for the three committed Dockerfiles. It parses the lock structurally, writes `ARG BUILD_IMAGE=` and `ARG RUNTIME_IMAGE=` followed immediately by the corresponding canonical locked references, then writes `FROM ${BUILD_IMAGE}` and `FROM ${RUNTIME_IMAGE}`. Generation fails unless each value is an exact registry/repository reference followed by `@sha256:` and 64 lowercase hexadecimal characters. `verify-supply-chain.ps1` parses every emitted `ARG`/`FROM`, recomputes the effective reference, and requires exact equality with the lock; a missing default, unexpanded token, tag, unknown override, or digest mismatch fails. CI may override an ARG only with another exact reference already present for the same purpose/platform in the reviewed lock.
-
-`seed-gradle-cache.ps1` creates a fresh task-specific `GRADLE_USER_HOME`, resolves the exact locked build, plugin, annotation-processor, test, jOOQ, and `jlink` configurations through authenticated corporate mirrors with strict dependency verification, then writes a deterministic SHA-256 manifest for every cached file. It must not copy credentials, Gradle daemon state, build outputs, init scripts, or repository source. CI publishes the cache as a content-addressed artifact tied to the Gradle wrapper digest, Java vendor/version, dependency locks, and verification-metadata digest. The image-build job restores it into `.ci-cache/gradle`, verifies the manifest before use, and supplies no repository/network credential to BuildKit.
-
-Each generated build stage copies that verified cache to `/opt/accord/gradle-home`, sets `GRADLE_USER_HOME` there, copies the locked build inputs and source, and executes the owning `bootJar` target with both `RUN --network=none` and Gradle `--offline --dependency-verification=strict`. The whole `buildx` build also uses the no-network entitlement after base manifests and the cache artifact have been fetched and verified. This makes `--offline` executable in an otherwise empty build image rather than an assertion with no dependency source. `.dockerignore` denies everything secret or irrelevant, ignores `.ci-cache/**` by default, and re-allows only `.ci-cache/gradle/**` plus its manifest; `.gitignore` prevents the cache from being committed.
-
-Use a Java 21 distroless runtime with no shell/package manager. API uses UID 10001, worker 10002, and Webhook Edge 10003. All entry points use `/usr/bin/java`, immutable JVM flags, and one application JAR. The worker additionally copies `worker-probe.jar` to `/opt/accord/bin/worker-probe.jar`; no script or native binary is implied. It writes only to the bounded `/tmp` volume. Webhook Edge is built from its independent Gradle project and contains no control-plane domain modules. Reproducibility tests build each platform image twice with the same `SOURCE_DATE_EPOCH`, cache manifest, and base digests, then compare application-layer and final manifest digests.
-
-Add a JDK-only `probe` source set and reproducible thin JAR to `apps/control-plane/worker/build.gradle`:
-
-~~~groovy
-sourceSets {
-    probe {
-        java.srcDir 'src/probe/java'
-    }
-    test {
-        compileClasspath += sourceSets.probe.output
-        runtimeClasspath += sourceSets.probe.output
-    }
-}
-
-tasks.register('workerProbeJar', Jar) {
-    dependsOn tasks.named('compileProbeJava')
-    archiveFileName = 'worker-probe.jar'
-    destinationDirectory = layout.buildDirectory.dir('probe')
-    from sourceSets.probe.output
-    preserveFileTimestamps = false
-    reproducibleFileOrder = true
-    manifest {
-        attributes('Main-Class':
-            'com.inforvans.accord.controlplane.worker.probe.WorkerProbe')
-    }
-}
-
-tasks.named('test') {
-    dependsOn tasks.named('compileProbeJava')
-}
-~~~
-
-`WorkerProbe.java` has no Spring or third-party dependency. `main` accepts exactly `ready|live` and an integer maximum age from 5 through 300 seconds; any other input exits 64. It resolves only `/tmp/accord/worker-ready` or `/tmp/accord/worker-live`, reads directory and file POSIX attributes with `NOFOLLOW_LINKS`, and exits 2 unless the directory is owned by the current process user with mode `0700`, the state file is an owner-matching regular file with mode `0600`, and its ASCII content is exactly one 1-12 digit UTC epoch-second plus LF and at most 32 bytes. It rejects a timestamp more than five seconds in the future or older than the caller's maximum. Expected absence, parse/type/owner/mode/age failures, and I/O errors emit only a fixed normalized reason code and never a path, file content, user-controlled exception message, or stack trace. Success exits 0.
-
-~~~java
-package com.inforvans.accord.controlplane.worker.probe;
-
-import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
-
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.attribute.PosixFileAttributes;
-import java.nio.file.attribute.PosixFilePermission;
-import java.time.Clock;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.Set;
-
-public final class WorkerProbe {
-    private static final Set<PosixFilePermission> DIRECTORY_MODE = Set.of(
-        PosixFilePermission.OWNER_READ,
-        PosixFilePermission.OWNER_WRITE,
-        PosixFilePermission.OWNER_EXECUTE
-    );
-    private static final Set<PosixFilePermission> FILE_MODE = Set.of(
-        PosixFilePermission.OWNER_READ,
-        PosixFilePermission.OWNER_WRITE
-    );
-
-    private WorkerProbe() {}
-
-    public static void main(String[] args) {
-        System.exit(run(args, Clock.systemUTC(), Path.of("/tmp/accord")));
-    }
-
-    static int run(String[] args, Clock clock, Path root) {
-        if (args.length != 2) {
-            return usage();
-        }
-        String fileName = switch (args[0]) {
-            case "ready" -> "worker-ready";
-            case "live" -> "worker-live";
-            default -> null;
-        };
-        int maximumAge;
-        try {
-            maximumAge = Integer.parseInt(args[1]);
-        } catch (NumberFormatException error) {
-            return usage();
-        }
-        if (fileName == null || maximumAge < 5 || maximumAge > 300) {
-            return usage();
-        }
-
-        try {
-            PosixFileAttributes directory = Files.readAttributes(
-                root, PosixFileAttributes.class, NOFOLLOW_LINKS);
-            if (!directory.isDirectory()
-                    || !directory.permissions().equals(DIRECTORY_MODE)) {
-                return unhealthy("directory");
-            }
-            int processUid = ((Number) Files.getAttribute(
-                Path.of("/proc/self"), "unix:uid", NOFOLLOW_LINKS)).intValue();
-            int directoryUid = ((Number) Files.getAttribute(
-                root, "unix:uid", NOFOLLOW_LINKS)).intValue();
-            if (directoryUid != processUid) {
-                return unhealthy("directory-owner");
-            }
-
-            Path statePath = root.resolve(fileName);
-            PosixFileAttributes state = Files.readAttributes(
-                statePath, PosixFileAttributes.class, NOFOLLOW_LINKS);
-            int stateUid = ((Number) Files.getAttribute(
-                statePath, "unix:uid", NOFOLLOW_LINKS)).intValue();
-            if (!state.isRegularFile()
-                    || stateUid != processUid
-                    || !state.permissions().equals(FILE_MODE)) {
-                return unhealthy("state-file");
-            }
-
-            byte[] content = Files.readAllBytes(statePath);
-            if (content.length == 0 || content.length > 32) {
-                return unhealthy("state-size");
-            }
-            String timestamp = new String(content, StandardCharsets.US_ASCII);
-            if (!timestamp.matches("[0-9]{1,12}\\n")) {
-                return unhealthy("state-format");
-            }
-            long epochSecond = Long.parseLong(
-                timestamp.substring(0, timestamp.length() - 1));
-            long age = Duration.between(
-                Instant.ofEpochSecond(epochSecond), clock.instant()).getSeconds();
-            if (age < -5 || age > maximumAge) {
-                return unhealthy("state-age");
-            }
-            return 0;
-        } catch (IOException | RuntimeException error) {
-            return unhealthy("state-read");
-        }
-    }
-
-    private static int usage() {
-        System.err.println("worker-probe:usage");
-        return 64;
-    }
-
-    private static int unhealthy(String reason) {
-        System.err.println("worker-probe:" + reason);
-        return 2;
-    }
+~~~json
+{
+  "schema_version": "1.0.0",
+  "ci_system": "test",
+  "remote_url": "ssh://git.example.invalid/accord.git",
+  "remote_ref": "refs/heads/foundation",
+  "remote_sha": "1111111111111111111111111111111111111111",
+  "base_sha": "2222222222222222222222222222222222222222",
+  "tree_sha": "3333333333333333333333333333333333333333",
+  "run_id": "fixture-run-1",
+  "workflow_id": "fixture-workflow-1",
+  "builder_issuer": "https://issuer.example.invalid",
+  "builder_subject": "repo:accord:ref:refs/heads/foundation",
+  "builder_audience": "sigstore",
+  "registry_repository": "registry.example.invalid/accord",
+  "protected_environment": "fixture",
+  "created_at": "2026-07-26T00:00:00Z"
 }
 ~~~
 
-`WorkerProbeTest` calls the package-visible `run(args, clock, root)` seam with a temporary POSIX directory and proves success, usage error, missing/expired/future/malformed/oversized files, symlink substitution, wrong mode, wrong owner when supported, and both ready/live selection. A container integration test runs the built JAR as UID 10002 in the selected runtime image, removes shell and host Java from consideration, and requires the Helm command to complete in under two seconds.
+The reserved example host and repeated SHAs are test fixture data and are rejected whenever
+`environment_class=production`.
 
-- [ ] **Step 3: Lock and verify every third-party image**
+Run:
 
-`lock-local-images.ps1` resolves each Compose image to one canonical repository digest and writes schema-versioned, deterministically sorted JSON. `verify-local-images.ps1` proves exact set equality between Compose and lock entries, pulls by digest, compares manifest/platform digests, and rejects tag-only, duplicate, unknown-registry, or extra lock entries.
+~~~powershell
+node --test tests/bootstrap/ci-provider-neutral.test.mjs
+~~~
 
-The same rules apply to Dockerfile base images. Updating either lock is a separate reviewed maintenance command; ordinary verification never rewrites it.
+Expected RED: schema, canonical creator, adapter boundary, and fixture are absent.
 
-- [ ] **Step 4: Create one read-only verification entry point**
+- [ ] **Step 2: Implement canonical context creation and fail-closed preflight**
 
-`scripts/ci/verify.ps1` runs in this order and stops on the first failure:
+`create-ci-context.mjs` accepts explicit arguments or an adapter-produced JSON object, obtains
+`remote_sha` and `tree_sha` from Git with array arguments, verifies `base_sha` is an ancestor, and
+atomically writes canonical JSON. It never resolves a symbolic base during verification.
+
+`github-actions-context.mjs` requires the Accord repository identity, protected event/ref,
+`GITHUB_SHA`, server URL, repository, run IDs, OIDC issuer/subject/audience policy, and registry
+repository. It verifies `git rev-parse HEAD` equals the event SHA and emits the generic context.
+No product GitLab credential or Provider endpoint enters this adapter.
+
+Run:
+
+~~~powershell
+node scripts/verification/preflight.mjs --check-id ft16-toolchain --require node --require java --require pnpm --require uv --require buf --require helm --require tofu --require conftest --require kubeconform --require syft --require cosign --require trivy --require oras --require docker --require docker-buildx --require git
+~~~
+
+On the known Windows host, expected status is `BLOCKED`/`BLOCKED_TOOLCHAIN` naming absent
+`uv`, `buf`, `helm`, `tofu`, `conftest`, `kubeconform`, `syft`, `cosign`, `trivy`, and `oras` with
+their pinned versions. Evidence contains separate ordered `docker` and `docker-buildx` check results
+even when both are available. It must not continue to a PASS summary.
+
+- [ ] **Step 3: Write RED single-lock Dockerfile, cache, and worker-probe tests**
+
+`supply-chain-policy.test.mjs` parses Dockerfiles, Gradle tasks, and the sole image lock. Prove:
+
+- exactly one repository image lock exists;
+- each `ARG` used by `FROM` has a digest default rendered from `java-build`/`java-runtime`;
+- effective refs equal the lock's platform digest and no tag/mutable override exists;
+- builder runs offline, strict verification, and network-none using only a verified cache;
+- runtime is shell-free and uses UID 10001/10002/10003 for API/worker/edge;
+- worker image contains `/opt/accord/bin/worker-probe.jar` and uses `/usr/bin/java`;
+- reproducible archive/JAR flags and `SOURCE_DATE_EPOCH` are fixed;
+- `.dockerignore` denies Git data, local state, credentials, builds, environment files, and arbitrary
+  caches while allowing only the verified cache artifact/manifest.
+
+`WorkerProbeTest` covers exact `ready|live` arguments, 5-300 second bound, missing/expired/future/
+malformed/oversized state, symlink substitution, non-regular file, wrong POSIX mode/owner, and a
+two-second maximum. Output is only `worker-probe:<fixed-code>`.
+
+Expected RED: Dockerfiles, renderer, verified cache flow, and probe do not exist.
+
+- [ ] **Step 4: Implement reproducible images and host-independent probe**
+
+`render-runtime-dockerfiles.mjs` is the only Dockerfile writer. It reads
+`infra/images/images.lock.json`, selects the requested platform digests, and constructs the exact
+lines from resolved lock values:
+
+~~~javascript
+const buildImage = lockedReference(lock, 'java-build', platform);
+const runtimeImage = lockedReference(lock, 'java-runtime', platform);
+const dockerfile = [
+  `ARG BUILD_IMAGE=${buildImage}`,
+  'FROM ${BUILD_IMAGE} AS build',
+  `ARG RUNTIME_IMAGE=${runtimeImage}`,
+  'FROM ${RUNTIME_IMAGE}',
+].join('\n');
+~~~
+
+`lockedReference` returns only `registry/repository@sha256:<64 lowercase hex>`. Verification
+rerenders in memory and requires byte equality.
+
+`seed-gradle-cache.mjs` creates a fresh task-scoped `GRADLE_USER_HOME`, resolves only locked
+configurations through approved mirrors with strict metadata, removes credentials/daemon/build
+state, and writes a sorted SHA-256 manifest tied to wrapper, Java, locks, and verification metadata.
+The Docker build receives only that cache directory and manifest.
+
+`WorkerProbe` is JDK-only. It reads only `/tmp/accord/worker-ready` or `worker-live` with
+`NOFOLLOW_LINKS`, exact owner/mode/type, ASCII epoch plus LF, size <=32, and fixed age/skew rules.
+It never prints a path, content, user name, exception, or stack trace.
+
+Run focused Node/Java tests, render Dockerfiles twice, and compare bytes. Expected GREEN before any
+image push.
+
+- [ ] **Step 5: Write RED SBOM, scan, DSSE, signature, and ORAS-chain tests**
+
+`build-provenance.schema.json` is closed and requires the exact predicate type/domain and all
+authority/material/subject fields above. `release-manifest.schema.json` is closed, key-sorted, and
+requires every artifact chain digest.
+
+`release-chain.test.mjs` uses fixed local fixture bytes and mocked process results to prove:
+
+- source/image/archive SBOM subject mismatch fails;
+- missing CycloneDX or SPDX document fails;
+- HIGH/CRITICAL scan result fails without an exact signed exception;
+- DSSE payload type, predicate type, domain, builder issuer/subject/audience, remote SHA/tree,
+  lock/material digest, or subject change fails;
+- a signature verified against the wrong artifact, issuer, identity, or trust policy fails;
+- an ORAS referrer under a tag or different subject fails;
+- missing, duplicate, extra, or stale release-manifest evidence fails;
+- no command receives a secret/token as an argv value and captured diagnostics contain no token.
+
+Run:
+
+~~~powershell
+node --test tests/bootstrap/release-chain.test.mjs
+~~~
+
+Expected RED: SBOM, scan, attestation, and chain scripts are absent.
+
+- [ ] **Step 6: Implement exact-digest SBOM, scan, signing, attestation, and verification**
+
+`generate-sboms.mjs` runs the root CycloneDX Gradle task and Syft for source, each OCI digest, and
+each CLI archive. It validates format/version, sorted package identifiers, license fields, and exact
+subject digest, then hashes outputs.
+
+`scan-artifacts.mjs` runs Trivy against exact subjects and writes canonical JSON. It fails on every
+unexcepted HIGH/CRITICAL finding. Scan database identity/version and vulnerability exception digest
+are included in evidence.
+
+`attest-artifacts.mjs` builds an in-toto statement from the canonical CI context and release facts,
+validates the predicate, calls Cosign keyless sign/attest by digest, and calls ORAS attach with
+explicit artifact types. OIDC token material is obtained by the tool's protected identity flow,
+never written into context, argv, logs, or evidence.
+
+`verify-release-chain.mjs` immediately refetches registry subjects/referrers, verifies image/archive
+digest, Cosign identity/issuer/signature, DSSE envelope/payload/predicate, remote and builder facts,
+SBOM/scan subjects, and release manifest. It emits promotion input only after all checks PASS.
+
+Run on a provisioned protected runner:
+
+~~~powershell
+node scripts/ci/generate-sboms.mjs --context build/ci/context.json
+node scripts/ci/scan-artifacts.mjs --context build/ci/context.json
+node scripts/ci/attest-artifacts.mjs --context build/ci/context.json
+node scripts/ci/verify-release-chain.mjs --context build/ci/context.json
+~~~
+
+Expected GREEN: every digest in the release manifest is independently recomputed and the promotion
+input binds the exact remote SHA. Missing tools, OIDC, registry, or network yield `BLOCKED` evidence,
+not an unsigned local substitute.
+
+- [ ] **Step 7: Implement the read-only verification entry point and CLI packaging**
+
+`verify.mjs` runs, in order: design/workspace/supply-chain static tests; full tool preflight; verified
+cache restore; frozen pnpm and locked uv sync; offline strict Gradle; browser/OpenAPI; Buf lint/build/
+breaking against `ci-context.base_sha`; Python lint/types/tests; image-lock all-consumer verification;
+deployment policy/Tofu; SBOM validation; scan policy; and a full tracked/untracked status check. It
+never regenerates locks, schemas, code, Dockerfiles, or manifests.
+
+`package-accordctl.mjs` builds/test-runs host-specific jlink archives on Windows, Linux, and macOS
+without host Java in child PATH, then creates checksums/SBOM/scan/provenance/signature chains.
+Windows Authenticode and macOS notarization are separate environment evidence. Their absence blocks
+GA for that platform without invalidating already verified generic Cosign evidence.
+
+Use this PS5.1 wrapper only:
 
 ~~~powershell
 $ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $true
-
-pwsh -NoProfile -File tests/bootstrap/verify-design-baseline.ps1
-pwsh -NoProfile -File tests/bootstrap/verify-workspace.ps1
-pwsh -NoProfile -File tests/bootstrap/verify-supply-chain.ps1
-
-$gradleCache = $env:ACCORD_VERIFIED_GRADLE_CACHE
-if ([string]::IsNullOrWhiteSpace($gradleCache)) {
-  throw 'ACCORD_VERIFIED_GRADLE_CACHE must point to the restored CI cache artifact'
-}
-pwsh -NoProfile -File scripts/ci/seed-gradle-cache.ps1 -Mode Verify -CacheDirectory $gradleCache
-$env:GRADLE_USER_HOME = (Resolve-Path -LiteralPath $gradleCache).Path
-
-corepack enable
-pnpm install --frozen-lockfile
-uv sync --locked --all-packages
-
-./gradlew test --no-daemon --offline --dependency-verification=strict
-./gradlew :cmd:accordctl:jlink :cmd:accordctl:jlinkZip --no-daemon --offline --dependency-verification=strict
-./gradlew :apps:control-plane:worker:workerProbeJar --no-daemon --offline --dependency-verification=strict
-pnpm contracts:test
-pnpm contracts:lint
-buf lint
-buf build -o build/contracts.binpb
-buf breaking --against '.git#ref=origin/main'
-
-uv run --package accord-agent-runtime ruff check apps/agent-runtime
-uv run --package accord-agent-runtime mypy apps/agent-runtime/src
-uv run --package accord-agent-runtime pytest apps/agent-runtime
-
-pwsh -NoProfile -File tests/integration/deployment-contract.ps1
-pwsh -NoProfile -File scripts/ci/verify-local-images.ps1
-./gradlew cyclonedxBom --no-daemon --offline --dependency-verification=strict
-syft dir:. -o spdx-json=build/sbom/source.spdx.json
-
-git diff --exit-code -- gradle.lockfile '**/gradle.lockfile' gradle/verification-metadata.xml pnpm-lock.yaml uv.lock infra/local/images.lock.json infra/images/base-images.lock.json
+& node (Join-Path $PSScriptRoot 'verify.mjs') @args
+exit $LASTEXITCODE
 ~~~
 
-Before the offline phase, a dedicated cache-seeding job invokes `seed-gradle-cache.ps1 -Mode Seed` and resolves only artifacts allowed by dependency verification metadata through authenticated corporate mirrors. The verification job starts with an empty checkout, restores that content-addressed artifact to a job-local writable directory, verifies every byte before assigning `GRADLE_USER_HOME`, disables public fallback, and proves no lock or verification metadata changes. It never silently falls back to a developer cache. `origin/main` is fetched explicitly so Buf does not silently skip compatibility.
+Expected: the wrapper and Node entry point return 0/1/2 for PASS/FAIL/BLOCKED respectively.
 
-The script also runs static forbidden-runtime scans, Java compilation with `-Werror`, ArchUnit, jqwik, Testcontainers, security-negative, fault-injection, Helm/Kubeconform/Conftest, OpenTofu tests, SBOM schema validation, license policy, secret scan, and critical/high vulnerability gates.
+- [ ] **Step 8: Add thin GitHub Actions adapters and controlled updates**
 
-- [ ] **Step 5: Package the self-contained Picocli CLI on each operating system**
+All three workflows pin actions to full 40-character commit SHAs and map the GitHub event into
+`build/ci/context.json` before invoking Node. `verify.yml` has read-only repository permissions.
+Release workflows add only `id-token: write` and registry package permission in protected
+environments. They verify a protected semantic tag points to the context SHA, build independently
+for `linux/amd64` and `linux/arm64`, and promote only the verified release manifest.
 
-`package-accordctl.ps1`:
+`ci-provider-neutral.test.mjs` parses workflow YAML and proves the workflows contain adapter calls
+but the core contains no GitHub variable/API. It also proves there is no requirement for a
+`.gitlab-ci.yml` merely because GitLab is the product Provider.
 
-1. runs Picocli public-contract tests and `jdeps`/module checks;
-2. builds `jlink` and `jlinkZip` on the host OS;
-3. unpacks into a clean temporary directory with host Java removed from `PATH`;
-4. proves `accordctl --help`, `accordctl --version`, invalid-command exit code, UTF-8 output, and a signed-fixture command;
-5. produces deterministic ZIP/TAR archive, SHA-256 checksum, CycloneDX SBOM, and provenance subject;
-6. scans the bundled runtime and dependencies;
-7. signs/attests the immutable archive digest.
+`renovate.json` groups Java/Gradle, browser, Python, container lock, infrastructure, and security
+tool updates; enforces seven-day minimum release age except signed security emergencies; and never
+automerge major/runtime/crypto/base-image changes.
 
-`release-accordctl.yml` uses a Windows, Ubuntu, and macOS matrix. Platform archives cannot be substituted for one another. Windows Authenticode and macOS notarization identities are separate protected-environment integrations; absence blocks GA publication for that platform. The generic Cosign signature and provenance remain required on every archive.
+- [ ] **Step 9: Run full FT16 verification and commit declared delivery paths**
 
-- [ ] **Step 6: Add least-privilege verification and release workflows**
+On the known machine, run preflight first and retain the `BLOCKED_TOOLCHAIN` result; do not execute
+later commands as if tools existed. On a fully provisioned runner:
 
-`verify.yml` uses pinned action commit SHAs, a 45-minute timeout, read-only repository permissions, corporate mirrors, clean caches, and `scripts/ci/verify.ps1`. It uploads test/SBOM reports even on failure but never uploads secrets or local database volumes.
-
-`release-images.yml`:
-
-1. triggers only from protected semantic-version tags whose commit is reachable from protected `main`;
-2. re-runs verification and checks that the tag/version/Gradle artifacts agree;
-3. builds API, worker, and Webhook Edge independently for `linux/amd64` and `linux/arm64`;
-4. pushes by immutable digest with `--provenance=mode=max --sbom=true`;
-5. runs Trivy and policy checks against the pushed digest, failing on fixable high/critical findings;
-6. generates CycloneDX and SPDX SBOMs, license reports, and SLSA/BuildKit provenance;
-7. uses keyless Cosign signing through GitHub OIDC and a protected release environment;
-8. immediately verifies certificate identity/issuer, image signature, provenance predicate/type/subject, and SBOM attestation;
-9. publishes only verified digests to the GitOps promotion input.
-
-No release step authenticates with a long-lived registry or signing credential. Artifacts and attestations have defined retention and incident revocation procedures.
-
-- [ ] **Step 7: Configure controlled dependency updates**
-
-`renovate.json` pins all managers and Docker digests, groups Java/Gradle, browser, Python, container, and infrastructure updates separately, enforces a seven-day minimum release age except approved security emergencies, and requires lock/verification metadata regeneration in the update PR. There is no obsolete runtime manager.
-
-Major updates, Spring/Temporal/PostgreSQL compatibility changes, base-image changes, and cryptographic libraries require named code owners and full integration tests. Automerge is limited to policy-approved patch updates after all required checks.
-
-- [ ] **Step 8: Verify and commit the delivery pipeline**
-
-~~~bash
-pwsh -NoProfile -File scripts/ci/render-runtime-dockerfiles.ps1 -Mode Verify
-pwsh -NoProfile -File tests/bootstrap/verify-supply-chain.ps1
-pwsh -NoProfile -File scripts/ci/verify.ps1
-docker buildx build --network=none -f apps/control-plane/api/Dockerfile --load -t accord-control-api:test .
-docker buildx build --network=none -f apps/control-plane/worker/Dockerfile --load -t accord-control-worker:test .
-docker buildx build --network=none -f apps/webhook-edge/Dockerfile --load -t accord-webhook-edge:test .
-pwsh -NoProfile -File scripts/ci/package-accordctl.ps1
+~~~powershell
+node --test tests/bootstrap/supply-chain-policy.test.mjs tests/bootstrap/ci-provider-neutral.test.mjs tests/bootstrap/release-chain.test.mjs
+node scripts/images/verify-images.mjs --scope all
+node scripts/ci/render-runtime-dockerfiles.mjs --mode verify
+node scripts/ci/verify.mjs --context build/ci/context.json
+git diff --check
+$task16Paths = @(
+  'contracts/ci/ci-context.schema.json'
+  'contracts/dsse-payloads/build-provenance.schema.json'
+  'contracts/supply-chain/release-manifest.schema.json'
+  'contracts/golden-fixtures/supply-chain/ci-context.json'
+  'contracts/golden-fixtures/supply-chain/build-provenance.json'
+  'apps/control-plane/api/Dockerfile'
+  'apps/control-plane/worker/Dockerfile'
+  'apps/webhook-edge/Dockerfile'
+  'apps/control-plane/worker/src/probe/java/com/inforvans/accord/controlplane/worker/probe/WorkerProbe.java'
+  'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/probe/WorkerProbeTest.java'
+  'apps/control-plane/worker/build.gradle'
+  'apps/control-plane/worker/gradle.lockfile'
+  '.dockerignore'
+  '.gitignore'
+  '.tool-versions'
+  'scripts/ci/create-ci-context.mjs'
+  'scripts/ci/adapters/github-actions-context.mjs'
+  'scripts/ci/render-runtime-dockerfiles.mjs'
+  'scripts/ci/seed-gradle-cache.mjs'
+  'scripts/ci/build-images.mjs'
+  'scripts/ci/generate-sboms.mjs'
+  'scripts/ci/scan-artifacts.mjs'
+  'scripts/ci/attest-artifacts.mjs'
+  'scripts/ci/verify-release-chain.mjs'
+  'scripts/ci/package-accordctl.mjs'
+  'scripts/ci/verify.mjs'
+  'scripts/ci/verify.ps1'
+  'tests/bootstrap/supply-chain-policy.test.mjs'
+  'tests/bootstrap/ci-provider-neutral.test.mjs'
+  'tests/bootstrap/release-chain.test.mjs'
+  '.github/workflows/verify.yml'
+  '.github/workflows/release-images.yml'
+  '.github/workflows/release-accordctl.yml'
+  'renovate.json'
+  'gradle/verification-metadata.xml'
+)
+git add -- $task16Paths
+git diff --cached --name-only
+git commit -m "build: attest provider-neutral release artifacts"
 ~~~
 
-Expected: policy and full verification pass without lock drift; all images run as their fixed non-root users with read-only-root compatibility; Webhook Edge has no control-plane classes; the worker probe works without a shell in the Java container; each host CLI archive runs without a host JDK; scans, SBOMs, provenance, signatures, and verification all bind the exact artifact digest.
+Expected: staged files contain no second image lock, provider-specific core branch, mutable image,
+unsigned promotion, or missing-tool bypass. Every produced artifact is reachable from one verified
+release manifest through exact digest-bound SBOM, scan, signature, DSSE, and ORAS evidence.
 
-~~~bash
-git add .dockerignore .gitignore apps/control-plane/api/Dockerfile apps/control-plane/worker/Dockerfile apps/control-plane/worker/build.gradle apps/control-plane/worker/src/probe apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/probe apps/webhook-edge/Dockerfile scripts/ci tests/bootstrap/verify-supply-chain.ps1 .github/workflows infra/local/images.lock.json infra/images/base-images.lock.json renovate.json
-git commit -m "build: attest and sign locked platform artifacts"
-~~~
+### Task 17: Accept One Authoritative Remote SHA With Two Honest Verdicts
 
-### Task 17: Run The Foundation Acceptance Suite And Record The Architecture
+**Goal:** Verify an authoritative remote commit in a detached clean worktree, demonstrate the minimum
+GitLab/API/worker/Temporal/telemetry Foundation loop, and emit separate closed code and environment
+verdicts whose overall result is PASS only when both are PASS for the same evidence chain.
 
 **Files:**
+- Create: `contracts/acceptance/blocked-evidence.schema.json`
+- Create: `contracts/acceptance/foundation-verdict.schema.json`
+- Create: `contracts/acceptance/foundation-summary.schema.json`
+- Create: `contracts/golden-fixtures/acceptance/blocked-toolchain.json`
+- Create: `contracts/golden-fixtures/acceptance/code-pass.json`
+- Create: `contracts/golden-fixtures/acceptance/environment-blocked.json`
+- Create: `scripts/acceptance/resolve-remote-sha.mjs`
+- Create: `scripts/acceptance/create-detached-worktree.mjs`
+- Create: `scripts/acceptance/run-foundation-demo.mjs`
+- Create: `scripts/acceptance/run-foundation-acceptance.mjs`
+- Create: `scripts/acceptance/collect-environment-evidence.mjs`
+- Create: `scripts/acceptance/merge-verdicts.mjs`
+- Create: `tests/integration/foundation-acceptance.test.mjs`
+- Create: `tests/integration/foundation-demo.test.mjs`
 - Create: `tests/integration/foundation-acceptance.ps1`
-- Create: `tests/integration/verify-sensitive-logs.ps1`
-- Create: `tests/architecture/verify-platform-foundation.ps1`
+- Create: `tests/integration/verify-sensitive-logs.mjs`
+- Create: `tests/integration/src/test/java/com/inforvans/accord/integration/FoundationProductLoopIT.java`
+- Create: `tests/architecture/verify-platform-foundation.mjs`
 - Create: `docs/architecture/platform-foundation.md`
+- Modify: `tests/integration/build.gradle`
+- Modify: `tests/integration/gradle.lockfile`
+- Modify: `gradle/verification-metadata.xml`
+- Modify: `.gitignore`
 
-- [ ] **Step 1: Write the failing acceptance orchestrator**
+Verdict/evidence output goes to the caller-selected directory, default
+`path.join('build', 'acceptance', remoteSha)` in the invoking checkout. The detached source worktree
+receives no generated evidence, lock updates, manifests, or source edits.
 
-`foundation-acceptance.ps1` runs named checks without shell-built command strings:
+**Authoritative invariants:**
+
+1. Acceptance requires `--remote-url`, full `--remote-ref`, and lowercase 40-64 hex
+   `--remote-sha`. `resolve-remote-sha.mjs` queries the authoritative remote, requires exactly one
+   matching ref/SHA, fetches that object, and verifies its tree. A local branch, local `main`,
+   remote-tracking ref, event label, tag text, or merge-base is not authority.
+2. `create-detached-worktree.mjs` creates a fresh OS-temporary Git worktree with `--detach` at the
+   verified SHA. Inside it, `HEAD` equals the requested SHA, `git symbolic-ref -q HEAD` fails,
+   `git status --porcelain=v1 --untracked-files=all` is empty, submodules are absent or exact, and
+   the tree SHA matches remote evidence.
+3. Every acceptance command runs from the detached worktree with argument arrays and writes only
+   into the external evidence directory or ignored build/cache paths. Before and after execution,
+   tracked diff plus strict status including all non-ignored untracked files must be empty.
+4. `foundation-verdict.schema.json` has exactly `CODE` and `ENVIRONMENT` kinds. Status is exactly
+   `PASS`, `FAIL`, or `BLOCKED`. `FAIL` means a check ran and an assertion failed. `BLOCKED` means a
+   required tool or, after its implementation boundary is proven present, an external authority,
+   service, credentialless trust path, capability, or evidence was unavailable. Missing or broken
+   repository-owned implementation/test wiring is `FAIL`/`ASSERTION_FAILED`, never `BLOCKED`.
+   Neither verdict is converted to the other.
+5. A code verdict binds remote URL/ref/SHA, tree SHA, image-lock digest, dependency-lock digests,
+   toolchain results, check results, demo evidence, start/end time, and evidence bundle digest.
+6. An environment verdict binds the same SHA/tree/image lock plus remote branch protection, mirror,
+   OIDC, registry/referrers, Kubernetes, Argo, PKI, external-secret, production PostgreSQL/RPO/RTO,
+   object capability, restore-test, and signing/notarization evidence. In either verdict,
+   `release_manifest_digest` may be null only when status is `BLOCKED`; `PASS` and `FAIL` require the
+   digest of the exact release manifest under evaluation.
+7. `blocked-evidence.schema.json` requires common remote SHA, tree SHA, check ID, reason code,
+   attempted argv, attempt exit code or null, bounded evidence-digest array, rerun argv, UTC time,
+   and accountable owner. Its `TOOLCHAIN` branch is selected only by `BLOCKED_TOOLCHAIN`, requires
+   `tool{name,required_version,observed_version|null}`, and forbids `external`. Its `EXTERNAL` branch
+   handles every other reason, requires
+   `external{capability,authority,required_evidence_type}`, and forbids `tool`. Both branches forbid
+   raw stdout/stderr, token, credential, certificate private material, and arbitrary exception text.
+8. Missing `uv`, `buf`, `helm`, `tofu`, `conftest`, `kubeconform`, `syft`, `cosign`, `trivy`, or
+   `oras` on the known PowerShell 5.1 host creates one `BLOCKED_TOOLCHAIN` entry per check and makes
+   the code verdict `BLOCKED`. PowerShell 5.1 itself is supported only through thin Node launchers;
+   absence of `pwsh` is not bypassed and no plan command requires it.
+9. Missing authoritative branch-protection, OIDC, registry, Kubernetes, Argo, external-secret, PKI,
+   or production capability evidence creates named external `BLOCKED` evidence and makes the
+   environment verdict `BLOCKED`. Rendered files, local Docker health, or caller-supplied
+   `verified=true` booleans cannot satisfy those checks.
+10. `foundation-summary.schema.json` binds the two verdict digests. Overall is `PASS` only when both
+    status values are PASS and remote SHA, tree SHA, image-lock digest, release-manifest digest, and
+    evidence policy version are byte-equal. Any FAIL makes overall FAIL; otherwise overall is
+    BLOCKED.
+11. GitHub branch/OIDC evidence concerns only the Accord source/release repository. Product
+    behavior evidence remains GitLab-first and exercises Task 11's Standard Webhook contract.
+12. The minimum demonstration has two honest external entry legs in one evidence bundle:
+    GitLab webhook authentication/deduplication in the isolated edge database, and Task 9's
+    idempotent API command through Task 12 durable delivery into Task 10's identifier-only
+    `ReadOnlyReconciliationActivity`. No test-only cross-database bridge pretends the edge outbox is
+    already a production Provider Connector.
+13. The API/worker leg starts the real Task 13 Temporal mTLS server and uses Task 10's
+    `ReconciliationWorkflowRef`, production `FencedReconciliationObservation`, and a test-owned
+    bounded low-level `ProviderObservationPort` on each attempt. It proves safe-snapshot scope, tx1
+    claim, transaction-free observation, tx2 finalize, durable retry/receipt, and zero Provider
+    mutations. Missing `ReadOnlyReconciliationActivity`, `FencedReconciliationObservation`, Task 12
+    `EventTransport`, the bounded low-level adapter, or the real mTLS integration is a CODE `FAIL` with
+    `ASSERTION_FAILED`. `BLOCKED_BY_PROVIDER_ADAPTER` is reserved strictly for an unavailable real
+    external Provider authority/capability/evidence after all those implementation boundaries are
+    present and their local contract assertions pass.
+14. Typed telemetry from the demo contains the fixed operation/result facts and zero seeded
+    sentinels in spans, metrics, logs, collector JSONL, and labels.
+
+- [ ] **Step 1: Write RED verdict, blocked-evidence, and summary contract tests**
+
+`foundation-acceptance.test.mjs` validates all golden fixtures and rejects:
+
+- unknown fields, unknown status/kind/reason, missing owner/time/rerun command, or unordered checks;
+- `PASS` with any blocked/failed child check;
+- `FAIL` without an executed assertion and evidence digest;
+- `BLOCKED` without blocked evidence;
+- toolchain blocked evidence without required/observed tool version, external blocked evidence
+  without capability/authority/evidence type, or either branch without attempted argv;
+- `BLOCKED_BY_PROVIDER_ADAPTER` when a repository-owned activity, production fenced orchestrator,
+  transport, bounded low-level test adapter, or real mTLS integration is absent/broken, or when
+  external evidence does not name a real Provider
+  authority/capability; those implementation cases must be CODE `FAIL`/`ASSERTION_FAILED`;
+- code/environment SHA, tree, lock, release manifest, or policy-version mismatch;
+- overall PASS when either verdict is not PASS;
+- stdout/stderr, token, cookie, PEM, private key, raw webhook body, source, or diff fields anywhere.
+
+Use this exact blocked reason set:
+
+~~~text
+BLOCKED_TOOLCHAIN
+BLOCKED_REMOTE_AUTHORITY
+BLOCKED_BRANCH_PROTECTION
+BLOCKED_MIRROR
+BLOCKED_OIDC
+BLOCKED_REGISTRY
+BLOCKED_KUBERNETES
+BLOCKED_ARGOCD
+BLOCKED_EXTERNAL_SECRET
+BLOCKED_PKI
+BLOCKED_DATABASE_RECOVERY
+BLOCKED_OBJECT_CAPABILITY
+BLOCKED_PLATFORM_SIGNING
+BLOCKED_BY_PROVIDER_ADAPTER
+~~~
+
+Run:
 
 ~~~powershell
-$ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $true
+node --test tests/integration/foundation-acceptance.test.mjs
+~~~
 
-$checks = @(
-  @{ Name = 'architecture'; Command = @('pwsh','-NoProfile','-File','tests/architecture/verify-platform-foundation.ps1') },
-  @{ Name = 'workspace'; Command = @('pwsh','-NoProfile','-File','tests/bootstrap/verify-workspace.ps1') },
-  @{ Name = 'supply-chain'; Command = @('pwsh','-NoProfile','-File','tests/bootstrap/verify-supply-chain.ps1') },
-  @{ Name = 'java'; Command = @('./gradlew','test','--offline','--dependency-verification=strict') },
-  @{ Name = 'cli-image'; Command = @('./gradlew',':cmd:accordctl:jlink',':cmd:accordctl:jlinkZip','--offline','--dependency-verification=strict') },
-  @{ Name = 'browser-contracts'; Command = @('pnpm','contracts:test') },
-  @{ Name = 'browser-lint'; Command = @('pnpm','contracts:lint') },
-  @{ Name = 'protobuf-lint'; Command = @('buf','lint') },
-  @{ Name = 'protobuf-breaking'; Command = @('buf','breaking','--against','.git#ref=origin/main') },
-  @{ Name = 'python-lint'; Command = @('uv','run','--package','accord-agent-runtime','ruff','check','apps/agent-runtime') },
-  @{ Name = 'python-types'; Command = @('uv','run','--package','accord-agent-runtime','mypy','apps/agent-runtime/src') },
-  @{ Name = 'python-tests'; Command = @('uv','run','--package','accord-agent-runtime','pytest','apps/agent-runtime') },
-  @{ Name = 'deployment'; Command = @('pwsh','-NoProfile','-File','tests/integration/deployment-contract.ps1') },
-  @{ Name = 'local'; Command = @('pwsh','-NoProfile','-File','tests/integration/local-foundation.ps1') },
-  @{ Name = 'sensitive-logs'; Command = @('pwsh','-NoProfile','-File','tests/integration/verify-sensitive-logs.ps1') }
-)
-foreach ($check in $checks) {
-  $command = $check.Command
-  & $command[0] @($command[1..($command.Count - 1)])
-  if ($LASTEXITCODE -ne 0) {
-    throw "Foundation acceptance failed: $($check.Name)"
-  }
+Expected RED: schemas, fixtures, and merge logic are absent.
+
+- [ ] **Step 2: Implement deterministic verdict and blocked-evidence writers**
+
+All three schemas are closed JSON Schema 2020-12 contracts with conditional branches for
+PASS/FAIL/BLOCKED. `merge-verdicts.mjs` loads schemas, recomputes both file digests, checks the
+shared binding tuple, applies FAIL-over-BLOCKED-over-PASS precedence, and atomically writes the
+summary.
+
+Check entries have this bounded semantic shape:
+
+~~~json
+{
+  "check_id": "toolchain.syft",
+  "status": "BLOCKED",
+  "reason_code": "BLOCKED_TOOLCHAIN",
+  "tool": {
+    "name": "syft",
+    "required_version": "1.27.1",
+    "observed_version": null
+  },
+  "attempted_argv": ["syft", "version"],
+  "attempt_exit_code": null,
+  "attempt_evidence": [],
+  "rerun_argv": ["node", "scripts/acceptance/run-foundation-acceptance.mjs"],
+  "occurred_at": "2026-07-26T00:00:00Z",
+  "owner": "platform-engineering"
 }
-Write-Output 'foundation-acceptance: PASS'
 ~~~
 
-The runner assumes dependency caches were seeded and verified by Task 16. It never regenerates locks, verification metadata, source, schemas, or image manifests.
+For every non-toolchain blocked reason, the same common fields replace `tool` with this closed
+branch. `BLOCKED_BY_PROVIDER_ADAPTER` may use it only for unavailable real external Provider
+authority/capability/evidence after the repository-owned integration boundary has passed:
 
-- [ ] **Step 2: Add architecture and sensitive-data assertions**
-
-`verify-platform-foundation.ps1` checks both the approved requirement specification and architecture record are tracked, non-empty, and free of unfinished markers. It requires the record to state:
-
-- Java 21/Spring Boot/Spring Modulith control plane and independent Java edge/security applications;
-- Python 3.12 Agent Runtime, React/TypeScript browser, and Picocli/`jlink` CLI;
-- PostgreSQL as the only durable business/coordination system, including tenant-work scheduling and generation/token/deadline fences;
-- exact login/NOLOGIN role pairs, forced RLS, and sole approved signing-owner `BYPASSRLS` exception;
-- verify-first Webhook Edge with no raw-body/source persistence;
-- identifier-only Temporal histories with database reload on every activity attempt;
-- Actuator probe paths for Java HTTP services and stateful exec probes for the worker;
-- separate identities, credentials, databases, network policies, and artifacts;
-- object-storage capability evidence and supply-chain verification.
-
-The script also scans implementation directories and build/deployment configuration for forbidden old runtime files, plugins, dependencies, commands, module manifests, and additional coordination databases. Explicit prohibition strings in documentation tests are the only allowed matches.
-
-`verify-sensitive-logs.ps1` collects local API, worker, Webhook Edge, Temporal, and collector logs without echoing matched values. It scans for named rules covering authorization, bearer/cookie/token values, webhook bodies, attachment text, source/diff/archive fields, prompts, secrets, and seeded sentinels. On failure it prints rule names and service names only, never the matched secret. The same sentinels are checked in exported traces and metric labels.
-
-- [ ] **Step 3: Run the red gate and fix the owning task**
-
-~~~bash
-pwsh -NoProfile -File tests/integration/foundation-acceptance.ps1
+~~~json
+"external": {
+  "capability": "authoritative-branch-protection",
+  "authority": "accord-source-host",
+  "required_evidence_type": "branch-protection-receipt-v1"
+}
 ~~~
 
-Expected: FAIL at the first absent or incorrect artifact from Tasks 1-16. Do not skip or weaken that check; return to the owning task and make its focused test green.
+The timestamp is fixed fixture data; runtime uses its actual UTC instant. Diagnostics may name a
+check, tool or external capability, and reason only.
 
-- [ ] **Step 4: Record the implemented authority and process boundaries**
+Run the contract test again. Expected GREEN for valid fixture/merge behavior and every negative
+mutation.
 
-Create `docs/architecture/platform-foundation.md` with this normative content:
+- [ ] **Step 3: Write RED authoritative-remote and detached-clean tests**
 
-~~~markdown
-# Accord Platform Foundation
+Use temporary bare remotes and worktrees without network. Cover:
 
-## Authority And Process Boundaries
+- exact remote ref/SHA success;
+- wrong SHA, ambiguous ref, missing object, local-only commit, moved ref, and tree mismatch;
+- detached HEAD required;
+- tracked modification, staged change, non-ignored untracked file, and uninitialized/wrong submodule
+  rejection;
+- ignored build output allowed only outside the detached source output contract;
+- before/after status checks catch a verifier that writes a new source file;
+- cleanup resolves the exact temporary worktree path and removes no other path.
 
-Java 21, Spring Boot 3.5.3, and Spring Modulith 1.4.1 implement the control-plane modules. `control-api` and `control-worker` share bounded domain artifacts but are separate processes with different entry points, identities, credentials, network policies, and database roles. Webhook Edge and every security boundary are independent Java applications and artifacts. The Agent Runtime is Python 3.12; the browser is React/TypeScript; `accordctl` is a Picocli application shipped with a platform-specific `jlink` runtime.
+The production resolver uses these exact argument arrays:
 
-PostgreSQL 17.5 is the only durable business and coordination system. Aggregate CAS, idempotency results, outbox/inbox, tenant-work scheduling, leases, fencing, capabilities, and certification facts live in PostgreSQL. Process-local caches are disposable and never decide correctness. Temporal history contains stable identifiers and retry progress only; every activity reloads current authority and state from PostgreSQL.
-
-## Database Sessions And Command Safety
-
-`accord_migrator`, `accord_api`, `accord_worker`, `accord_webhook_owner`, and `accord_webhook_runtime` are NOLOGIN privilege/owner roles. Each login has exactly one set-only membership. `accord_api_login` connects and then runs `SET ROLE accord_api`; worker, migrator, and Webhook Edge follow their own one-to-one pairs. Runtime roles cannot set siblings or owners. `accord_signing_owner` is the sole approved Accord BYPASSRLS role, is NOLOGIN, and is reachable only from its migration identity.
-
-Business tables use forced tenant RLS. The payload-free `reliability_tenant_work` directory is the explicit worker-only cross-tenant coordination exception: API can signal only its current transaction tenant through a fixed security-definer function. Worker first leases a tenant by owner, generation, opaque token, and deadline, then installs that tenant context before touching outbox/inbox rows. Message acknowledgement uses an independent generation/token/deadline fence.
-
-An idempotency fingerprint binds method, normalized path/query, route/resource, canonical body digest, expected version, media types, API version, tenant, and actor. Claim commits before work; aggregate, domain/audit/outbox writes, and fenced completion commit together.
-
-## Isolated Webhook Ingress
-
-Webhook Edge resolves an opaque server-side binding, bounds the request, verifies HMAC over exact raw bytes in constant time, and parses only after verification. It checks immutable repository identity and persists only digest plus the closed normalized signal in its separate database. It never stores request bodies, headers, source, archives, diffs, or Git content credentials. Webhooks are hints; provider reconciliation establishes external facts.
-
-## Operational Health And Telemetry
-
-API and Webhook Edge expose `/actuator/health/readiness` and `/actuator/health/liveness`. The non-web worker uses scheduler/database/Temporal-aware exec probes. Telemetry uses a bounded allowlist and cannot record headers, bodies, tokens, attachment text, source material, prompts, raw URLs, or exception messages containing input. Collector failure does not make workloads unready.
-
-## Deployment And Supply Chain
-
-Every process uses a distinct ServiceAccount, secret, database role, network policy, and digest-pinned artifact. Workloads are non-root, read-only, resource bounded, spread across zones, disruption protected, and default-deny. The object-storage adapter must prove immutable versions, checksums, WORM, legal hold, multipart, quarantine, replication evidence, and deletion receipts before production use.
-
-Locked Java, browser, and Python dependencies resolve through approved mirrors with strict verification. CI emits and validates SBOMs/provenance, scans artifacts, signs immutable digests, and publishes only verified digests. Each `accordctl` platform package includes its runtime and works without a host JDK.
+~~~javascript
+run('git', ['ls-remote', '--exit-code', remoteUrl, remoteRef]);
+run('git', ['fetch', '--no-tags', '--force', remoteUrl, remoteRef]);
+run('git', ['cat-file', '-e', `${remoteSha}^{commit}`]);
+run('git', ['rev-parse', `${remoteSha}^{tree}`]);
+run('git', ['worktree', 'add', '--detach', validatedTemporaryPath, remoteSha]);
 ~~~
 
-- [ ] **Step 5: Run acceptance from a clean checkout**
+No command string or shell interpolation exists in implementation.
 
-In a new clean worktree descended from protected `main`:
+Run focused tests. Expected RED: remote resolver/worktree launcher are absent.
+
+- [ ] **Step 4: Implement detached execution and immutable evidence location**
+
+`resolve-remote-sha.mjs` parses `ls-remote` records strictly, compares full hashes case-sensitively,
+fetches the named ref, verifies commit/tree, and hashes the remote proof. Network/auth failure emits
+`BLOCKED_REMOTE_AUTHORITY` without accepting cached state.
+
+`create-detached-worktree.mjs` uses `fs.mkdtemp` under the OS temp directory, validates resolved
+paths before add/remove, and registers cleanup. It launches the detached copy's
+`run-foundation-acceptance.mjs --inside-detached` with an absolute evidence directory outside that
+copy.
+
+Inside-detached mode refuses to run if a symbolic branch exists, HEAD/tree differ, or strict status
+is nonempty. It records command argv/duration/exit/evidence digest, not raw output containing
+sentinels.
+
+Run detached tests again. Expected GREEN for exact remote authority and every dirty/attached
+negative case.
+
+- [ ] **Step 5: Write RED minimum Foundation demonstration tests**
+
+`foundation-demo.test.mjs` and `FoundationProductLoopIT` prove the complete minimum evidence bundle:
+
+1. start the Task 13 digest-locked dependency topology;
+2. start API, worker, and Webhook Edge with their own database roles and Task 14 telemetry;
+3. send one correctly signed GitLab 19.1 webhook twice and require two `202` responses but one edge
+   inbox/outbox pair; send changed bytes under the same webhook ID and require `409`;
+4. submit the Task 9 API command twice with one Idempotency-Key and require byte-identical status,
+   body, headers, and ETag plus one aggregate/domain-event/outbox result;
+5. let Task 12's test-owned `EventTransport` construct only Task 10
+   `ReconciliationWorkflowRef(tenantId, intentId)` and start that workflow; it never reads the GitLab
+   edge database or carries a lease/capability;
+6. force one retry, prove two PostgreSQL authority reloads, kill/restart the worker once, and require
+   one durable final receipt with zero duplicate side effects;
+7. query final state through the public API or read-only observer, never by test database write;
+8. verify zero sentinel matches in application/Temporal/collector logs, spans, metrics, labels, and
+   evidence.
+
+The integration test imports production Task 9-14 types, including
+`FencedReconciliationObservation`, and supplies only the bounded transport plus a test-owned
+low-level `ProviderObservationPort`. It never implements `ReconciliationObservationPort`. Tests
+assert that absence or breakage of `ReadOnlyReconciliationActivity`, the production orchestrator,
+`EventTransport`, that bounded low-level adapter, or the real mTLS integration produces CODE
+`FAIL`/`ASSERTION_FAILED`; it is never
+`BLOCKED_BY_PROVIDER_ADAPTER` and is never substituted with `TestWorkflowEnvironment` or an
+in-memory queue. Only after those boundaries exist and pass may an unavailable real external
+Provider authority/capability/evidence produce external `BLOCKED_BY_PROVIDER_ADAPTER` evidence.
+
+Run:
 
 ~~~powershell
-pwsh -NoProfile -File scripts/local-up.ps1
-pwsh -NoProfile -File scripts/ci/verify.ps1
-pwsh -NoProfile -File tests/integration/foundation-acceptance.ps1
-git diff --exit-code
+node --test tests/integration/foundation-demo.test.mjs
+./gradlew.bat :tests:integration:test --tests '*FoundationProductLoopIT' --no-daemon --dependency-verification=strict
 ~~~
 
-Expected: `foundation-acceptance: PASS`; no generated lock/source/configuration differs; all local services are healthy; PostgreSQL/RLS/fence, telemetry leak, deployment, object capability, CLI runtime, image, SBOM, provenance, and signature checks pass.
+Expected RED: demo orchestration, cross-process fixture, and evidence assertions are absent, and the
+CODE check reports `FAIL`/`ASSERTION_FAILED` rather than external BLOCKED.
 
-- [ ] **Step 6: Commit the architecture record and acceptance gate**
+- [ ] **Step 6: Implement and run the real local Foundation demonstration**
 
-~~~bash
-git add tests/integration/foundation-acceptance.ps1 tests/integration/verify-sensitive-logs.ps1 tests/architecture/verify-platform-foundation.ps1 docs/architecture/platform-foundation.md
-git commit -m "docs: record verified platform foundation"
+`run-foundation-demo.mjs` uses Node argument arrays, bounded readiness polling, public HTTP entry
+points, and read-only catalog/evidence queries. It seeds sentinels only through supported request
+inputs, never prints them, and stores match counts/rule IDs rather than matched text.
+
+`FoundationProductLoopIT` reuses Task 10's real mTLS configuration and Task 12 fences/receipts.
+The transport starts a `ReconciliationWorkflowRef` workflow after the outbox lease transaction
+commits. Production `FencedReconciliationObservation` commits tx1 tenant context plus safe snapshot
+and reconciliation claim, retains only snapshot scope and an acquired lease in process memory,
+observes through the bounded low-level port with no JDBC transaction, and commits tx2
+complete-plus-event/outbox or mark-unknown. Completion revalidates event scope in PostgreSQL. It
+returns only a closed outcome; heartbeat/history/result/log contain no capability or Provider fact.
+Worker crash/restart preserves Temporal history and database receipt authority.
+
+`verify-sensitive-logs.mjs` scans API, worker, edge, Temporal, and collector outputs plus exported
+telemetry. On failure it reports only service and rule ID. It rejects authorization/cookie/token,
+raw webhook/body, source/diff/archive, prompt, secret, URL/query, exception, and all seeded
+sentinels.
+
+Run after Task 13 local startup. Expected GREEN: both ingress legs, durable API-to-worker workflow,
+mTLS recovery, PostgreSQL reload, and typed telemetry evidence pass without claiming a production
+GitLab-to-control connector.
+
+- [ ] **Step 7: Define and execute the code verdict**
+
+Inside the detached worktree, `run-foundation-acceptance.mjs` executes these named checks in order:
+
+1. architecture and workspace boundaries;
+2. full toolchain preflight;
+3. dependency-lock and strict offline Java/browser/Python/Buf verification;
+4. Task 13 single image lock and local Temporal mTLS matrix;
+5. Task 14 typed telemetry and leak tests;
+6. Task 15 Helm/Kubeconform/Conftest/OpenTofu/GitOps static contracts;
+7. Task 16 Dockerfile/SBOM/scan/DSSE/signature/ORAS chain verification;
+8. the minimum Foundation demonstration;
+9. final tracked diff, index diff, strict untracked status, and submodule status.
+
+An absent required tool creates blocked check evidence and stops dependent checks as BLOCKED, not
+PASS. An assertion failure creates FAIL. Independent checks continue only when they can add safe
+evidence.
+
+On the known machine, expected `code_verdict.status` is `BLOCKED` with explicit
+`BLOCKED_TOOLCHAIN` entries for the ten absent tools. No `foundation-acceptance: PASS` text is
+printed.
+
+- [ ] **Step 8: Define and execute the environment verdict**
+
+`collect-environment-evidence.mjs` consumes immutable receipts, never booleans, for:
+
+- authoritative remote ref and branch-protection/no-force-push/required-review policy;
+- authenticated dependency/container mirrors and cache provenance;
+- OIDC issuer/subject/audience and protected release environment;
+- registry subjects, Cosign bundles, DSSE/ORAS referrers, revocation/retention policy;
+- Kubernetes workload identities, external-secret store, network-policy enforcement, live TLS
+  handshakes, and exact deployed image digests;
+- Argo AppProject/Application, immutable targetRevision, sync/health/history;
+- three isolated production PostgreSQL endpoints, backup/PITR/RPO/RTO and restore test;
+- production object capability report/receipt;
+- Windows Authenticode and macOS notarization for published platform packages.
+
+Each receipt is schema-validated, time-bounded, digest-bound to the same remote SHA/release manifest,
+and independently verified. Unavailable evidence yields its named BLOCKED reason.
+
+Expected on a local offline host: `environment_verdict.status=BLOCKED`. Local Compose, rendered
+Helm, or a cached remote-tracking ref cannot change it to PASS.
+
+- [ ] **Step 9: Record architecture and enforce two-verdict completion**
+
+`verify-platform-foundation.mjs` requires `docs/architecture/platform-foundation.md` to state:
+
+- Java/Spring Modulith control API/worker and independent GitLab Webhook Edge;
+- PostgreSQL authority, forced RLS, exact login/session roles, fences, receipts, and no second
+  coordination database;
+- real Temporal server mTLS, identifier-only history, and PostgreSQL reload per activity;
+- typed whole-record-drop telemetry and final exporter guard;
+- component-keyed workload identities, external secrets, route-mode-specific L3/L4 policy, and
+  separate TLS proof;
+- the sole image lock and provider-neutral release core;
+- GitHub as Accord source host only and GitLab as product Provider;
+- exact-digest SBOM/scan/Cosign/ORAS/DSSE chain;
+- detached remote-SHA acceptance and dual-verdict BLOCKED semantics.
+
+`merge-verdicts.mjs` writes summary PASS only for two PASS verdicts with an identical binding tuple.
+The process exit is 0 PASS, 1 FAIL, 2 BLOCKED.
+
+- [ ] **Step 10: Run acceptance from an authoritative SHA and commit Task 17 files**
+
+Run from the invoking checkout:
+
+~~~powershell
+node scripts/acceptance/run-foundation-acceptance.mjs --remote-url $env:ACCORD_REMOTE_URL --remote-ref $env:ACCORD_REMOTE_REF --remote-sha $env:ACCORD_REMOTE_SHA --output build/acceptance
+node scripts/acceptance/merge-verdicts.mjs --code build/acceptance/$env:ACCORD_REMOTE_SHA/code-verdict.json --environment build/acceptance/$env:ACCORD_REMOTE_SHA/environment-verdict.json --output build/acceptance/$env:ACCORD_REMOTE_SHA/summary.json
 ~~~
 
+On the known host, expected exit is 2 and both the missing-tool and external-evidence blockers are
+present. On a fully provisioned authoritative runner, expected exit is 0 only after both verdicts
+are PASS and the detached worktree remains clean.
+
+After focused schema/unit tests pass, stage only Task 17 source files:
+
+~~~powershell
+git diff --check
+$task17Paths = @(
+  'contracts/acceptance/blocked-evidence.schema.json'
+  'contracts/acceptance/foundation-verdict.schema.json'
+  'contracts/acceptance/foundation-summary.schema.json'
+  'contracts/golden-fixtures/acceptance/blocked-toolchain.json'
+  'contracts/golden-fixtures/acceptance/code-pass.json'
+  'contracts/golden-fixtures/acceptance/environment-blocked.json'
+  'scripts/acceptance/resolve-remote-sha.mjs'
+  'scripts/acceptance/create-detached-worktree.mjs'
+  'scripts/acceptance/run-foundation-demo.mjs'
+  'scripts/acceptance/run-foundation-acceptance.mjs'
+  'scripts/acceptance/collect-environment-evidence.mjs'
+  'scripts/acceptance/merge-verdicts.mjs'
+  'tests/integration/foundation-acceptance.test.mjs'
+  'tests/integration/foundation-demo.test.mjs'
+  'tests/integration/foundation-acceptance.ps1'
+  'tests/integration/verify-sensitive-logs.mjs'
+  'tests/integration/src/test/java/com/inforvans/accord/integration/FoundationProductLoopIT.java'
+  'tests/integration/build.gradle'
+  'tests/integration/gradle.lockfile'
+  'tests/architecture/verify-platform-foundation.mjs'
+  'docs/architecture/platform-foundation.md'
+  'gradle/verification-metadata.xml'
+  '.gitignore'
+)
+git add -- $task17Paths
+git diff --cached --name-only
+git commit -m "test: accept detached foundation evidence"
+~~~
+
+Expected: no verdict/evidence/build output is staged; staging arrays include no Task 12-or-earlier
+source; and no completion claim is made from a BLOCKED summary.
+
+- [ ] **Step 11: Perform the final plan and repository boundary self-review**
+
+Run read-only checks that assert:
+
+- Task 13-17 contain no unfinished marker or vague implementation instruction;
+- `infra/images/images.lock.json` is the sole image lock and every Compose/Dockerfile/tool image
+  consumer is checked against it;
+- Task 13 mTLS negative cases and independent Temporal database identities are exhaustive;
+- Task 14 exposes no generic attribute map and guards automatic instrumentation at final export;
+- Task 15 identity/secret/role/subject/audience tuples are component-keyed and network/TLS evidence
+  is not conflated;
+- only the GitHub CI adapter mentions GitHub environment fields, while product mocks remain GitLab;
+- every missing tool/external capability produces BLOCKED evidence and no skip/PASS branch exists;
+- every task commit uses an explicit PowerShell staging array and no broad `git add .`;
+- detached status includes non-ignored untracked files and both verdicts are required for PASS.
+
+Run `git diff --check` last. Expected: no whitespace error, no replacement marker, no change outside
+this plan's intended implementation paths, and a mechanically complete Task 13-17 execution path.
 ## Plan Self-Review
 
 - [x] Tasks 1-17 remain continuous and map workspace, contracts, module/process boundaries, PostgreSQL reliability, HTTP/Temporal boundaries, isolated Webhook Edge, local integration, telemetry, deployment, supply chain, CLI packaging, and acceptance.
