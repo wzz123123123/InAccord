@@ -107,8 +107,16 @@ tasks.register('verifyGeneratedJooq') {
         [
             'tables/AggregateHead.java',
             'tables/IdempotencyResult.java',
+            'tables/DomainEvent.java',
+            'tables/OutboxEvent.java',
+            'tables/InboxMessage.java',
+            'tables/ExternalCallIntent.java',
             'tables/records/AggregateHeadRecord.java',
-            'tables/records/IdempotencyResultRecord.java'
+            'tables/records/IdempotencyResultRecord.java',
+            'tables/records/DomainEventRecord.java',
+            'tables/records/OutboxEventRecord.java',
+            'tables/records/InboxMessageRecord.java',
+            'tables/records/ExternalCallIntentRecord.java'
         ].each { relativePath ->
             def generated = layout.buildDirectory.file(
                 "generated-src/jooq/main/com/inforvans/accord/database/jooq/${relativePath}"
