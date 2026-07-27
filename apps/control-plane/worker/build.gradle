@@ -3,6 +3,10 @@ plugins {
     id 'java'
 }
 
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.artifacts.result.ResolvedComponentResult
+import org.gradle.api.artifacts.result.ResolvedDependencyResult
+
 dependencies {
     implementation project(':apps:control-plane:modules:platform-kernel')
     implementation project(':apps:control-plane:modules:reliability')
@@ -10,9 +14,20 @@ dependencies {
     implementation platform(libs.spring.modulith.bom)
     implementation libs.spring.modulith.starter.core
     implementation libs.spring.boot.actuator
+    implementation libs.spring.boot.jooq
+    implementation libs.temporal.sdk
+    compileOnly 'jakarta.xml.bind:jakarta.xml.bind-api:4.0.2'
+    runtimeOnly libs.postgresql
     testImplementation libs.spring.boot.test
     testImplementation libs.spring.modulith.test
     testImplementation libs.archunit.junit
+    testImplementation libs.temporal.testing
+    testImplementation libs.bouncycastle.pkix
+    testImplementation testFixtures(project(':database:control-plane'))
+    testImplementation libs.flyway.core
+    testImplementation libs.flyway.postgresql
+    testImplementation libs.testcontainers.junit
+    testImplementation libs.testcontainers.postgresql
 }
 
 sourceSets {
@@ -21,7 +36,111 @@ sourceSets {
     }
 }
 
-tasks.withType(Test).configureEach { useJUnitPlatform() }
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+    if (project.hasProperty('accordCaptureTemporalHistory')) {
+        systemProperty 'accordCaptureTemporalHistory',
+            project.property('accordCaptureTemporalHistory').toString()
+    }
+}
+
+configurations.configureEach {
+    resolutionStrategy.force(
+        'com.fasterxml.jackson:jackson-bom:2.19.1',
+        'com.google.guava:guava:32.0.1-jre',
+        'org.checkerframework:checker-qual:3.49.3',
+        'com.google.errorprone:error_prone_annotations:2.38.0',
+        'com.google.protobuf:protobuf-java:3.25.5',
+        'com.google.protobuf:protobuf-java-util:3.25.5'
+    )
+}
+
+configurations.matching { it.name.startsWith('test') }.configureEach {
+    resolutionStrategy.force(
+        'org.bouncycastle:bcprov-jdk18on:1.81',
+        'org.bouncycastle:bcutil-jdk18on:1.81'
+    )
+}
+
+def temporalServiceClient = 'io.temporal:temporal-serviceclient:1.28.1'
+
+def verifyGrpcGraph = { ResolvedComponentResult root ->
+    def violations = []
+    def pending = [[component: root, throughTemporal: false, path: [root.id.displayName]]]
+    def visited = new HashSet<String>()
+    while (!pending.empty) {
+        def cursor = pending.remove(pending.size() - 1)
+        def component = cursor.component as ResolvedComponentResult
+        def stateKey = "${component.id.displayName}|${cursor.throughTemporal}"
+        if (!visited.add(stateKey)) {
+            continue
+        }
+        component.dependencies.findAll {
+            it instanceof ResolvedDependencyResult
+        }.each { edge ->
+            def selected = (edge as ResolvedDependencyResult).selected
+            def id = selected.id
+            def coordinate = id instanceof ModuleComponentIdentifier
+                ? "${id.group}:${id.module}:${id.version}"
+                : id.displayName
+            def throughTemporal = cursor.throughTemporal || coordinate == temporalServiceClient
+            def path = cursor.path + coordinate
+            if (id instanceof ModuleComponentIdentifier
+                    && id.group == 'io.grpc'
+                    && !throughTemporal) {
+                violations.add(path.join(' -> '))
+            }
+            pending.add([
+                component: selected,
+                throughTemporal: throughTemporal,
+                path: path
+            ])
+        }
+    }
+    violations.unique().sort()
+}
+
+tasks.register('verifyTemporalGrpcClosure') {
+    group = 'verification'
+    description = 'Requires every runtime gRPC path to pass through Temporal serviceclient 1.28.1.'
+    inputs.files(configurations.runtimeClasspath)
+        .withPropertyName('runtimeClasspath')
+        .withNormalizer(ClasspathNormalizer)
+    doLast {
+        def graph = configurations.runtimeClasspath.incoming.resolutionResult.rootComponent.get()
+        def violations = verifyGrpcGraph(graph)
+        if (!violations.empty) {
+            throw new GradleException(
+                "Runtime gRPC dependencies bypass Temporal serviceclient: ${violations.join('; ')}")
+        }
+    }
+}
+
+tasks.register('verifyTemporalGrpcClosureHostileFixture') {
+    group = 'verification'
+    description = 'Proves the gRPC closure gate rejects a BOM-constrained direct dependency.'
+    inputs.files(configurations.runtimeClasspath)
+        .withPropertyName('runtimeClasspath')
+        .withNormalizer(ClasspathNormalizer)
+    doLast {
+        def grpcVersion = '1.58.1'
+        def grpcBom = "io.grpc:grpc-bom:${grpcVersion}"
+        def grpcApi = "io.grpc:grpc-api:${grpcVersion}"
+        def hostile = configurations.detachedConfiguration(
+            dependencies.platform(grpcBom),
+            dependencies.create('io.grpc:grpc-api'))
+        def violations = verifyGrpcGraph(hostile.incoming.resolutionResult.rootComponent.get())
+        if (!violations.any { it.contains("${grpcBom} -> ${grpcApi}") }) {
+            throw new GradleException(
+                'gRPC BOM constraint hostile fixture bypassed the closure gate')
+        }
+    }
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('verifyTemporalGrpcClosure')
+    dependsOn tasks.named('verifyTemporalGrpcClosureHostileFixture')
+}
 
 ext.controlPlaneBoundary = [
     expectedStartClass: 'com.inforvans.accord.ControlWorkerApplication',

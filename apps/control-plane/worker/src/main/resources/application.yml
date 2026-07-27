@@ -3,3 +3,33 @@ spring:
     web-application-type: none
   modulith:
     detection-strategy: explicitly-annotated
+  datasource:
+    url: ${ACCORD_DB_URL:jdbc:postgresql://localhost:5432/accord}
+    username: ${ACCORD_WORKER_DB_USER:accord_worker_login}
+    password: ${ACCORD_WORKER_DB_PASSWORD:local-worker-only}
+    hikari:
+      connection-init-sql: SET ROLE accord_worker
+      connection-timeout: 2000
+      validation-timeout: 1000
+      data-source-properties:
+        connectTimeout: 2
+        socketTimeout: 4
+        cancelSignalTimeout: 2
+        options: "-c statement_timeout=2000 -c lock_timeout=1000 -c idle_in_transaction_session_timeout=3000 -c transaction_timeout=6000"
+  flyway:
+    enabled: false
+accord:
+  reconciliation:
+    instance-id: ${ACCORD_PROCESS_INSTANCE_ID}
+    claim-lease: PT8S
+  temporal:
+    endpoint: ${ACCORD_TEMPORAL_ENDPOINT}
+    namespace: ${ACCORD_TEMPORAL_NAMESPACE}
+    task-queue: ${ACCORD_TEMPORAL_RECONCILIATION_TASK_QUEUE}
+    server-name: ${ACCORD_TEMPORAL_SERVER_NAME}
+    secret-root: ${ACCORD_TEMPORAL_SECRET_ROOT}
+    client-certificate: ${ACCORD_TEMPORAL_CLIENT_CERTIFICATE}
+    client-private-key: ${ACCORD_TEMPORAL_CLIENT_PRIVATE_KEY}
+    trust-certificate: ${ACCORD_TEMPORAL_TRUST_CERTIFICATE}
+    rpc-timeout: PT5S
+    shutdown-timeout: PT20S
