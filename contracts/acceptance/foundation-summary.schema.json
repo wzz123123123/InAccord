@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.accord.inforvans.com/acceptance/foundation-summary/1-0-0",
+  "title": "Accord Foundation Acceptance Summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "binding_equal",
+    "code_verdict_digest",
+    "environment_verdict_digest",
+    "code_binding",
+    "environment_binding",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "status": { "enum": ["PASS", "FAIL", "BLOCKED"] },
+    "binding_equal": { "type": "boolean" },
+    "code_verdict_digest": { "$ref": "#/$defs/digest" },
+    "environment_verdict_digest": { "$ref": "#/$defs/digest" },
+    "code_binding": { "$ref": "#/$defs/binding" },
+    "environment_binding": { "$ref": "#/$defs/binding" },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "PASS" } }, "required": ["status"] },
+      "then": { "properties": { "binding_equal": { "const": true } } }
+    }
+  ],
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "gitObjectId": { "type": "string", "pattern": "^[a-f0-9]{40,64}$" },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "remote_url",
+        "remote_ref",
+        "remote_sha",
+        "tree_sha",
+        "image_lock_digest",
+        "release_manifest_digest",
+        "evidence_policy_version"
+      ],
+      "properties": {
+        "remote_url": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "remote_ref": { "type": "string", "pattern": "^refs/[A-Za-z0-9][A-Za-z0-9._/-]{1,1023}$" },
+        "remote_sha": { "$ref": "#/$defs/gitObjectId" },
+        "tree_sha": { "$ref": "#/$defs/gitObjectId" },
+        "image_lock_digest": { "$ref": "#/$defs/digest" },
+        "release_manifest_digest": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/digest" }
+          ]
+        },
+        "evidence_policy_version": { "const": "accord-foundation-evidence-v1" }
+      }
+    }
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0.0",
+  "evidence_policy_version": "accord-foundation-evidence-v1",
+  "kind": "CODE",
+  "status": "PASS",
+  "remote_url": "https://git.example.com/accord/accord.git",
+  "remote_ref": "refs/heads/main",
+  "remote_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "tree_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "image_lock_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "release_manifest_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "dependency_lock_digests": [
+    {
+      "path": "gradle/verification-metadata.xml",
+      "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  ],
+  "toolchain_results": [
+    {
+      "name": "buf",
+      "required_version": "1.55.1",
+      "observed_version": "1.55.1",
+      "status": "PASS"
+    }
+  ],
+  "checks": [
+    {
+      "check_id": "01.architecture",
+      "status": "PASS",
+      "attempted_argv": ["node", "tests/architecture/verify-platform-foundation.mjs"],
+      "attempt_exit_code": 0,
+      "evidence_digests": ["1111111111111111111111111111111111111111111111111111111111111111"],
+      "occurred_at": "2026-07-26T00:00:01Z",
+      "owner": "platform-engineering"
+    },
+    {
+      "check_id": "08.foundation-demo",
+      "status": "PASS",
+      "attempted_argv": ["node", "scripts/acceptance/run-foundation-demo.mjs"],
+      "attempt_exit_code": 0,
+      "evidence_digests": ["2222222222222222222222222222222222222222222222222222222222222222"],
+      "occurred_at": "2026-07-26T00:00:02Z",
+      "owner": "platform-engineering"
+    }
+  ],
+  "demo_evidence": ["2222222222222222222222222222222222222222222222222222222222222222"],
+  "started_at": "2026-07-26T00:00:00Z",
+  "ended_at": "2026-07-26T00:00:03Z",
+  "evidence_bundle_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+}

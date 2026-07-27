@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0.0",
+  "evidence_policy_version": "accord-foundation-evidence-v1",
+  "kind": "ENVIRONMENT",
+  "status": "BLOCKED",
+  "remote_url": "https://git.example.com/accord/accord.git",
+  "remote_ref": "refs/heads/main",
+  "remote_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "tree_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "image_lock_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "release_manifest_digest": null,
+  "dependency_lock_digests": [],
+  "toolchain_results": [],
+  "checks": [
+    {
+      "schema_version": "1.0.0",
+      "check_id": "01.branch-protection",
+      "status": "BLOCKED",
+      "remote_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "tree_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "reason_code": "BLOCKED_BRANCH_PROTECTION",
+      "attempted_argv": ["verify-authoritative-receipt", "branch-protection"],
+      "attempt_exit_code": null,
+      "attempt_evidence": [],
+      "rerun_argv": ["node", "scripts/acceptance/collect-environment-evidence.mjs"],
+      "occurred_at": "2026-07-26T00:00:04Z",
+      "owner": "platform-engineering",
+      "external": {
+        "capability": "authoritative-branch-protection",
+        "authority": "accord-source-host",
+        "required_evidence_type": "branch-protection-receipt-v1"
+      }
+    }
+  ],
+  "demo_evidence": [],
+  "started_at": "2026-07-26T00:00:04Z",
+  "ended_at": "2026-07-26T00:00:05Z",
+  "evidence_bundle_digest": "9999999999999999999999999999999999999999999999999999999999999999"
+}
