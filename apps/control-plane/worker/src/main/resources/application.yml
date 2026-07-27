@@ -19,6 +19,16 @@ spring:
   flyway:
     enabled: false
 accord:
+  worker:
+    poll-delay: PT1S
+    tenant-permit-lease: PT30S
+    message-lease: PT30S
+    transport-timeout: PT10S
+    batch-size: 50
+    concurrency: 8
+    max-attempts: 8
+    cleanup-batch-size: 200
+    drain-timeout: PT20S
   reconciliation:
     instance-id: ${ACCORD_PROCESS_INSTANCE_ID}
     claim-lease: PT8S
