@@ -64,3 +64,14 @@ test('purging local state also removes persistent Compose volumes', async () => 
   assert.match(script, /if \(options\.purge\) downArguments\.push\('--volumes'\)/u);
   assert.match(script, /if \(options\.purge\) await guardedPurge\(\)/u);
 });
+
+test('local startup hardens the state directory before rendering Compose secrets', async () => {
+  const script = await read('scripts/local-up.mjs');
+  const start = /async function startOnly\(\) \{(?<body>[\s\S]*?)\n\}/u.exec(script);
+  assert.ok(start?.groups?.body);
+  const body = start.groups.body;
+  const pki = body.indexOf(':tests:integration:generateTemporalLocalPki');
+  const render = body.indexOf('render-compose-images.mjs');
+  assert.ok(pki >= 0 && render >= 0);
+  assert.ok(pki < render, 'PKI ACL hardening must precede images.env creation');
+});

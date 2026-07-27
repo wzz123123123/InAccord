@@ -33,12 +33,27 @@ async function findImageLocks(directory, matches = []) {
   return matches;
 }
 
+export async function verifiedComposeEnvironment(scope, expectedBytes, {
+  read = readFile,
+  imageEnvironmentPath = IMAGE_ENV_PATH,
+} = {}) {
+  try {
+    const actual = await read(imageEnvironmentPath, 'utf8');
+    if (actual !== expectedBytes) {
+      throw new TypeError('Rendered Compose image environment is stale or non-canonical');
+    }
+    return actual;
+  } catch (error) {
+    if (scope === 'all' && error?.code === 'ENOENT') return expectedBytes;
+    throw error;
+  }
+}
+
 async function verify(scope) {
   const startedAt = new Date().toISOString();
   try {
     const expected = await expectedComposeEnvironment();
-    const actualEnvironment = await readFile(IMAGE_ENV_PATH, 'utf8');
-    if (actualEnvironment !== expected.bytes) throw new TypeError('Rendered Compose image environment is stale or non-canonical');
+    const actualEnvironment = await verifiedComposeEnvironment(scope, expected.bytes);
     const locks = (await findImageLocks(REPOSITORY_ROOT)).map((item) => path.relative(REPOSITORY_ROOT, item).replaceAll('\\', '/')).sort();
     if (JSON.stringify(locks) !== JSON.stringify(['infra/images/images.lock.json'])) {
       throw new TypeError(`Repository image-lock set is not unique: ${locks.join(', ')}`);

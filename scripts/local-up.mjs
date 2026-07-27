@@ -281,13 +281,13 @@ async function startOnly() {
     '--require', 'node', '--require', 'docker', '--require', 'docker-buildx',
     '--require', 'docker-compose', '--require', 'git', '--require', 'java',
   ], { timeoutMs: 60_000 });
-  await requireSuccess(process.execPath, [path.join(ROOT, 'scripts', 'images', 'render-compose-images.mjs')]);
-  await requireSuccess(process.execPath, [path.join(ROOT, 'scripts', 'images', 'verify-images.mjs'), '--scope', 'local']);
   const pki = javaWrapperCommand([
     ':tests:integration:generateTemporalLocalPki',
     '--no-daemon', '--dependency-verification=strict', '--console=plain',
   ]);
   await requireSuccess(pki.executable, pki.argv, { timeoutMs: 90_000, maximumCapture: 0 });
+  await requireSuccess(process.execPath, [path.join(ROOT, 'scripts', 'images', 'render-compose-images.mjs')]);
+  await requireSuccess(process.execPath, [path.join(ROOT, 'scripts', 'images', 'verify-images.mjs'), '--scope', 'local']);
   await requireSuccess('docker', composeArguments('up', '-d', '--wait', '--wait-timeout', '180', ...DEPENDENCY_SERVICES), { timeoutMs: 210_000 });
   const ps = await requireSuccess('docker', composeArguments('ps', '--all', '--format', 'json'), { timeoutMs: 30_000 });
   let containers;

@@ -147,6 +147,30 @@ test('repository has exactly one authoritative image lock path', async () => {
   assert.equal((await stat(path.join(root, matches[0]))).isFile(), true);
 });
 
+test('all-scope image verification does not require ignored rendered state', async () => {
+  const verifier = await import('../../scripts/images/verify-images.mjs');
+  assert.equal(typeof verifier.verifiedComposeEnvironment, 'function');
+  const missing = Object.assign(new Error('missing generated state'), { code: 'ENOENT' });
+  assert.equal(
+    await verifier.verifiedComposeEnvironment('all', 'canonical\n', {
+      read: async () => { throw missing; },
+    }),
+    'canonical\n',
+  );
+  await assert.rejects(
+    verifier.verifiedComposeEnvironment('local', 'canonical\n', {
+      read: async () => { throw missing; },
+    }),
+    /missing generated state/u,
+  );
+  await assert.rejects(
+    verifier.verifiedComposeEnvironment('all', 'canonical\n', {
+      read: async () => 'stale\n',
+    }),
+    /stale or non-canonical/u,
+  );
+});
+
 test('local MinIO source approval binds the reviewed evidence bytes and expires closed', async () => {
   const evidenceBytes = await readFile(path.join(root, 'infra/images/minio-source-approval-evidence.json'));
   const evidence = JSON.parse(evidenceBytes.toString('utf8'));

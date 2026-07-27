@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { lstat, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
@@ -396,6 +396,56 @@ test('Windows production gates invoke pnpm through Node and Corepack', async () 
   const ciSource = await readFile(resolve('scripts', 'ci', 'verify.mjs'), 'utf8');
   assert.match(ciSource, /fullPreflight[\s\S]*nativeToolInvocation\(definition[.]executable/u);
   assert.match(ciSource, /async function gate[\s\S]*nativeToolInvocation\(executable/u);
+});
+
+test('authoritative acceptance bootstraps locked offline dependencies before detached execution', async () => {
+  const acceptance = await import('../../scripts/acceptance/run-foundation-acceptance.mjs');
+  assert.equal(typeof acceptance.detachedDependencyBootstrapInvocation, 'function');
+  const invocation = acceptance.detachedDependencyBootstrapInvocation({
+    platform: 'win32',
+    nodeExecutable: 'C:\\runtime\\node.exe',
+    storeDirectory: 'D:\\pnpm-store\\v10',
+  });
+  assert.deepEqual(invocation, {
+    executable: 'C:\\runtime\\node.exe',
+    argv: [
+      'C:\\runtime\\node_modules\\corepack\\dist\\pnpm.js',
+      'install',
+      '--frozen-lockfile',
+      '--offline',
+      '--store-dir',
+      'D:\\pnpm-store\\v10',
+    ],
+  });
+  const source = await readFile(resolve('scripts', 'acceptance', 'run-foundation-acceptance.mjs'), 'utf8');
+  assert.match(
+    source,
+    /resolvePnpmStoreDirectory[\s\S]*detachedDependencyBootstrapInvocation[\s\S]*cwd:\s*worktree[\s\S]*assertDetachedClean[\s\S]*const child/u,
+  );
+});
+
+test('detached cleanup removes residual files after Git unregisters the worktree', async (context) => {
+  const detached = await import('../../scripts/acceptance/create-detached-worktree.mjs');
+  assert.equal(typeof detached.removeDetachedWorktree, 'function');
+  const temporaryRoot = await realpath(tmpdir());
+  const parent = await mkdtemp(join(temporaryRoot, 'accord-foundation-'));
+  context.after(() => rm(parent, { recursive: true, force: true }));
+  const worktree = join(parent, 'source');
+  await mkdir(join(worktree, 'node_modules'), { recursive: true });
+  await writeFile(join(worktree, 'node_modules', 'residual'), 'ignored\n', 'utf8');
+
+  await detached.removeDetachedWorktree({
+    repositoryRoot: process.cwd(),
+    temporaryRoot,
+    parent,
+    worktree,
+    run: (_command, argv) => {
+      if (argv[1] === 'remove') return commandResult({ exitCode: 1 });
+      assert.deepEqual(argv, ['worktree', 'list', '--porcelain', '-z']);
+      return commandResult({ exitCode: 0, stdout: '' });
+    },
+  });
+  await assert.rejects(lstat(parent), { code: 'ENOENT' });
 });
 
 test('remote bootstrap failure writes closed auditable evidence without inventing a tree SHA', async (context) => {

@@ -1,5 +1,5 @@
 import { readdir, readFile, lstat } from 'node:fs/promises';
-import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, relative, resolve, sep, win32 } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { assertDetachedClean, isPathInside, withDetachedWorktree } from './create-detached-worktree.mjs';
 import { collectEnvironmentEvidence } from './collect-environment-evidence.mjs';
@@ -302,6 +302,12 @@ export async function runAuthoritativeAcceptance(options) {
   const evidenceDirectory = resolve(outputBase, proof.remote_sha);
   const proofPath = resolve(evidenceDirectory, 'remote-proof.json');
   await atomicWriteJson(proofPath, proof);
+  const storeDirectory = resolvePnpmStoreDirectory({
+    repository,
+    run: options.run ?? runNative,
+    platform: options.platform,
+    nodeExecutable: options.nodeExecutable,
+  });
   return withDetachedWorktree({
     repository,
     remoteSha: proof.remote_sha,
@@ -309,6 +315,29 @@ export async function runAuthoritativeAcceptance(options) {
     evidenceDirectory,
     run: options.run ?? runNative,
   }, async ({ worktree }) => {
+    const bootstrapInvocation = detachedDependencyBootstrapInvocation({
+      platform: options.platform,
+      nodeExecutable: options.nodeExecutable,
+      storeDirectory,
+    });
+    const bootstrap = (options.run ?? runNative)(
+      bootstrapInvocation.executable,
+      bootstrapInvocation.argv,
+      {
+        cwd: worktree,
+        timeout: 10 * 60_000,
+        maxBuffer: 1024 * 1024,
+      },
+    );
+    if (bootstrap.errorCode !== null || bootstrap.exitCode !== 0) {
+      throw new AcceptanceAssertionError('DETACHED_DEPENDENCY_BOOTSTRAP_FAILED');
+    }
+    await assertDetachedClean({
+      worktree,
+      remoteSha: proof.remote_sha,
+      treeSha: proof.tree_sha,
+      run: options.run ?? runNative,
+    });
     const scriptPath = resolve(worktree, 'scripts', 'acceptance', 'run-foundation-acceptance.mjs');
     const argv = [
       scriptPath,
@@ -345,6 +374,54 @@ export async function runAuthoritativeAcceptance(options) {
     }
     return summary;
   });
+}
+
+export function detachedDependencyBootstrapInvocation({
+  platform = process.platform,
+  nodeExecutable = process.execPath,
+  storeDirectory,
+} = {}) {
+  const absoluteStore = platform === 'win32'
+    ? typeof storeDirectory === 'string' && win32.isAbsolute(storeDirectory)
+    : typeof storeDirectory === 'string' && isAbsolute(storeDirectory);
+  if (!absoluteStore || /[\0\r\n]/u.test(storeDirectory)) {
+    throw new AcceptanceAssertionError('PNPM_STORE_PATH_INVALID');
+  }
+  return nativeToolInvocation(
+    'pnpm',
+    ['install', '--frozen-lockfile', '--offline', '--store-dir', storeDirectory],
+    { platform, nodeExecutable },
+  );
+}
+
+export function resolvePnpmStoreDirectory({
+  repository,
+  run = runNative,
+  platform = process.platform,
+  nodeExecutable = process.execPath,
+}) {
+  const invocation = nativeToolInvocation(
+    'pnpm',
+    ['store', 'path', '--silent'],
+    { platform, nodeExecutable },
+  );
+  const result = invokeAcceptanceRunner(run, invocation.executable, invocation.argv, {
+    cwd: repository,
+    timeout: 30_000,
+  });
+  const storeDirectory = result.stdout.trim();
+  const absoluteStore = platform === 'win32'
+    ? win32.isAbsolute(storeDirectory)
+    : isAbsolute(storeDirectory);
+  if (
+    result.errorCode !== null
+    || result.exitCode !== 0
+    || !absoluteStore
+    || /[\0\r\n]/u.test(storeDirectory)
+  ) {
+    throw new AcceptanceAssertionError('PNPM_STORE_PATH_UNAVAILABLE');
+  }
+  return storeDirectory;
 }
 
 export async function verifyDetachedAcceptanceEvidence({

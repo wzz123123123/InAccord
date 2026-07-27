@@ -98,15 +98,13 @@ export async function createDetachedWorktree({
   const cleanup = async () => {
     if (cleaned) return;
     cleaned = true;
-    await assertSafeTemporaryParent(temporaryRoot, parent);
-    const removed = run('git', ['worktree', 'remove', '--force', worktree], {
-      cwd: repositoryRoot,
-      timeout: 120_000,
+    await removeDetachedWorktree({
+      repositoryRoot,
+      temporaryRoot,
+      parent,
+      worktree,
+      run,
     });
-    if (removed.errorCode !== null || removed.exitCode !== 0) {
-      throw new AcceptanceAssertionError('DETACHED_WORKTREE_REMOVE_FAILED');
-    }
-    await safeRemoveTemporaryParent(temporaryRoot, parent);
   };
 
   try {
@@ -116,6 +114,38 @@ export async function createDetachedWorktree({
     throw error;
   }
   return { repository_root: repositoryRoot, temporary_parent: parent, worktree, cleanup };
+}
+
+export async function removeDetachedWorktree({
+  repositoryRoot,
+  temporaryRoot,
+  parent,
+  worktree,
+  run = runNative,
+}) {
+  await assertSafeTemporaryParent(temporaryRoot, parent);
+  const removed = run('git', ['worktree', 'remove', '--force', worktree], {
+    cwd: repositoryRoot,
+    timeout: 120_000,
+  });
+  if (removed.errorCode !== null || removed.exitCode !== 0) {
+    const listed = run('git', ['worktree', 'list', '--porcelain', '-z'], {
+      cwd: repositoryRoot,
+      timeout: 30_000,
+    });
+    if (
+      listed.errorCode !== null
+      || listed.exitCode !== 0
+      || isRegisteredWorktree(listed.stdout, worktree)
+    ) {
+      throw new AcceptanceAssertionError('DETACHED_WORKTREE_REMOVE_FAILED');
+    }
+  }
+  try {
+    await safeRemoveTemporaryParent(temporaryRoot, parent);
+  } catch {
+    throw new AcceptanceAssertionError('DETACHED_WORKTREE_REMOVE_FAILED');
+  }
 }
 
 export async function withDetachedWorktree(options, operation) {
@@ -131,6 +161,19 @@ function isEvidenceOutside(worktree, evidenceDirectory) {
   const evidence = resolve(evidenceDirectory);
   const source = resolve(worktree);
   return evidence !== source && !isPathInside(source, evidence);
+}
+
+function isRegisteredWorktree(porcelain, expectedWorktree) {
+  const expected = comparablePath(expectedWorktree);
+  return porcelain.split('\0').some((record) => (
+    record.startsWith('worktree ')
+    && comparablePath(record.slice('worktree '.length)) === expected
+  ));
+}
+
+function comparablePath(candidate) {
+  const canonical = resolve(candidate);
+  return process.platform === 'win32' ? canonical.toLowerCase() : canonical;
 }
 
 async function assertSafeTemporaryParent(temporaryRoot, parent) {
