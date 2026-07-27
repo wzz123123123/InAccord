@@ -6,17 +6,36 @@
   "scripts": {
     "check": "pnpm -r --if-present test && pnpm -r --if-present typecheck",
     "contracts:lint": "redocly lint contracts/openapi/accord-control-api.yaml",
-    "contracts:test": "node --test tests/contracts/*.test.mjs"
+    "contracts:test": "node --test tests/contracts/*.test.mjs",
+    "architecture:test": "node --test tests/architecture/*.test.mjs",
+    "dev:web": "pnpm --filter @accord/web dev",
+    "build:web": "pnpm --filter @accord/web build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint . --max-warnings=0",
+    "test": "pnpm -r test",
+    "test:e2e": "pnpm --filter @accord/web test:e2e",
+    "storybook": "pnpm --filter @accord/ui storybook",
+    "api:generate": "pnpm --filter @accord/api-client generate",
+    "contracts:generate": "pnpm --filter @accord/api-client generate",
+    "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm build:web"
   },
   "pnpm": {
     "onlyBuiltDependencies": ["esbuild"],
-    "ignoredBuiltDependencies": ["core-js", "protobufjs"]
+    "ignoredBuiltDependencies": ["core-js", "protobufjs"],
+    "overrides": {
+      "rollup": "4.40.0"
+    }
   },
   "devDependencies": {
+    "@eslint/js": "9.30.0",
     "@redocly/cli": "1.34.3",
     "ajv": "8.17.1",
     "ajv-cli": "5.0.0",
     "ajv-formats": "3.0.1",
+    "eslint": "9.30.0",
+    "eslint-plugin-boundaries": "5.0.1",
+    "typescript": "5.8.3",
+    "typescript-eslint": "8.35.0",
     "yaml": "2.8.0"
   }
 }

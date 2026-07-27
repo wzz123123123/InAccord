@@ -1,0 +1,31 @@
+schema_version: "1.0"
+runtimes:
+  control_plane: java-21-spring-modulith
+  edge_services: java-21-spring-boot-isolated
+  security_services: java-21-spring-boot-isolated
+  cli: java-21-picocli-jlink
+  agent_runtime: python-3.12-pydantic
+  web: react-19.1-typescript-5.8-vite-7
+security_services: [signing-service, provider-connector, credential-broker, merge-controller, break-glass-broker]
+edge_services: [webhook-edge, attachment-scanner, agent-pack-gateway]
+edge_workload_profiles: [webhook-edge, provider-auth-callback-edge, attachment-scanner, agent-pack-gateway]
+contracts:
+  http: contracts/openapi/accord-control-api.yaml
+  events: contracts/events
+  grpc: contracts/protobuf/accord
+  agent_jobs: contracts/json-schema/agent-job.schema.json
+  signed_payloads: contracts/dsse-payloads
+  canonicalization: contracts/golden-fixtures/jcs
+persistence:
+  authority: postgresql-17.5
+  migrations: database/control-plane/migrations
+  reliability: [expected-version-cas, persistent-idempotency, transactional-outbox, inbox, durable-leases, fencing-tokens]
+  optional_cache_layer: disabled
+infrastructure:
+  iac: opentofu
+  deployment: [kubernetes, helm, argocd]
+reference_deployment:
+  name: aws-japan-primary-warm-dr
+  primary: ap-northeast-1
+  warm_dr: ap-northeast-3
+  architecture_assumption: false

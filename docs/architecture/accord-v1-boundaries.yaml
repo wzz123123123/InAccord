@@ -1,0 +1,220 @@
+schema_version: "1.0"
+compatibility_manifest: contracts/compatibility/v1-boundaries.yaml
+
+authority:
+  business_truth: postgresql-17.5
+  orchestration: temporal
+  temporal_is_business_truth: false
+  provider_webhooks_are_authority: false
+  customer_source_access: customer-codex-and-ci-only
+
+release_ownership:
+  production_release: infra/helm/accord
+  independently_installable_production_releases: []
+  component_charts:
+    agent-pack-gateway:
+      path: infra/helm/agent-pack-gateway
+      owning_plan: docs/superpowers/plans/2026-07-24-accord-agent-context-assessment-plan.md
+      production_installation: through-infra-helm-accord-only
+
+shared_images:
+  webhook-edge:
+    build_project: apps/webhook-edge
+    workload_profiles: [webhook-edge, provider-auth-callback-edge]
+    same_signed_digest_required: true
+    shared_authority: false
+
+deployables:
+  control-api:
+    runtime: java-21-spring-modulith
+    artifact: apps/control-plane/api
+    workload_identity:
+      service_account: accord-control-api
+      mtls_audience: accord-control-api
+    database:
+      authority: control-plane-postgresql
+      login_role: accord_api_login
+      session_role: accord_api
+    egress_allowlist: [dns, control-plane-postgresql, identity-provider, object-store, signing-service, telemetry]
+    credential_purposes: [control-api-database, object-capability-client, signing-mtls-client]
+    prohibited_dependencies: [customer-git-content, provider-credentials, signing-key-material, temporal-business-authority]
+
+  control-worker:
+    runtime: java-21-spring-modulith
+    artifact: apps/control-plane/worker
+    workload_identity:
+      service_account: accord-control-worker
+      mtls_audience: accord-control-worker
+    database:
+      authority: control-plane-postgresql
+      login_role: accord_worker_login
+      session_role: accord_worker
+    egress_allowlist: [dns, control-plane-postgresql, temporal, agent-runtime, signing-service, provider-connector, merge-controller, object-store, telemetry]
+    credential_purposes: [control-worker-database, temporal-client, typed-security-service-mtls, object-capability-client]
+    prohibited_dependencies: [customer-git-content, provider-credentials, signing-key-material, temporal-business-authority, blind-uncertain-effect-retry]
+
+  webhook-edge:
+    runtime: java-21-spring-boot-isolated
+    artifact: apps/webhook-edge
+    image: shared-images.webhook-edge
+    ingress_path: /providers/webhooks
+    signal_queue: verified-provider-deliveries
+    encryption_key_purpose: webhook-delivery-envelope
+    workload_identity:
+      service_account: accord-webhook-edge
+      mtls_audience: accord-webhook-edge
+      network_policy: accord-webhook-edge
+    database:
+      authority: webhook-edge-postgresql
+      login_role: accord_webhook_runtime_login
+      session_role: accord_webhook_runtime
+    egress_allowlist: [dns, webhook-edge-postgresql, control-plane-webhook-inbox, telemetry]
+    credential_purposes: [webhook-edge-database, provider-webhook-verification, control-plane-signal-mtls]
+    prohibited_dependencies: [control-plane-domain-modules, customer-git-content, provider-api, provider-credentials, business-state-transition-authority]
+
+  provider-auth-callback-edge:
+    runtime: java-21-spring-boot-isolated
+    artifact: apps/webhook-edge
+    image: shared-images.webhook-edge
+    ingress_path: /providers/auth/callback
+    signal_queue: encrypted-provider-auth-receipts
+    encryption_key_purpose: provider-auth-callback-assertion
+    workload_identity:
+      service_account: accord-provider-auth-callback-edge
+      mtls_audience: accord-provider-auth-callback-edge
+      network_policy: accord-provider-auth-callback-edge
+    database:
+      authority: callback-edge-postgresql
+      login_role: accord_provider_callback_runtime_login
+      session_role: accord_provider_callback_runtime
+    egress_allowlist: [dns, callback-edge-postgresql, control-plane-auth-receipt-inbox, telemetry]
+    credential_purposes: [callback-edge-database, callback-assertion-encryption, control-plane-receipt-mtls]
+    prohibited_dependencies: [webhook-domain-rows, control-plane-domain-modules, customer-git-content, provider-api, provider-credentials, reusable-callbacks]
+
+  attachment-scanner:
+    runtime: java-21-spring-boot-isolated
+    artifact: apps/attachment-scanner
+    workload_identity:
+      service_account: accord-attachment-scanner
+      mtls_audience: accord-attachment-scanner
+    database:
+      authority: none
+      login_role: none
+      session_role: none
+    egress_allowlist: [dns, quarantine-object-store, scanner-signature-updates, control-plane-attachment-verdict-inbox, telemetry]
+    credential_purposes: [quarantine-object-read, scanner-definition-read, verdict-mtls]
+    prohibited_dependencies: [unscanned-publication, unrelated-tenant-objects, customer-git-content, control-plane-domain-modules]
+
+  agent-pack-gateway:
+    runtime: java-21-spring-boot-isolated
+    artifact: apps/agent-pack-gateway
+    workload_identity:
+      service_account: accord-agent-pack-gateway
+      mtls_audience: accord-agent-pack-gateway
+      irsa_role: accord-agent-pack-gateway
+    database:
+      authority: control-plane-postgresql
+      login_role: accord_agent_pack_gateway_login
+      session_role: accord_agent_pack_gateway
+    cache:
+      type: encrypted-ephemeral-object-cache
+      kms_purpose: agent-pack-cache
+      keying: immutable-oci-digest-and-distribution-epoch
+      authoritative: false
+    egress_allowlist: [dns, identity-provider, control-plane-postgresql, allowlisted-agent-pack-oci, encrypted-agent-pack-cache, kms-agent-pack-cache, telemetry]
+    credential_purposes: [one-use-capability-consumer, agent-pack-gateway-database, fixed-oci-pull, cache-kms]
+    prohibited_dependencies: [customer-git-egress, customer-source, arbitrary-registries, mutable-oci-tags, registry-credential-disclosure, unverified-streaming]
+
+  agent-runtime:
+    runtime: python-3.12-pydantic
+    artifact: apps/agent-runtime
+    workload_identity:
+      service_account: accord-agent-runtime
+      mtls_audience: accord-agent-runtime
+      service_account_token_automount: false
+    database:
+      authority: none
+      login_role: none
+      session_role: none
+    egress_allowlist: [dns, typed-agent-job-api, typed-agent-result-api, allowlisted-model-gateway, attachment-capability-endpoint, telemetry]
+    credential_purposes: [typed-job-mtls, model-gateway, single-job-attachment-capability]
+    prohibited_dependencies: [customer-repositories, source-locators, git-credentials, direct-aggregate-update, approval-authority, publication-authority, merge-authority]
+
+  signing-service:
+    runtime: java-21-spring-boot-isolated
+    artifact: security-services/signing-service
+    workload_identity:
+      service_account: accord-signing-service
+      mtls_audience: accord-signing-service
+    database:
+      authority: signing-postgresql
+      login_role: accord_signing_runtime_login
+      session_role: accord_signing_runtime
+    egress_allowlist: [dns, signing-postgresql, purpose-bound-kms, trust-time, telemetry]
+    credential_purposes: [signing-database, purpose-bound-dsse-signing, workload-mtls]
+    prohibited_dependencies: [control-plane-domain-modules, customer-git-content, git-publication, merge-authority, shared-purpose-keys]
+
+  provider-connector:
+    runtime: java-21-spring-boot-isolated
+    artifact: security-services/provider-connector
+    workload_identity:
+      service_account: accord-provider-connector
+      mtls_audience: accord-provider-connector
+    database:
+      authority: control-plane-postgresql
+      login_role: accord_provider_connector_login
+      session_role: accord_provider_connector
+    egress_allowlist: [dns, control-plane-postgresql, credential-broker, configured-provider-metadata-api, telemetry]
+    credential_purposes: [connector-database, typed-provider-operation, credential-broker-mtls]
+    prohibited_dependencies: [control-plane-domain-modules, generic-provider-proxy, repository-blobs, source-content, diffs, caller-selected-urls, cross-operation-credentials]
+
+  credential-broker:
+    runtime: java-21-spring-boot-isolated
+    artifact: security-services/credential-broker
+    workload_identity:
+      service_account: accord-credential-broker
+      mtls_audience: accord-credential-broker
+    database:
+      authority: none
+      login_role: none
+      session_role: none
+    egress_allowlist: [dns, external-secret-provider, configured-provider-token-endpoint, telemetry]
+    credential_purposes: [installation-scoped-external-secret-resolution, short-lived-provider-token]
+    prohibited_dependencies: [control-plane-domain-modules, browser-credential-return, control-plane-credential-return, persisted-access-tokens, scope-broadening, provider-operation-authority]
+
+  merge-controller:
+    runtime: java-21-spring-boot-isolated
+    artifact: security-services/merge-controller
+    workload_identity:
+      service_account: accord-merge-controller
+      mtls_audience: accord-merge-controller
+    database:
+      authority: control-plane-postgresql
+      login_role: accord_merge_controller_login
+      session_role: accord_merge_controller
+    egress_allowlist: [dns, control-plane-postgresql, provider-connector, telemetry]
+    credential_purposes: [merge-controller-database, one-shot-strict-merge, provider-connector-mtls]
+    prohibited_dependencies: [control-plane-domain-modules, source-editing, metadata-editing, conflict-resolution, reusable-authorization, unverified-provider-facts]
+
+  break-glass-broker:
+    runtime: java-21-spring-boot-isolated
+    artifact: security-services/break-glass-broker
+    workload_identity:
+      service_account: accord-break-glass-broker
+      mtls_audience: accord-break-glass-broker
+    database:
+      authority: control-plane-postgresql
+      login_role: accord_break_glass_login
+      session_role: accord_break_glass
+    egress_allowlist: [dns, control-plane-postgresql, external-secret-provider, signing-service, configured-provider-metadata-api, telemetry]
+    credential_purposes: [break-glass-database, emergency-only-credential-resolution, emergency-evidence-signing]
+    prohibited_dependencies: [control-plane-domain-modules, normal-operation-path, standing-provider-credentials, unsigned-emergency-action, bypassed-audit, shared-security-credentials]
+
+global_prohibited_dependencies:
+  - typescript-server-control-plane
+  - direct-platform-customer-source-access
+  - independently-installed-agent-pack-gateway-production-release
+  - shared-security-service-credentials
+  - provider-webhook-business-authority
+  - temporal-business-authority
+  - redis-as-authority

@@ -3,7 +3,13 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "scripts": { "test": "node --test" },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -p tsconfig.json --noEmit --pretty false && vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false && tsc -p tsconfig.test.json --noEmit --pretty false",
+    "test": "vitest run",
+    "test:e2e": "playwright test"
+  },
   "dependencies": {
     "@tanstack/react-query": "5.81.5",
     "react": "19.1.0",
@@ -12,9 +18,12 @@
     "react-router-dom": "7.6.3"
   },
   "devDependencies": {
+    "@types/node": "22.15.32",
     "@types/react": "19.1.8",
     "@types/react-dom": "19.1.6",
+    "@vitejs/plugin-react": "4.5.2",
     "typescript": "5.8.3",
-    "vite": "7.0.2"
+    "vite": "7.0.2",
+    "vitest": "3.2.4"
   }
 }

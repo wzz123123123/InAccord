@@ -1,0 +1,19 @@
+{
+  "name": "@accord/api-client",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "generate": "orval --config orval.config.ts",
+    "check:generated": "pnpm generate && git diff --exit-code -- src/generated",
+    "typecheck": "tsc --noEmit --pretty false",
+    "test": "vitest run"
+  },
+  "dependencies": { "zod": "3.25.67" },
+  "devDependencies": {
+    "@types/node": "22.15.32",
+    "orval": "7.10.0",
+    "typescript": "5.8.3",
+    "vitest": "3.2.4"
+  }
+}
