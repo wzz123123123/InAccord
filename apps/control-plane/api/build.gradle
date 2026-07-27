@@ -6,6 +6,7 @@ plugins {
 dependencies {
     implementation project(':apps:control-plane:modules:platform-kernel')
     implementation project(':apps:control-plane:modules:reliability')
+    implementation project(':libs:java:observability')
     implementation enforcedPlatform(libs.spring.boot.bom)
     implementation platform(libs.spring.modulith.bom)
     implementation libs.spring.modulith.starter.core
@@ -13,8 +14,10 @@ dependencies {
     implementation libs.spring.boot.actuator
     implementation libs.spring.boot.jooq
     implementation libs.spring.boot.security
+    implementation libs.micrometer.tracing.bridge.otel
     implementation libs.json.schema.validator
     runtimeOnly libs.postgresql
+    runtimeOnly libs.micrometer.registry.prometheus
     testImplementation libs.spring.boot.test
     testImplementation libs.spring.security.test
     testImplementation libs.spring.modulith.test

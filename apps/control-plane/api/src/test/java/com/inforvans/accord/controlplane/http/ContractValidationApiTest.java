@@ -161,7 +161,7 @@ class ContractValidationApiTest {
              Statement statement = connection.createStatement()) {
             statement.execute("""
                 TRUNCATE TABLE contract_validation, outbox_event, domain_event,
-                    aggregate_head, idempotency_result
+                    aggregate_head, idempotency_result, external_call_intent CASCADE
                 """);
         }
     }
@@ -367,7 +367,11 @@ class ContractValidationApiTest {
             "SELECT payload::text FROM domain_event"));
         assertThat(eventPayload.propertyStream().map(Map.Entry::getKey).toList())
             .containsExactlyInAnyOrder(
-                "validation_id", "schema_id", "document_digest", "version");
+                "intent_id", "validation_id", "schema_id", "document_digest", "version");
+        String reconciliationIntentId = singleString(
+            "SELECT intent_id::text FROM external_call_intent");
+        assertThat(eventPayload.path("intent_id").textValue())
+            .isEqualTo(reconciliationIntentId);
         assertThat(eventPayload.path("validation_id").textValue()).isEqualTo(
             REQUEST_PATH.substring(REQUEST_PATH.lastIndexOf('/') + 1));
         assertThat(eventPayload.path("schema_id").textValue())
@@ -392,6 +396,14 @@ class ContractValidationApiTest {
             .isEqualTo("contract-validations");
         assertThat(singleString("SELECT payload_schema FROM outbox_event"))
             .isEqualTo("contract-validation.completed/1.0.0");
+        assertThat(singleLong("SELECT count(*) FROM external_call_intent"))
+            .isEqualTo(1);
+        assertThat(reconciliationIntentId)
+            .isNotEqualTo(REQUEST_PATH.substring(REQUEST_PATH.lastIndexOf('/') + 1));
+        assertThat(singleString("SELECT state FROM external_call_intent"))
+            .isEqualTo("RECORDED");
+        assertThat(singleString("SELECT request_digest FROM external_call_intent"))
+            .isEqualTo(documentDigest);
 
         MvcResult replayed = mockMvc.perform(trustedRequest(
             TrustedChannel.BEARER, DOMAIN_SCHEMA, validDomainEvent())).andReturn();
@@ -754,6 +766,17 @@ class ContractValidationApiTest {
         assertThat(singleLong("SELECT version FROM aggregate_head")).isEqualTo(2);
         assertThat(singleString("SELECT document_digest FROM contract_validation"))
             .isEqualTo(documentDigest);
+        assertThat(singleLong("SELECT count(*) FROM external_call_intent"))
+            .isEqualTo(2);
+        assertThat(singleLong("SELECT count(DISTINCT intent_id) FROM external_call_intent"))
+            .isEqualTo(2);
+        assertThat(singleLong("""
+            SELECT count(*)
+            FROM outbox_event event
+            JOIN external_call_intent intent
+              ON intent.tenant_id=event.tenant_id
+             AND intent.intent_id=(event.payload->>'intent_id')::uuid
+            """)).isEqualTo(2);
     }
 
     @Test
@@ -2196,8 +2219,11 @@ class ContractValidationApiTest {
     }
 
     private static void insertLiveClaim(String requestFingerprint) throws SQLException {
-        try (Connection connection = adminConnection();
-             PreparedStatement statement = connection.prepareStatement("""
+        try (Connection connection = adminConnection()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement context = connection.prepareStatement(
+                    "SELECT set_config('app.tenant_id', ?, true)");
+                 PreparedStatement statement = connection.prepareStatement("""
                  INSERT INTO idempotency_result (
                    tenant_id, actor_id, route_key, idempotency_key,
                    request_fingerprint, state, claim_owner, claim_generation,
@@ -2210,9 +2236,13 @@ class ContractValidationApiTest {
                    clock_timestamp() + INTERVAL '1 minute'
                  )
                  """)) {
-            statement.setObject(1, TENANT_ID);
-            statement.setString(2, requestFingerprint);
-            assertThat(statement.executeUpdate()).isEqualTo(1);
+                context.setString(1, TENANT_ID.toString());
+                context.executeQuery();
+                statement.setObject(1, TENANT_ID);
+                statement.setString(2, requestFingerprint);
+                assertThat(statement.executeUpdate()).isEqualTo(1);
+                connection.commit();
+            }
         }
     }
 

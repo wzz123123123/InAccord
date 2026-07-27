@@ -1,0 +1,54 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "automerge": false,
+  "dependencyDashboard": true,
+  "minimumReleaseAge": "7 days",
+  "prConcurrentLimit": 6,
+  "rangeStrategy": "pin",
+  "packageRules": [
+    {
+      "groupName": "java and gradle",
+      "matchManagers": ["gradle", "gradle-wrapper"]
+    },
+    {
+      "groupName": "browser workspace",
+      "matchManagers": ["npm"],
+      "matchFileNames": ["apps/web/**", "package.json", "pnpm-lock.yaml"]
+    },
+    {
+      "groupName": "python workspace",
+      "matchManagers": ["pep621", "poetry", "pip_requirements", "uv"]
+    },
+    {
+      "groupName": "reviewed container lock inputs",
+      "matchDatasources": ["docker"],
+      "automerge": false,
+      "labels": ["container-lock", "supply-chain-review"]
+    },
+    {
+      "groupName": "infrastructure toolchain",
+      "matchPackageNames": ["helm", "opentofu", "buf", "conftest", "kubeconform", "docker", "docker-buildx", "docker-compose"]
+    },
+    {
+      "groupName": "security and provenance toolchain",
+      "matchPackageNames": ["syft", "cosign", "trivy", "oras"],
+      "automerge": false,
+      "labels": ["security-tooling", "supply-chain-review"]
+    },
+    {
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "labels": ["breaking-change"]
+    },
+    {
+      "matchPackageNames": ["java", "node", "nodejs", "python", "openssl", "bouncycastle", "cosign", "eclipse-temurin"],
+      "automerge": false,
+      "labels": ["runtime-or-crypto-review"]
+    },
+    {
+      "matchDatasources": ["docker"],
+      "automerge": false,
+      "labels": ["base-image-review"]
+    }
+  ]
+}

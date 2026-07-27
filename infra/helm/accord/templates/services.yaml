@@ -1,0 +1,22 @@
+{{- $root := . -}}
+{{- range $name := list "control-api" "webhook-edge" }}
+{{- $component := index $root.Values.components $name }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $component.service_account | quote }}
+  namespace: {{ $root.Release.Namespace | quote }}
+  labels:
+    {{- include "accord.componentLabels" (dict "root" $root "name" $name "component" $component) | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ $name | quote }}
+    app.kubernetes.io/instance: {{ printf "%s-%s" $root.Release.Name $name | quote }}
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: http
+{{- end }}

@@ -15,6 +15,7 @@ import javax.inject.Inject
 import org.gradle.api.DefaultTask
 import org.gradle.api.artifacts.FileCollectionDependency
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.artifacts.component.ProjectComponentIdentifier
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.RegularFileProperty
@@ -215,6 +216,10 @@ final class WebhookEdgeArtifactVerifier {
             'com.inforvans.accord.webhookedge.WebhookEdgeApplication'
     private static final String EXPECTED_MAIN_CLASS =
             'org.springframework.boot.loader.launch.JarLauncher'
+    private static final String TRUSTED_OBSERVABILITY_PROJECT = ':libs:java:observability'
+    private static final String ACCORD_PACKAGE_ROOT = 'com/inforvans/accord/'
+    private static final String OBSERVABILITY_PACKAGE_ROOT =
+            'com/inforvans/accord/observability/'
     private static final List<String> FORBIDDEN_MANIFEST_ATTRIBUTES = [
         'Class-Path',
         'Premain-Class',
@@ -230,7 +235,9 @@ final class WebhookEdgeArtifactVerifier {
         'org/kohsuke/github/'
     ]
     private static final List<String> FORBIDDEN_NESTED_PACKAGE_PATHS = [
-        'com/inforvans/accord/',
+        'com/inforvans/accord/controlplane/',
+        'com/inforvans/accord/reliability/',
+        'com/inforvans/accord/database/',
         'org/eclipse/jgit/',
         'org/gitlab4j/',
         'org/kohsuke/github/'
@@ -271,6 +278,40 @@ final class WebhookEdgeArtifactVerifier {
             File scratchDirectory,
             Map<String, WebhookEdgeExpectedEntry> expectedApplicationEntries,
             Map<String, WebhookEdgeExpectedEntry> expectedLoaderEntries,
+            Map<String, WebhookEdgeExpectedEntry> trustedObservabilityLibraries) {
+        verify(
+                artifact,
+                scratchDirectory,
+                expectedApplicationEntries,
+                expectedLoaderEntries,
+                trustedObservabilityLibraries,
+                WebhookEdgeArchiveLimits.production(),
+                SYSTEM_NANO_TIME)
+    }
+
+    static void verify(
+            File artifact,
+            File scratchDirectory,
+            Map<String, WebhookEdgeExpectedEntry> expectedApplicationEntries,
+            Map<String, WebhookEdgeExpectedEntry> expectedLoaderEntries,
+            WebhookEdgeArchiveLimits limits,
+            LongSupplier nanoTime) {
+        verify(
+                artifact,
+                scratchDirectory,
+                expectedApplicationEntries,
+                expectedLoaderEntries,
+                [:],
+                limits,
+                nanoTime)
+    }
+
+    static void verify(
+            File artifact,
+            File scratchDirectory,
+            Map<String, WebhookEdgeExpectedEntry> expectedApplicationEntries,
+            Map<String, WebhookEdgeExpectedEntry> expectedLoaderEntries,
+            Map<String, WebhookEdgeExpectedEntry> trustedObservabilityLibraries,
             WebhookEdgeArchiveLimits limits,
             LongSupplier nanoTime) {
         ScanState state = new ScanState(scratchDirectory.toPath(), limits, nanoTime)
@@ -286,6 +327,7 @@ final class WebhookEdgeArtifactVerifier {
         Set<String> entries = new LinkedHashSet<>()
         Set<String> applicationEntries = new LinkedHashSet<>()
         Set<String> loaderEntries = new LinkedHashSet<>()
+        Set<String> trustedLibraries = new LinkedHashSet<>()
         state.checkElapsed()
         ZipFile jar
         try {
@@ -346,7 +388,13 @@ final class WebhookEdgeArtifactVerifier {
                     loaderEntries.add(name)
                 }
                 if (name.startsWith('BOOT-INF/lib/')) {
-                    copyAndScanLibrary(jar, entry, state, limits)
+                    copyAndScanLibrary(
+                            jar,
+                            entry,
+                            trustedObservabilityLibraries,
+                            trustedLibraries,
+                            state,
+                            limits)
                 }
             }
 
@@ -394,6 +442,12 @@ final class WebhookEdgeArtifactVerifier {
         if (loaderEntries != expectedLoaderEntries.keySet()) {
             state.failBoundary(describeSetDifference(
                     'Boot loader entries', expectedLoaderEntries.keySet(), loaderEntries))
+        }
+        if (trustedLibraries != trustedObservabilityLibraries.keySet()) {
+            state.failBoundary(describeSetDifference(
+                    'trusted observability libraries',
+                    trustedObservabilityLibraries.keySet(),
+                    trustedLibraries))
         }
         state.checkElapsed()
     }
@@ -730,11 +784,34 @@ final class WebhookEdgeArtifactVerifier {
             }.sort()
             failBoundary("declared file dependencies are forbidden: ${descriptions}")
         }
+        expectedTrustedObservabilityLibraries(runtimeArtifacts)
+    }
+
+    static Map<String, WebhookEdgeExpectedEntry> expectedTrustedObservabilityLibraries(
+            List<String> runtimeArtifacts) {
+        List<String> projects = runtimeArtifacts.findAll { value -> value.startsWith('PROJECT|') }
+        if (projects.size() != 1) {
+            failBoundary('trusted observability project artifact is not unique')
+        }
+        String[] fields = projects[0].split('\\|', -1)
+        if (fields.length != 5
+                || fields[1] != TRUSTED_OBSERVABILITY_PROJECT
+                || !(fields[2] ==~ /observability-[A-Za-z0-9.+_-]+[.]jar/)
+                || !(fields[3] ==~ /[1-9][0-9]*/)
+                || !(fields[4] ==~ /[0-9a-f]{64}/)) {
+            failBoundary('trusted observability project artifact is malformed')
+        }
+        [
+            ("BOOT-INF/lib/${fields[2]}".toString()): new WebhookEdgeExpectedEntry(
+                    Long.parseLong(fields[3]), fields[4])
+        ]
     }
 
     private static void copyAndScanLibrary(
             ZipFile outer,
             java.util.zip.ZipEntry library,
+            Map<String, WebhookEdgeExpectedEntry> trustedObservabilityLibraries,
+            Set<String> trustedLibraries,
             ScanState state,
             WebhookEdgeArchiveLimits limits) {
         state.checkElapsed()
@@ -773,13 +850,23 @@ final class WebhookEdgeArtifactVerifier {
         if (library.size >= 0 && copied != library.size) {
             state.failBoundary("${library.name}: nested archive size mismatch")
         }
-        scanArchive(copy, library.name, 1, state, limits)
+        WebhookEdgeExpectedEntry trusted = trustedObservabilityLibraries[library.name]
+        if (trusted != null) {
+            if (copied != trusted.bytes
+                    || sha256(Files.readAllBytes(copy)) != trusted.sha256) {
+                state.failBoundary(
+                        "${library.name}: trusted observability library SHA-256 mismatch")
+            }
+            trustedLibraries.add(library.name)
+        }
+        scanArchive(copy, library.name, 1, trusted != null, state, limits)
     }
 
     private static void scanArchive(
             Path archive,
             String displayName,
             int depth,
+            boolean trustedObservability,
             ScanState state,
             WebhookEdgeArchiveLimits limits) {
         state.checkElapsed()
@@ -823,7 +910,10 @@ final class WebhookEdgeArtifactVerifier {
                     continue
                 }
                 regularEntries++
-                if (containsAny(name, FORBIDDEN_NESTED_PACKAGE_PATHS)) {
+                if (containsAny(name, FORBIDDEN_NESTED_PACKAGE_PATHS)
+                        || (name.startsWith(ACCORD_PACKAGE_ROOT)
+                        && !(trustedObservability
+                        && name.startsWith(OBSERVABILITY_PACKAGE_ROOT)))) {
                     state.failBoundary("${displayName}!/${name}: forbidden nested class path")
                 }
                 EntryRead read = readEntry(nested, entry, displayName, state, limits)
@@ -838,6 +928,7 @@ final class WebhookEdgeArtifactVerifier {
                             read.archive,
                             "${displayName}!/${name}",
                             depth + 1,
+                            false,
                             state,
                             limits)
                 }
@@ -1078,15 +1169,17 @@ abstract class VerifyWebhookEdgeBoundary extends DefaultTask {
 
     @TaskAction
     void verifyArtifact() {
+        List<String> artifacts = runtimeArtifacts.get()
         WebhookEdgeArtifactVerifier.verifyRuntimeBoundary(
-                runtimeArtifacts.get(), declaredFileDependencies.files)
+                artifacts, declaredFileDependencies.files)
         WebhookEdgeArtifactVerifier.verify(
                 artifact.get().asFile,
                 scratchDirectory.get().asFile,
                 WebhookEdgeArtifactVerifier.expectedApplicationEntries(
                         applicationOutputDirectories.files),
                 WebhookEdgeArtifactVerifier.expectedLoaderEntries(
-                        loaderToolsJar.get().asFile))
+                        loaderToolsJar.get().asFile),
+                WebhookEdgeArtifactVerifier.expectedTrustedObservabilityLibraries(artifacts))
     }
 }
 
@@ -1137,8 +1230,13 @@ abstract class VerifyWebhookEdgeBoundaryFixtures extends DefaultTask {
                 root.resolve('canonical-scratch').toFile(),
                 applicationEntries,
                 loaderEntries)
+        List<String> runtimeBaseline = [
+            'org.springframework.boot:spring-boot:3.5.3',
+            'PROJECT|:libs:java:observability|observability-fixture.jar|1|'
+                    + '0000000000000000000000000000000000000000000000000000000000000000'
+        ]
         WebhookEdgeArtifactVerifier.verifyRuntimeBoundary(
-                ['org.springframework.boot:spring-boot:3.5.3'], [] as Set<File>)
+                runtimeBaseline, [] as Set<File>)
 
         WebhookEdgeArchiveLimits production = WebhookEdgeArchiveLimits.production()
         if (production.maxViolations != 1) {
@@ -1477,13 +1575,15 @@ abstract class VerifyWebhookEdgeBoundaryFixtures extends DefaultTask {
         expectRuntimeRejected(
                 results,
                 'declared-directory',
-                ['org.springframework.boot:spring-boot:3.5.3'],
+                runtimeBaseline,
                 [declaredDirectory.toFile()] as Set<File>,
                 'declared file dependencies')
         expectRuntimeRejected(
                 results,
                 'project-artifact',
-                ['REJECTED|org.gradle.api.artifacts.component.ProjectComponentIdentifier|edge.jar|regular=true'],
+                runtimeBaseline + [
+                    'REJECTED|org.gradle.api.artifacts.component.ProjectComponentIdentifier|edge.jar|regular=true'
+                ],
                 [] as Set<File>,
                 'non-module runtime artifacts')
 
@@ -1807,12 +1907,15 @@ plugins {
 }
 
 dependencies {
+    implementation project(':libs:java:observability')
     implementation enforcedPlatform(libs.spring.boot.bom)
     implementation libs.spring.boot.web
     implementation libs.spring.boot.actuator
     implementation libs.spring.boot.jooq
     implementation libs.jackson.databind
+    implementation libs.micrometer.tracing.bridge.otel
     runtimeOnly libs.postgresql
+    runtimeOnly libs.micrometer.registry.prometheus
     testImplementation libs.spring.boot.test
     testImplementation libs.junit.jupiter
     testImplementation libs.assertj.core
@@ -1840,6 +1943,15 @@ def runtimeArtifactsProvider = configurations.runtimeClasspath.incoming.artifact
         def component = artifact.id.componentIdentifier
         if (component instanceof ModuleComponentIdentifier && artifact.file.isFile()) {
             return "${component.group}:${component.module}:${component.version}"
+        }
+        if (component instanceof ProjectComponentIdentifier
+                && component.projectPath == ':libs:java:observability'
+                && artifact.file.isFile()) {
+            String digest = HexFormat.of().formatHex(
+                    MessageDigest.getInstance('SHA-256').digest(
+                            Files.readAllBytes(artifact.file.toPath())))
+            return "PROJECT|${component.projectPath}|${artifact.file.name}|" +
+                    "${artifact.file.length()}|${digest}"
         }
         "REJECTED|${component.class.name}|${artifact.file.name}|regular=${artifact.file.isFile()}"
     }.toSet().toList().sort()

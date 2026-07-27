@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "scripts": { "test": "node --test", "typecheck": "tsc --noEmit" },
+  "scripts": { "test": "node --test" },
   "dependencies": {
     "@tanstack/react-query": "5.81.5",
     "react": "19.1.0",

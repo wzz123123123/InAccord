@@ -14,4 +14,11 @@ dist/
 .idea/
 *.iml
 .env
+.env.*
+*.credentials
+*.secret
+*.token
+*.pem
+*.key
 infra/local/data/
+/infra/local/state/

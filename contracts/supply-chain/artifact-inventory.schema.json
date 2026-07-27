@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://accord.inforvans.com/contracts/supply-chain/artifact-inventory.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "release_sets"],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "release_sets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "artifacts"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$" },
+          "artifacts": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "kind", "platform"],
+              "properties": {
+                "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{1,127}$" },
+                "kind": { "enum": ["source", "image", "archive"] },
+                "platform": { "enum": ["none", "linux/amd64", "linux/arm64", "windows/amd64", "darwin/amd64", "darwin/arm64"] }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

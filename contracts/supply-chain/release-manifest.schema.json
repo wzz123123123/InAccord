@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://accord.inforvans.com/contracts/supply-chain/release-manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "context_sha256", "remote_sha", "tree_sha", "image_lock_sha256", "artifact_inventory_sha256", "artifact_set", "scan_exception", "generated_at", "artifacts"],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "context_sha256": { "$ref": "#/$defs/digest" },
+    "remote_sha": { "$ref": "#/$defs/gitSha" },
+    "tree_sha": { "$ref": "#/$defs/gitSha" },
+    "image_lock_sha256": { "$ref": "#/$defs/digest" },
+    "artifact_inventory_sha256": { "$ref": "#/$defs/digest" },
+    "artifact_set": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$" },
+    "scan_exception": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["document_sha256", "bundle_sha256", "expires_at", "issuer", "identity"],
+          "properties": {
+            "document_sha256": { "$ref": "#/$defs/digest" },
+            "bundle_sha256": { "$ref": "#/$defs/digest" },
+            "expires_at": { "type": "string", "format": "date-time" },
+            "issuer": { "type": "string", "format": "uri", "pattern": "^https://" },
+            "identity": { "type": "string", "minLength": 8, "maxLength": 512 }
+          }
+        }
+      ]
+    },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "artifacts": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "kind", "platform", "digest", "immutable_locator", "oci_blob", "platform_evidence", "sboms", "scan", "signature", "provenance"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{1,127}$" },
+          "kind": { "enum": ["source", "image", "archive"] },
+          "platform": { "enum": ["none", "linux/amd64", "linux/arm64", "windows/amd64", "darwin/amd64", "darwin/arm64"] },
+          "digest": { "$ref": "#/$defs/digest" },
+          "immutable_locator": { "type": "string", "minLength": 8, "maxLength": 4096 },
+          "oci_blob": {
+            "oneOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["layer_digest", "media_type", "size"],
+                "properties": {
+                  "layer_digest": { "$ref": "#/$defs/digest" },
+                  "media_type": { "enum": ["application/vnd.accord.source.v1+tar", "application/vnd.accord.accordctl.v1+zip"] },
+                  "size": { "type": "integer", "minimum": 1 }
+                }
+              }
+            ]
+          },
+          "platform_evidence": {
+            "oneOf": [
+              { "type": "null" },
+              { "$ref": "#/$defs/platformEvidence" }
+            ]
+          },
+          "sboms": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["cyclonedx", "spdx"],
+            "properties": {
+              "cyclonedx": { "$ref": "#/$defs/referrer" },
+              "spdx": { "$ref": "#/$defs/referrer" }
+            }
+          },
+          "scan": { "$ref": "#/$defs/referrer" },
+          "signature": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["bundle_sha256", "issuer", "identity"],
+            "properties": {
+              "bundle_sha256": { "$ref": "#/$defs/digest" },
+              "issuer": { "type": "string", "format": "uri", "pattern": "^https://" },
+              "identity": { "type": "string", "minLength": 8, "maxLength": 512 }
+            }
+          },
+          "provenance": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["envelope_sha256", "bundle_sha256", "pae_sha256", "referrer_digest", "payload_type", "predicate_type"],
+            "properties": {
+              "envelope_sha256": { "$ref": "#/$defs/digest" },
+              "bundle_sha256": { "$ref": "#/$defs/digest" },
+              "pae_sha256": { "$ref": "#/$defs/digest" },
+              "referrer_digest": { "$ref": "#/$defs/digest" },
+              "payload_type": { "const": "application/vnd.in-toto+json" },
+              "predicate_type": { "const": "https://schemas.accord.inforvans.com/provenance/build/v1" }
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "kind": { "const": "image" } }, "required": ["kind"] },
+            "then": { "properties": { "oci_blob": { "type": "null" } } },
+            "else": { "properties": { "oci_blob": { "type": "object" } } }
+          },
+          {
+            "if": { "properties": { "kind": { "const": "archive" }, "platform": { "enum": ["windows/amd64", "darwin/amd64", "darwin/arm64"] } }, "required": ["kind", "platform"] },
+            "then": { "properties": { "platform_evidence": { "$ref": "#/$defs/platformEvidence" } } },
+            "else": { "properties": { "platform_evidence": { "type": "null" } } }
+          },
+          {
+            "if": { "properties": { "kind": { "const": "archive" }, "platform": { "const": "windows/amd64" } }, "required": ["kind", "platform"] },
+            "then": { "properties": { "platform_evidence": { "type": "object", "properties": { "kind": { "const": "authenticode" } } } } }
+          },
+          {
+            "if": { "properties": { "kind": { "const": "archive" }, "platform": { "enum": ["darwin/amd64", "darwin/arm64"] } }, "required": ["kind", "platform"] },
+            "then": { "properties": { "platform_evidence": { "type": "object", "properties": { "kind": { "const": "notarization" } } } } }
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "not": { "const": "sha256:0000000000000000000000000000000000000000000000000000000000000000" } },
+    "gitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$", "not": { "const": "0000000000000000000000000000000000000000" } },
+    "platformEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "expires_at", "document_sha256", "bundle_sha256", "receipt_sha256", "issuer", "identity"],
+      "properties": {
+        "kind": { "enum": ["authenticode", "notarization"] },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "document_sha256": { "$ref": "#/$defs/digest" },
+        "bundle_sha256": { "$ref": "#/$defs/digest" },
+        "receipt_sha256": { "$ref": "#/$defs/digest" },
+        "issuer": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "identity": { "type": "string", "minLength": 8, "maxLength": 512 }
+      }
+    },
+    "referrer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["document_sha256", "referrer_digest", "artifact_type"],
+      "properties": {
+        "document_sha256": { "$ref": "#/$defs/digest" },
+        "referrer_digest": { "$ref": "#/$defs/digest" },
+        "artifact_type": { "type": "string", "pattern": "^application/vnd[.]", "maxLength": 255 }
+      }
+    }
+  }
+}

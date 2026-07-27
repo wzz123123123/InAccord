@@ -25,12 +25,15 @@ import java.util.UUID;
 import java.util.function.Supplier;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 public final class WebhookHandler {
+    private static final Logger LOGGER = LoggerFactory.getLogger(WebhookHandler.class);
     public static final int MAX_BODY_BYTES = 2 * 1_024 * 1_024;
     private static final String PROBLEM_INSTANCE = "/webhooks/gitlab";
     private static final ObjectMapper REQUEST_JSON = new ObjectMapper(JsonFactory.builder()
@@ -158,6 +161,7 @@ public final class WebhookHandler {
             return;
         }
         if (outcome == WebhookRecordOutcome.DIGEST_CONFLICT) {
+            LOGGER.info("webhook_request_digest_conflict");
             writeProblem(response, Problem.DIGEST_CONFLICT);
             return;
         }
@@ -166,6 +170,7 @@ public final class WebhookHandler {
             return;
         }
         response.setStatus(HttpServletResponse.SC_ACCEPTED);
+        LOGGER.info("webhook_request_accepted");
     }
 
     private static GitLabWebhookHeaders captureHeaders(HttpServletRequest request) {

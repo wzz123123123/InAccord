@@ -49,16 +49,30 @@ class FoundationHttpConfiguration {
     }
 
     @Bean
+    ContractValidationReconciliationRegistration
+            contractValidationReconciliationRegistration() {
+        return new ContractValidationReconciliationRegistration();
+    }
+
+    @Bean
     ContractValidationCommand contractValidationCommand(
             FoundationTenantTransactions transactions,
             ContractValidationJson json,
             JooqCommandGate gate,
             ReliableEventStore events,
+            ContractValidationReconciliationRegistration reconciliation,
             FoundationProblemFactory problems,
             @Value("${accord.process.instance-id}") String processInstanceId,
             @Value("${accord.http.command-result-ttl}") Duration resultTtl) {
         return new ContractValidationCommandService(
-            transactions, json, gate, events, problems, processInstanceId, resultTtl);
+            transactions,
+            json,
+            gate,
+            events,
+            reconciliation,
+            problems,
+            processInstanceId,
+            resultTtl);
     }
 
     @FunctionalInterface

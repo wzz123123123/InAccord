@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://accord.inforvans.com/contracts/verification/check-result.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "check_id",
+    "status",
+    "reason_code",
+    "started_at",
+    "finished_at",
+    "evidence",
+    "tool_observations"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "check_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{2,95}$" },
+    "status": { "enum": ["PASS", "FAIL", "BLOCKED"] },
+    "reason_code": {
+      "enum": [
+        "PASS",
+        "ASSERTION_FAILED",
+        "BLOCKED_TOOLCHAIN",
+        "BLOCKED_EXTERNAL_IMAGE_RESOLUTION",
+        "BLOCKED_EXTERNAL_ENVIRONMENT"
+      ]
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "evidence": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+      "uniqueItems": true
+    },
+    "tool_observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tool_id",
+          "executable",
+          "argv",
+          "exit_code",
+          "duration_ms",
+          "observed_version",
+          "normalized_version"
+        ],
+        "properties": {
+          "tool_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{1,63}$" },
+          "executable": { "type": "string", "minLength": 1, "maxLength": 4096 },
+          "argv": {
+            "type": "array",
+            "maxItems": 32,
+            "items": { "type": "string", "maxLength": 4096 }
+          },
+          "exit_code": {
+            "type": "integer",
+            "minimum": -2147483648,
+            "maximum": 2147483647
+          },
+          "duration_ms": { "type": "integer", "minimum": 0, "maximum": 300000 },
+          "observed_version": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "normalized_version": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "PASS" } }, "required": ["status"] },
+      "then": { "properties": { "reason_code": { "const": "PASS" } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "FAIL" } }, "required": ["status"] },
+      "then": { "properties": { "reason_code": { "const": "ASSERTION_FAILED" } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "BLOCKED" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "reason_code": {
+            "enum": [
+              "BLOCKED_TOOLCHAIN",
+              "BLOCKED_EXTERNAL_IMAGE_RESOLUTION",
+              "BLOCKED_EXTERNAL_ENVIRONMENT"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

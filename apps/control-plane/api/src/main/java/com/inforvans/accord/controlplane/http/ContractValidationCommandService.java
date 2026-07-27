@@ -32,6 +32,7 @@ final class ContractValidationCommandService implements ContractValidationComman
     private final ContractValidationJson json;
     private final JooqCommandGate gate;
     private final ReliableEventStore events;
+    private final ContractValidationReconciliationRegistration reconciliation;
     private final FoundationProblemFactory problems;
     private final String processInstanceId;
     private final Duration resultTtl;
@@ -42,6 +43,7 @@ final class ContractValidationCommandService implements ContractValidationComman
             ContractValidationJson json,
             JooqCommandGate gate,
             ReliableEventStore events,
+            ContractValidationReconciliationRegistration reconciliation,
             FoundationProblemFactory problems,
             String processInstanceId,
             Duration resultTtl) {
@@ -49,6 +51,8 @@ final class ContractValidationCommandService implements ContractValidationComman
         this.json = Objects.requireNonNull(json, "json");
         this.gate = Objects.requireNonNull(gate, "gate");
         this.events = Objects.requireNonNull(events, "events");
+        this.reconciliation = Objects.requireNonNull(
+            reconciliation, "reconciliation");
         this.problems = Objects.requireNonNull(problems, "problems");
         this.processInstanceId = Objects.requireNonNull(
             processInstanceId, "processInstanceId");
@@ -163,8 +167,14 @@ final class ContractValidationCommandService implements ContractValidationComman
                     "contract validation mutation affected an unexpected row count");
             }
 
+            UUID reconciliationIntentId = reconciliation.record(
+                tx, principal, validationId, version, documentDigest);
             String eventPayload = eventPayload(
-                validationId, body.schemaId().toASCIIString(), documentDigest, version);
+                reconciliationIntentId,
+                validationId,
+                body.schemaId().toASCIIString(),
+                documentDigest,
+                version);
             UUID eventId = UUID.randomUUID();
             OffsetDateTime occurredAt = databaseNow(tx.fetchOne(
                 "SELECT clock_timestamp() AS occurred_at"));
@@ -214,8 +224,13 @@ final class ContractValidationCommandService implements ContractValidationComman
     }
 
     private String eventPayload(
-            UUID validationId, String schemaId, String documentDigest, long version) {
+            UUID intentId,
+            UUID validationId,
+            String schemaId,
+            String documentDigest,
+            long version) {
         ObjectNode payload = mapper.createObjectNode();
+        payload.put("intent_id", intentId.toString());
         payload.put("validation_id", validationId.toString());
         payload.put("schema_id", schemaId);
         payload.put("document_digest", documentDigest);

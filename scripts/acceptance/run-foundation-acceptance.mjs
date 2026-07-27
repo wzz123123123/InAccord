@@ -1,5 +1,5 @@
 import { readdir, readFile, lstat } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { assertDetachedClean, isPathInside, withDetachedWorktree } from './create-detached-worktree.mjs';
 import { collectEnvironmentEvidence } from './collect-environment-evidence.mjs';
@@ -8,7 +8,9 @@ import {
   canonicalJson,
   mergeVerdicts,
   sha256,
+  validateBootstrapResult,
   validateVerdictDocument,
+  verifySummaryAgainstVerdicts,
   verdictExitCode,
 } from './merge-verdicts.mjs';
 import {
@@ -17,6 +19,7 @@ import {
   runNative,
 } from './resolve-remote-sha.mjs';
 import { runFoundationDemo } from './run-foundation-demo.mjs';
+import { nativeToolInvocation } from '../verification/preflight.mjs';
 
 const OWNER = 'platform-engineering';
 const POLICY_VERSION = 'accord-foundation-evidence-v1';
@@ -24,31 +27,86 @@ export const REQUIRED_TOOLCHAIN = [
   tool('buf', '1.55.1', ['--version']),
   tool('cosign', '2.5.0', ['version']),
   tool('conftest', '0.61.2', ['--version']),
+  tool('docker', '29.4.2', ['version', '--format', '{{.Client.Version}}']),
+  tool('docker-buildx', '0.33.0', ['buildx', 'version'], 'docker'),
+  tool('docker-compose', '5.1.3', ['compose', 'version', '--short'], 'docker'),
+  tool('git', '2.52.0', ['--version']),
+  tool('gradle-wrapper', '8.14.3', [
+    '-classpath', 'gradle/wrapper/gradle-wrapper.jar',
+    'org.gradle.wrapper.GradleWrapperMain', '--version',
+  ], 'java'),
   tool('helm', '3.17.3', ['version', '--short']),
+  tool('java', '21.0.11+10', ['--version']),
   tool('kubeconform', '0.7.0', ['-v']),
+  tool('node', '22.22.1', ['--version'], process.execPath),
   tool('oras', '1.2.2', ['version']),
+  tool('pnpm', '10.12.4', ['--version']),
+  tool('python', '3.12.11', ['--version']),
   tool('syft', '1.27.1', ['version']),
   tool('tofu', '1.9.1', ['version']),
   tool('trivy', '0.63.0', ['--version']),
+  tool('uv', '0.7.13', ['--version']),
 ];
-const REPOSITORY_CHECKS = [
+export const REPOSITORY_CHECKS = [
   commandCheck('01.architecture', 'tests/architecture/verify-platform-foundation.mjs', ['node', 'tests/architecture/verify-platform-foundation.mjs']),
-  commandCheck('03.dependency-verification', 'scripts/verification/preflight.mjs', ['node', 'scripts/verification/preflight.mjs', '--check-id', 'foundation-acceptance']),
-  commandCheck('04.image-and-temporal', 'scripts/images/verify-images.mjs', ['node', 'scripts/images/verify-images.mjs', '--scope', 'all']),
+  commandCheck('03.dependency-verification', 'scripts/verification/verify-offline-dependencies.mjs', [
+    'node', 'scripts/verification/verify-offline-dependencies.mjs',
+  ], {
+    requiredTools: ['buf', 'gradle-wrapper', 'java', 'node', 'pnpm', 'python', 'uv'],
+    blockedTool: tool('java', '21.0.11+10', ['--version']),
+  }),
+  commandCheck('04.image-and-temporal', 'scripts/images/verify-images.mjs', ['node', 'scripts/images/verify-images.mjs', '--scope', 'all'], {
+    blockedExternal: {
+      reasonCode: 'BLOCKED_REGISTRY',
+      capability: 'immutable-container-manifest-set',
+      authority: 'approved-container-registries',
+      evidenceType: 'image-lock-resolution-v1',
+    },
+  }),
+  commandCheck('04.temporal-mtls-contract', 'tests/integration/temporal-mtls.test.mjs', [
+    'node', '--test', 'tests/integration/temporal-mtls.test.mjs',
+  ]),
   commandCheck('05.telemetry', 'libs/java/observability/src/test/java/com/inforvans/accord/observability/TelemetryExporterGuardTest.java', [
     'java', '-classpath', 'gradle/wrapper/gradle-wrapper.jar', 'org.gradle.wrapper.GradleWrapperMain',
     ':libs:java:observability:test', ':tests:security-negative:test', '--no-daemon', '--dependency-verification=strict',
-  ]),
-  commandCheck('06.deployment', 'scripts/deployment/verify-deployment.mjs', ['node', 'scripts/deployment/verify-deployment.mjs']),
-  commandCheck('07.release-chain', 'scripts/ci/verify-release-chain.mjs', ['node', 'scripts/ci/verify-release-chain.mjs', '--context', 'build/ci/context.json']),
+  ], {
+    requiredTools: ['gradle-wrapper', 'java'],
+    blockedTool: tool('java', '21.0.11+10', ['--version']),
+  }),
+  commandCheck('06.deployment', 'scripts/deployment/verify-deployment.mjs', ['node', 'scripts/deployment/verify-deployment.mjs'], {
+    requiredTools: ['conftest', 'helm', 'kubeconform', 'tofu'],
+  }),
+  commandCheck('07.release-chain', 'scripts/ci/verify-release-chain.mjs', [
+    'node', 'scripts/ci/verify-release-chain.mjs',
+    '--context', 'build/ci/context.json',
+    '--manifest', 'build/ci/release-manifest.json',
+    '--evidence-index', 'build/ci/evidence-index.json',
+    '--evidence-root', 'build/ci',
+    '--output', 'build/ci/promotion-input.json',
+  ], {
+    requiredTools: ['cosign', 'git', 'oras', 'syft', 'trivy'],
+    blockedExternal: {
+      reasonCode: 'BLOCKED_REGISTRY',
+      capability: 'release-referrer-verification',
+      authority: 'approved-container-registries',
+      evidenceType: 'release-referrer-verification-v1',
+    },
+  }),
 ];
 
-function tool(name, requiredVersion, versionArgs) {
-  return { name, requiredVersion, versionArgs };
+function tool(name, requiredVersion, versionArgs, executable = name) {
+  return { name, requiredVersion, versionArgs, executable };
 }
 
-function commandCheck(checkId, requiredPath, argv) {
-  return { checkId, requiredPath, argv };
+function commandCheck(checkId, requiredPath, argv, options = {}) {
+  return {
+    checkId,
+    requiredPath,
+    argv,
+    requiredTools: options.requiredTools ?? [],
+    blockedTool: options.blockedTool ?? null,
+    blockedExternal: options.blockedExternal ?? null,
+  };
 }
 
 export async function runInsideDetached({
@@ -59,8 +117,10 @@ export async function runInsideDetached({
   remoteSha,
   treeSha,
   receiptsDirectory,
-  trustStorePath,
   releaseManifestPath,
+  ciContextPath,
+  releaseEvidenceIndexPath,
+  releaseEvidenceRootPath,
   run = runNative,
   now = () => new Date(),
 }) {
@@ -71,27 +131,89 @@ export async function runInsideDetached({
   await assertDetachedClean({ worktree: root, remoteSha, treeSha, run });
 
   const checks = [];
-  const artifactState = await collectArtifactBindings({ root, releaseManifestPath, checks, now: now() });
-  for (const specification of REPOSITORY_CHECKS) {
-    checks.push(await executeRepositoryCheck({ root, specification, run, now: now() }));
-  }
+  const resolvedCiContextPath = resolve(ciContextPath ?? resolve(root, 'build', 'ci', 'context.json'));
+  const resolvedReleaseManifestPath = resolve(releaseManifestPath ?? resolve(root, 'build', 'ci', 'release-manifest.json'));
+  const resolvedReleaseEvidenceIndexPath = resolve(releaseEvidenceIndexPath ?? resolve(root, 'build', 'ci', 'evidence-index.json'));
+  const resolvedReleaseEvidenceRootPath = resolve(releaseEvidenceRootPath ?? root);
+  const releaseInputState = await inspectReleaseInputFiles({
+    ciContextPath: resolvedCiContextPath,
+    releaseManifestPath: resolvedReleaseManifestPath,
+    releaseEvidenceIndexPath: resolvedReleaseEvidenceIndexPath,
+    remoteUrl,
+    remoteRef,
+    remoteSha,
+    treeSha,
+    now: now(),
+  });
+  const artifactState = await collectArtifactBindings({
+    root,
+    releaseManifestPath: resolvedReleaseManifestPath,
+    checks,
+    remoteSha,
+    treeSha,
+    now: now(),
+  });
+  const effectiveChecks = bindReleaseInputs(REPOSITORY_CHECKS, {
+    ciContextPath: resolvedCiContextPath,
+    releaseManifestPath: resolvedReleaseManifestPath,
+    releaseEvidenceIndexPath: resolvedReleaseEvidenceIndexPath,
+    releaseEvidenceRootPath: resolvedReleaseEvidenceRootPath,
+    evidenceDigests: releaseInputState.evidence,
+  });
+  const [architectureCheck, ...dependentChecks] = effectiveChecks;
+  checks.push(await executeRepositoryCheck({
+    root,
+    specification: architectureCheck,
+    remoteSha,
+    treeSha,
+    run,
+    now: now(),
+  }));
 
   const toolchainResults = [];
+  const toolchainByName = new Map();
   for (const specification of REQUIRED_TOOLCHAIN) {
     const outcome = probeTool({ specification, root, remoteSha, treeSha, run, now: now() });
     toolchainResults.push(outcome.toolchain);
+    toolchainByName.set(specification.name, { specification, outcome });
     checks.push(outcome.check);
+  }
+  for (const specification of dependentChecks) {
+    if (specification.checkId === '07.release-chain' && !releaseInputState.ready) {
+      checks.push(releaseInputState.check);
+      continue;
+    }
+    const unavailable = specification.requiredTools
+      .map((name) => toolchainByName.get(name))
+      .find((entry) => entry?.outcome.toolchain.status !== 'PASS');
+    checks.push(unavailable
+      ? blockedDependentCheck({
+          checkId: specification.checkId,
+          tool: unavailable.specification,
+          observedVersion: unavailable.outcome.toolchain.observed_version,
+          remoteSha,
+          treeSha,
+          now: now(),
+        })
+      : await executeRepositoryCheck({
+          root,
+          specification,
+          remoteSha,
+          treeSha,
+          run,
+          now: now(),
+        }));
   }
 
   const demo = await runFoundationDemo({
     repository: root,
     outputDirectory: evidence,
+    remoteSha,
+    treeSha,
     run,
     now: now(),
   });
-  checks.push(demo.status === 'PASS'
-    ? passCheck('08.foundation-demo', demo.attempted_argv, 0, demo.evidence_digests, now())
-    : failCheck('08.foundation-demo', demo.attempted_argv, demo.attempt_exit_code, demo.evidence_digests, now()));
+  checks.push(demo);
 
   try {
     await assertDetachedClean({ worktree: root, remoteSha, treeSha, run });
@@ -133,7 +255,9 @@ export async function runInsideDetached({
     dependency_lock_digests: artifactState.dependencyLockDigests,
     toolchain_results: toolchainResults,
     checks,
-    demo_evidence: demo.evidence_digests,
+    demo_evidence: [...(demo.status === 'BLOCKED'
+      ? demo.attempt_evidence
+      : demo.evidence_digests)].sort(),
     started_at: startedAt.toISOString(),
     ended_at: now().toISOString(),
     evidence_bundle_digest: '0'.repeat(64),
@@ -148,7 +272,6 @@ export async function runInsideDetached({
   const environment = await collectEnvironmentEvidence({
     codeVerdictPath: codePath,
     receiptsDirectory: resolve(receiptsDirectory ?? resolve(evidence, 'environment-receipts')),
-    trustStorePath: trustStorePath ? resolve(trustStorePath) : undefined,
     outputPath: environmentPath,
     now: now(),
   });
@@ -164,6 +287,10 @@ export async function runInsideDetached({
 
 export async function runAuthoritativeAcceptance(options) {
   const repository = resolve(options.repository ?? process.cwd());
+  const ciContextPath = resolve(options.ciContextPath ?? resolve(repository, 'build', 'ci', 'context.json'));
+  const releaseManifestPath = resolve(options.releaseManifestPath ?? resolve(repository, 'build', 'ci', 'release-manifest.json'));
+  const releaseEvidenceIndexPath = resolve(options.releaseEvidenceIndexPath ?? resolve(repository, 'build', 'ci', 'evidence-index.json'));
+  const releaseEvidenceRootPath = resolve(options.releaseEvidenceRootPath ?? repository);
   const proof = await resolveRemoteSha({
     repository,
     remoteUrl: options.remoteUrl,
@@ -193,8 +320,10 @@ export async function runAuthoritativeAcceptance(options) {
       '--tree-sha', proof.tree_sha,
     ];
     if (options.receiptsDirectory) argv.push('--receipts', resolve(options.receiptsDirectory));
-    if (options.trustStorePath) argv.push('--trust-store', resolve(options.trustStorePath));
-    if (options.releaseManifestPath) argv.push('--release-manifest', resolve(options.releaseManifestPath));
+    argv.push('--ci-context', ciContextPath);
+    argv.push('--release-manifest', releaseManifestPath);
+    argv.push('--release-evidence-index', releaseEvidenceIndexPath);
+    argv.push('--release-evidence-root', releaseEvidenceRootPath);
     const child = (options.run ?? runNative)(process.execPath, argv, {
       cwd: worktree,
       timeout: 2 * 60 * 60_000,
@@ -204,7 +333,13 @@ export async function runAuthoritativeAcceptance(options) {
     if (child.errorCode !== null || ![0, 1, 2].includes(child.exitCode)) {
       throw new AcceptanceAssertionError('DETACHED_ACCEPTANCE_PROCESS_FAILED');
     }
-    const summary = JSON.parse(await readFile(resolve(evidenceDirectory, 'summary.json'), 'utf8'));
+    const summary = await verifyDetachedAcceptanceEvidence({
+      evidenceDirectory,
+      remoteUrl: proof.remote_url,
+      remoteRef: proof.remote_ref,
+      remoteSha: proof.remote_sha,
+      treeSha: proof.tree_sha,
+    });
     if (verdictExitCode(summary.status) !== child.exitCode) {
       throw new AcceptanceAssertionError('DETACHED_ACCEPTANCE_EXIT_MISMATCH');
     }
@@ -212,11 +347,215 @@ export async function runAuthoritativeAcceptance(options) {
   });
 }
 
-async function collectArtifactBindings({ root, releaseManifestPath, checks, now }) {
+export async function verifyDetachedAcceptanceEvidence({
+  evidenceDirectory,
+  remoteUrl,
+  remoteRef,
+  remoteSha,
+  treeSha,
+}) {
+  try {
+    const root = resolve(evidenceDirectory);
+    const [codeEvidence, environmentEvidence, summaryEvidence] = await Promise.all([
+      readCanonicalEvidence(resolve(root, 'code-verdict.json')),
+      readCanonicalEvidence(resolve(root, 'environment-verdict.json')),
+      readCanonicalEvidence(resolve(root, 'summary.json')),
+    ]);
+    await verifySummaryAgainstVerdicts({
+      summary: summaryEvidence.document,
+      code: codeEvidence.document,
+      environment: environmentEvidence.document,
+      codeBytes: codeEvidence.bytes,
+      environmentBytes: environmentEvidence.bytes,
+    });
+    for (const verdict of [codeEvidence.document, environmentEvidence.document]) {
+      if (verdict.remote_url !== remoteUrl
+          || verdict.remote_ref !== remoteRef
+          || verdict.remote_sha !== remoteSha
+          || verdict.tree_sha !== treeSha) {
+        throw safeError('DETACHED_EVIDENCE_AUTHORITY_MISMATCH');
+      }
+    }
+    return summaryEvidence.document;
+  } catch (error) {
+    if (typeof error?.code === 'string' && error.code.startsWith('DETACHED_EVIDENCE_')) {
+      throw error;
+    }
+    throw safeError('DETACHED_EVIDENCE_INVALID');
+  }
+}
+
+async function readCanonicalEvidence(path) {
+  const info = await lstat(path);
+  if (!info.isFile() || info.isSymbolicLink() || info.size < 2 || info.size > 16 * 1024 * 1024) {
+    throw safeError('DETACHED_EVIDENCE_FILE_INVALID');
+  }
+  const bytes = await readFile(path);
+  const document = JSON.parse(bytes.toString('utf8'));
+  if (!bytes.equals(Buffer.from(canonicalJson(document), 'utf8'))) {
+    throw safeError('DETACHED_EVIDENCE_NOT_CANONICAL');
+  }
+  return { bytes, document };
+}
+
+function bindReleaseInputs(checks, {
+  ciContextPath,
+  releaseManifestPath,
+  releaseEvidenceIndexPath,
+  releaseEvidenceRootPath,
+  evidenceDigests,
+}) {
+  return checks.map((specification) => specification.checkId !== '07.release-chain'
+    ? specification
+    : {
+        ...specification,
+        evidenceDigests,
+        argv: [
+          'node', 'scripts/ci/verify-release-chain.mjs',
+          '--context', ciContextPath,
+          '--manifest', releaseManifestPath,
+          '--evidence-index', releaseEvidenceIndexPath,
+          '--evidence-root', releaseEvidenceRootPath,
+          '--output', 'build/ci/promotion-input.json',
+        ],
+      });
+}
+
+export function validateReleaseInputBindings({
+  context,
+  manifest,
+  remoteUrl,
+  remoteRef,
+  remoteSha,
+  treeSha,
+}) {
+  if (context === null || typeof context !== 'object'
+      || manifest === null || typeof manifest !== 'object'
+      || context.remote_sha !== remoteSha
+      || context.tree_sha !== treeSha
+      || manifest.remote_sha !== remoteSha
+      || manifest.tree_sha !== treeSha
+      || (remoteUrl !== undefined && context.remote_url !== remoteUrl)
+      || (remoteRef !== undefined && context.remote_ref !== remoteRef)) {
+    throw safeError('RELEASE_INPUT_AUTHORITY_MISMATCH');
+  }
+  return true;
+}
+
+async function inspectReleaseInputFiles({
+  ciContextPath,
+  releaseManifestPath,
+  releaseEvidenceIndexPath,
+  remoteUrl,
+  remoteRef,
+  remoteSha,
+  treeSha,
+  now,
+}) {
+  const argv = ['verify-release-input-bindings'];
+  const paths = [ciContextPath, releaseManifestPath, releaseEvidenceIndexPath];
+  const evidence = [];
+  try {
+    const documents = [];
+    for (const path of paths) {
+      const info = await lstat(path);
+      if (!info.isFile() || info.isSymbolicLink() || info.size > 16 * 1024 * 1024) {
+        throw safeError('RELEASE_INPUT_FILE_INVALID');
+      }
+      const bytes = await readFile(path);
+      evidence.push(sha256(bytes));
+      documents.push(JSON.parse(bytes.toString('utf8')));
+    }
+    const [context, manifest] = documents;
+    validateReleaseInputBindings({
+      context,
+      manifest,
+      remoteUrl,
+      remoteRef,
+      remoteSha,
+      treeSha,
+    });
+    if (manifest.context_sha256 !== `sha256:${evidence[0]}`) {
+      throw safeError('RELEASE_INPUT_CONTEXT_DIGEST_MISMATCH');
+    }
+    return { ready: true, evidence: [...evidence].sort(), check: null };
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return {
+        ready: false,
+        evidence: [...evidence].sort(),
+        check: blockedExternalCheck({
+          checkId: '07.release-chain',
+          argv,
+          exitCode: null,
+          evidence,
+          remoteSha,
+          treeSha,
+          external: {
+            reasonCode: 'BLOCKED_REGISTRY',
+            capability: 'immutable-release-evidence-bundle',
+            authority: 'approved-artifact-registry',
+            evidenceType: 'release-evidence-bundle-v1',
+          },
+          now,
+        }),
+      };
+    }
+    return {
+      ready: false,
+      evidence: [...evidence].sort(),
+      check: failCheck(
+        '07.release-chain',
+        argv,
+        1,
+        evidence.length > 0
+          ? evidence
+          : [sha256(canonicalJson({ state: 'release-input-invalid' }))],
+        now,
+      ),
+    };
+  }
+}
+
+async function collectArtifactBindings({
+  root,
+  releaseManifestPath,
+  checks,
+  remoteSha,
+  treeSha,
+  now,
+}) {
   const imageLockPath = resolve(root, 'infra', 'images', 'images.lock.json');
-  const releasePath = resolve(releaseManifestPath ?? resolve(root, 'build', 'release', 'release-manifest.json'));
-  const image = await digestArtifact(imageLockPath, '00.image-lock', checks, now);
-  const release = await digestArtifact(releasePath, '00.release-manifest', checks, now);
+  const releasePath = resolve(releaseManifestPath ?? resolve(root, 'build', 'ci', 'release-manifest.json'));
+  const image = await digestArtifact({
+    path: imageLockPath,
+    checkId: '00.image-lock',
+    checks,
+    remoteSha,
+    treeSha,
+    missingIsFailure: true,
+    blockedExternal: {
+      reasonCode: 'BLOCKED_REGISTRY',
+      capability: 'authoritative-image-lock',
+      authority: 'approved-container-registries',
+      evidenceType: 'image-lock-resolution-v1',
+    },
+    now,
+  });
+  const release = await digestArtifact({
+    path: releasePath,
+    checkId: '00.release-manifest',
+    checks,
+    remoteSha,
+    treeSha,
+    blockedExternal: {
+      reasonCode: 'BLOCKED_REGISTRY',
+      capability: 'verified-release-manifest',
+      authority: 'approved-artifact-registry',
+      evidenceType: 'release-manifest-v1',
+    },
+    now,
+  });
   const dependencyLockDigests = await collectDependencyLocks(root);
   if (dependencyLockDigests.length === 0) {
     checks.push(failCheck(
@@ -242,14 +581,46 @@ async function collectArtifactBindings({ root, releaseManifestPath, checks, now 
   };
 }
 
-async function digestArtifact(path, checkId, checks, now) {
+async function digestArtifact({
+  path,
+  checkId,
+  checks,
+  remoteSha,
+  treeSha,
+  blockedExternal,
+  missingIsFailure = false,
+  now,
+}) {
   try {
     const info = await lstat(path);
     if (!info.isFile() || info.isSymbolicLink()) throw new Error('invalid');
     const digest = sha256(await readFile(path));
     checks.push(passCheck(checkId, ['verify-artifact', basename(path)], 0, [digest], now));
     return digest;
-  } catch {
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      if (missingIsFailure) {
+        checks.push(failCheck(
+          checkId,
+          ['verify-artifact', basename(path)],
+          1,
+          [sha256(canonicalJson({ artifact: checkId, state: 'absent' }))],
+          now,
+        ));
+        return null;
+      }
+      checks.push(blockedExternalCheck({
+        checkId,
+        argv: ['verify-artifact', basename(path)],
+        exitCode: null,
+        evidence: [],
+        remoteSha,
+        treeSha,
+        external: blockedExternal,
+        now,
+      }));
+      return null;
+    }
     const digest = sha256(canonicalJson({ artifact: checkId, state: 'absent-or-invalid' }));
     checks.push(failCheck(checkId, ['verify-artifact', basename(path)], 1, [digest], now));
     return digest;
@@ -280,7 +651,14 @@ async function walk(directory, onFile) {
   }
 }
 
-async function executeRepositoryCheck({ root, specification, run, now }) {
+export async function executeRepositoryCheck({
+  root,
+  specification,
+  remoteSha,
+  treeSha,
+  run,
+  now,
+}) {
   try {
     const info = await lstat(resolve(root, specification.requiredPath));
     if (!info.isFile() || info.isSymbolicLink()) throw new Error('invalid');
@@ -294,21 +672,195 @@ async function executeRepositoryCheck({ root, specification, run, now }) {
     );
   }
   const executable = specification.argv[0] === 'node' ? process.execPath : specification.argv[0];
-  const result = run(executable, specification.argv.slice(1), {
+  const result = invokeAcceptanceRunner(run, executable, specification.argv.slice(1), {
     cwd: root,
     timeout: 30 * 60_000,
     maxBuffer: 8 * 1024 * 1024,
   });
   const digest = commandResultDigest(specification.argv, result);
+  const evidence = [...(specification.evidenceDigests ?? []), digest].sort();
+  if (result.errorCode === 'ENOENT' && specification.blockedTool !== null) {
+    return blockedToolCheck({
+      checkId: specification.checkId,
+      argv: specification.argv,
+      exitCode: null,
+      evidence,
+      remoteSha,
+      treeSha,
+      tool: specification.blockedTool,
+      observedVersion: null,
+      now,
+    });
+  }
+  if (result.errorCode === null
+      && result.exitCode === 2
+      && specification.blockedExternal !== null) {
+    return blockedExternalCheck({
+      checkId: specification.checkId,
+      argv: specification.argv,
+      exitCode: result.exitCode,
+      evidence,
+      remoteSha,
+      treeSha,
+      external: specification.blockedExternal,
+      now,
+    });
+  }
   return result.errorCode === null && result.exitCode === 0
-    ? passCheck(specification.checkId, specification.argv, 0, [digest], now)
-    : failCheck(specification.checkId, specification.argv, result.exitCode ?? 1, [digest], now);
+    ? passCheck(specification.checkId, specification.argv, 0, evidence, now)
+    : failCheck(specification.checkId, specification.argv, result.exitCode ?? 1, evidence, now);
 }
 
-export function probeTool({ specification, root, remoteSha, treeSha, run = runNative, now = new Date() }) {
+function invokeAcceptanceRunner(run, executable, args, options) {
+  try {
+    const result = run(executable, args, options);
+    if (result === null || typeof result !== 'object') {
+      return normalizedCommandResult(null, 'NATIVE_RESULT_INVALID', '', '', 0);
+    }
+    return normalizedCommandResult(
+      Number.isInteger(result.exitCode) && result.exitCode >= 0 ? result.exitCode : null,
+      result.errorCode === null
+        ? null
+        : typeof result.errorCode === 'string' && result.errorCode.length > 0
+          ? result.errorCode
+          : 'NATIVE_RESULT_INVALID',
+      typeof result.stdout === 'string' ? result.stdout : '',
+      typeof result.stderr === 'string' ? result.stderr : '',
+      Number.isFinite(result.durationMs) && result.durationMs >= 0
+        ? Math.trunc(result.durationMs)
+        : 0,
+    );
+  } catch (error) {
+    return normalizedCommandResult(
+      null,
+      error?.code === 'ENOENT' ? 'ENOENT' : 'NATIVE_RUNNER_ERROR',
+      '',
+      '',
+      0,
+    );
+  }
+}
+
+function normalizedCommandResult(exitCode, errorCode, stdout, stderr, durationMs) {
+  return { exitCode, errorCode, stdout, stderr, durationMs };
+}
+
+function blockedToolCheck({
+  checkId,
+  argv,
+  exitCode,
+  evidence,
+  remoteSha,
+  treeSha,
+  tool: specification,
+  observedVersion,
+  now,
+}) {
+  return {
+    schema_version: '1.0.0',
+    check_id: checkId,
+    status: 'BLOCKED',
+    remote_sha: remoteSha,
+    tree_sha: treeSha,
+    reason_code: 'BLOCKED_TOOLCHAIN',
+    attempted_argv: argv,
+    attempt_exit_code: Number.isInteger(exitCode) && exitCode >= 0 ? exitCode : null,
+    attempt_evidence: [...evidence].sort(),
+    rerun_argv: ['node', 'scripts/acceptance/run-foundation-acceptance.mjs'],
+    occurred_at: now.toISOString(),
+    owner: OWNER,
+    tool: {
+      name: specification.name,
+      required_version: specification.requiredVersion,
+      observed_version: observedVersion,
+    },
+  };
+}
+
+function blockedDependentCheck({
+  checkId,
+  tool: specification,
+  observedVersion,
+  remoteSha,
+  treeSha,
+  now,
+}) {
   const argv = [specification.name, ...specification.versionArgs];
-  const result = run(specification.name, specification.versionArgs, { cwd: root, timeout: 30_000 });
-  const observedVersion = extractVersion(`${result.stdout}\n${result.stderr}`);
+  return {
+    schema_version: '1.0.0',
+    check_id: checkId,
+    status: 'BLOCKED',
+    remote_sha: remoteSha,
+    tree_sha: treeSha,
+    reason_code: 'BLOCKED_TOOLCHAIN',
+    attempted_argv: argv,
+    attempt_exit_code: null,
+    attempt_evidence: [],
+    rerun_argv: ['node', 'scripts/acceptance/run-foundation-acceptance.mjs'],
+    occurred_at: now.toISOString(),
+    owner: OWNER,
+    tool: {
+      name: specification.name,
+      required_version: specification.requiredVersion,
+      observed_version: observedVersion,
+    },
+  };
+}
+
+function blockedExternalCheck({
+  checkId,
+  argv,
+  exitCode,
+  evidence,
+  remoteSha,
+  treeSha,
+  external,
+  now,
+}) {
+  return {
+    schema_version: '1.0.0',
+    check_id: checkId,
+    status: 'BLOCKED',
+    remote_sha: remoteSha,
+    tree_sha: treeSha,
+    reason_code: external.reasonCode,
+    attempted_argv: argv,
+    attempt_exit_code: exitCode,
+    attempt_evidence: [...evidence].sort(),
+    rerun_argv: ['node', 'scripts/acceptance/run-foundation-acceptance.mjs'],
+    occurred_at: now.toISOString(),
+    owner: OWNER,
+    external: {
+      capability: external.capability,
+      authority: external.authority,
+      required_evidence_type: external.evidenceType,
+    },
+  };
+}
+
+export function probeTool({
+  specification,
+  root,
+  remoteSha,
+  treeSha,
+  run = runNative,
+  now = new Date(),
+  platform = process.platform,
+  nodeExecutable = process.execPath,
+}) {
+  const argv = [specification.name, ...specification.versionArgs];
+  const invocation = nativeToolInvocation(
+    specification.executable,
+    specification.versionArgs,
+    { platform, nodeExecutable },
+  );
+  const result = invokeAcceptanceRunner(
+    run,
+    invocation.executable,
+    invocation.argv,
+    { cwd: root, timeout: 30_000 },
+  );
+  const observedVersion = extractVersion(`${result.stdout}\n${result.stderr}`, specification.name);
   if (result.errorCode !== null || result.exitCode === null) {
     return {
       toolchain: { name: specification.name, required_version: specification.requiredVersion, observed_version: null, status: 'BLOCKED' },
@@ -340,16 +892,43 @@ export function probeTool({ specification, root, remoteSha, treeSha, run = runNa
       name: specification.name,
       required_version: specification.requiredVersion,
       observed_version: observedVersion,
-      status: matches ? 'PASS' : 'FAIL',
+      status: matches ? 'PASS' : 'BLOCKED',
     },
     check: matches
       ? passCheck(`02.toolchain.${specification.name}`, argv, 0, [digest], now)
-      : failCheck(`02.toolchain.${specification.name}`, argv, result.exitCode, [digest], now),
+      : {
+          schema_version: '1.0.0',
+          check_id: `02.toolchain.${specification.name}`,
+          status: 'BLOCKED',
+          remote_sha: remoteSha,
+          tree_sha: treeSha,
+          reason_code: 'BLOCKED_TOOLCHAIN',
+          attempted_argv: argv,
+          attempt_exit_code: Number.isInteger(result.exitCode) && result.exitCode >= 0
+            ? result.exitCode
+            : null,
+          attempt_evidence: [digest],
+          rerun_argv: ['node', 'scripts/acceptance/run-foundation-acceptance.mjs'],
+          occurred_at: now.toISOString(),
+          owner: OWNER,
+          tool: {
+            name: specification.name,
+            required_version: specification.requiredVersion,
+            observed_version: observedVersion,
+          },
+        },
   };
 }
 
-function extractVersion(output) {
-  const match = /(?:^|[^0-9])([0-9]+\.[0-9]+\.[0-9]+)(?:[^0-9]|$)/u.exec(output);
+function extractVersion(output, toolName) {
+  const patterns = {
+    java: /\bTemurin-([0-9]+[.][0-9]+[.][0-9]+\+[0-9]+)(?:-LTS)?\b/iu,
+    'gradle-wrapper': /\bGradle\s+([0-9]+[.][0-9]+(?:[.][0-9]+)?)\b/iu,
+    python: /\bPython\s+([0-9]+[.][0-9]+[.][0-9]+)\b/iu,
+    git: /\bgit version\s+([0-9]+[.][0-9]+[.][0-9]+)(?:[.]windows[.]\d+)?\b/iu,
+  };
+  const match = (patterns[toolName]
+    ?? /(?:^|[^0-9])v?([0-9]+[.][0-9]+[.][0-9]+)(?:[^0-9]|$)/u).exec(output);
   return match?.[1] ?? null;
 }
 
@@ -415,7 +994,7 @@ function safeError(code) {
   return error;
 }
 
-function parseCli(argv) {
+export function parseAcceptanceCli(argv) {
   const options = { repository: process.cwd(), insideDetached: false };
   for (let index = 0; index < argv.length;) {
     const flag = argv[index];
@@ -435,8 +1014,10 @@ function parseCli(argv) {
       '--output': 'outputBase',
       '--evidence-dir': 'evidenceDirectory',
       '--receipts': 'receiptsDirectory',
-      '--trust-store': 'trustStorePath',
+      '--ci-context': 'ciContextPath',
       '--release-manifest': 'releaseManifestPath',
+      '--release-evidence-index': 'releaseEvidenceIndexPath',
+      '--release-evidence-root': 'releaseEvidenceRootPath',
     }[flag];
     if (!key) throw safeError('ARGUMENTS_INVALID');
     options[key] = value;
@@ -447,29 +1028,55 @@ function parseCli(argv) {
   return options;
 }
 
-async function recordBootstrapFailure(options, error) {
-  const output = resolve(options.outputBase ?? resolve(options.repository, 'build', 'acceptance'), options.remoteSha);
-  const status = error?.verdictStatus === 'BLOCKED' ? 'BLOCKED' : 'FAIL';
+function bootstrapFailureStatus(error) {
+  return error?.verdictStatus === 'BLOCKED' ? 'BLOCKED' : 'FAIL';
+}
+
+export async function recordBootstrapFailure(options, error, now = new Date()) {
+  const status = bootstrapFailureStatus(error);
+  const reasonCode = status === 'BLOCKED' ? 'BLOCKED_REMOTE_AUTHORITY' : 'ASSERTION_FAILED';
+  const errorCode = typeof error?.code === 'string' && /^[A-Z0-9_]{2,128}$/u.test(error.code)
+    ? error.code
+    : 'UNEXPECTED_ERROR';
+  const attemptedArgv = ['git', 'ls-remote', '--exit-code', options.remoteUrl, options.remoteRef];
   const document = {
     schema_version: '1.0.0',
     status,
-    reason_code: status === 'BLOCKED' ? (error.reasonCode ?? 'BLOCKED_REMOTE_AUTHORITY') : 'ASSERTION_FAILED',
+    reason_code: reasonCode,
     remote_url: options.remoteUrl,
     remote_ref: options.remoteRef,
-    remote_sha: options.remoteSha,
-    attempted_argv: ['git', 'ls-remote', '--exit-code', options.remoteUrl, options.remoteRef],
-    attempt_exit_code: null,
-    occurred_at: new Date().toISOString(),
+    requested_remote_sha: options.remoteSha,
+    attempted_argv: attemptedArgv,
+    attempt_exit_code: Number.isInteger(error?.exitCode) && error.exitCode >= 0
+      ? error.exitCode
+      : null,
+    attempt_evidence: [sha256(canonicalJson({
+      error_code: errorCode,
+      reason_code: reasonCode,
+      status,
+    }))],
+    rerun_argv: [
+      'node', 'scripts/acceptance/run-foundation-acceptance.mjs',
+      '--remote-url', options.remoteUrl,
+      '--remote-ref', options.remoteRef,
+      '--remote-sha', options.remoteSha,
+    ],
+    occurred_at: now.toISOString(),
     owner: OWNER,
   };
+  await validateBootstrapResult(document);
+  const output = resolve(
+    options.outputBase ?? resolve(options.repository, 'build', 'acceptance'),
+    options.remoteSha,
+  );
   await atomicWriteJson(resolve(output, 'remote-authority-result.json'), document);
-  return status;
+  return document;
 }
 
 async function main() {
   let options;
   try {
-    options = parseCli(process.argv.slice(2));
+    options = parseAcceptanceCli(process.argv.slice(2));
     const result = options.insideDetached
       ? await runInsideDetached(options)
       : { summary: await runAuthoritativeAcceptance(options) };
@@ -477,7 +1084,7 @@ async function main() {
     process.exitCode = verdictExitCode(result.summary.status);
   } catch (error) {
     const status = options && !options.insideDetached
-      ? await recordBootstrapFailure(options, error)
+      ? (await recordBootstrapFailure(options, error)).status
       : 'FAIL';
     const code = typeof error?.code === 'string' ? error.code : 'UNEXPECTED_ERROR';
     process.stderr.write(`foundation-acceptance: ${status} (${code})\n`);

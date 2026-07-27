@@ -33,6 +33,7 @@ import org.jooq.Record;
 import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -135,6 +136,14 @@ public class WorkerScheduling implements WorkerDrainCoordinator.DrainControl {
     @Bean
     WorkerDrainCoordinator workerDrainCoordinator(ApplicationEventPublisher events) {
         return new WorkerDrainCoordinator(this, properties, events);
+    }
+
+    @Bean
+    @ConditionalOnProperty(
+        name = "accord.worker.probe-state.enabled", havingValue = "true")
+    WorkerProbeStatePublisher workerProbeStatePublisher(
+            @Value("${accord.worker.probe-state.directory}") String directory) {
+        return new WorkerProbeStatePublisher(java.nio.file.Path.of(directory));
     }
 
     @Override

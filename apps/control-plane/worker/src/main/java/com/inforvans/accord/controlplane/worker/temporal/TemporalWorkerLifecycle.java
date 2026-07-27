@@ -22,6 +22,7 @@ public final class TemporalWorkerLifecycle implements SmartLifecycle {
 
     private volatile boolean running;
     private WorkflowServiceStubs stubs;
+    private WorkflowClient client;
     private WorkerFactory factory;
     private Worker worker;
 
@@ -50,12 +51,12 @@ public final class TemporalWorkerLifecycle implements SmartLifecycle {
                     .setNamespace(properties.namespace())
                     .build());
 
-            WorkflowClient client = WorkflowClient.newInstance(
+            WorkflowClient startingClient = WorkflowClient.newInstance(
                 startingStubs,
                 WorkflowClientOptions.newBuilder()
                     .setNamespace(properties.namespace())
                     .validateAndBuildWithDefaults());
-            startingFactory = WorkerFactory.newInstance(client);
+            startingFactory = WorkerFactory.newInstance(startingClient);
             Worker startingWorker = startingFactory.newWorker(properties.taskQueue());
             startingWorker.registerWorkflowImplementationTypes(
                 ReconciliationWorkflowImpl.class);
@@ -63,6 +64,7 @@ public final class TemporalWorkerLifecycle implements SmartLifecycle {
             startingFactory.start();
 
             stubs = startingStubs;
+            client = startingClient;
             factory = startingFactory;
             worker = startingWorker;
             running = true;
@@ -80,6 +82,7 @@ public final class TemporalWorkerLifecycle implements SmartLifecycle {
         WorkflowServiceStubs stoppingStubs = stubs;
         worker = null;
         factory = null;
+        client = null;
         stubs = null;
 
         long deadline = System.nanoTime() + properties.shutdownTimeout().toNanos();
@@ -120,6 +123,14 @@ public final class TemporalWorkerLifecycle implements SmartLifecycle {
 
     WorkerFactory workerFactory() {
         return factory;
+    }
+
+    WorkflowClient workflowClient() {
+        WorkflowClient current = client;
+        if (!running || current == null) {
+            throw new IllegalStateException("Temporal worker lifecycle is not running");
+        }
+        return current;
     }
 
     private static void unwind(WorkerFactory factory, WorkflowServiceStubs stubs,

@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0.0",
+  "release_sets": [
+    {
+      "id": "accordctl",
+      "artifacts": [
+        { "name": "accord-source", "kind": "source", "platform": "none" },
+        { "name": "accordctl-darwin-amd64", "kind": "archive", "platform": "darwin/amd64" },
+        { "name": "accordctl-darwin-arm64", "kind": "archive", "platform": "darwin/arm64" },
+        { "name": "accordctl-linux-amd64", "kind": "archive", "platform": "linux/amd64" },
+        { "name": "accordctl-windows-amd64", "kind": "archive", "platform": "windows/amd64" }
+      ]
+    },
+    {
+      "id": "runtime-images",
+      "artifacts": [
+        { "name": "accord-source", "kind": "source", "platform": "none" },
+        { "name": "control-plane-api", "kind": "image", "platform": "linux/amd64" },
+        { "name": "control-plane-api", "kind": "image", "platform": "linux/arm64" },
+        { "name": "control-plane-worker", "kind": "image", "platform": "linux/amd64" },
+        { "name": "control-plane-worker", "kind": "image", "platform": "linux/arm64" },
+        { "name": "webhook-edge", "kind": "image", "platform": "linux/amd64" },
+        { "name": "webhook-edge", "kind": "image", "platform": "linux/arm64" }
+      ]
+    }
+  ]
+}

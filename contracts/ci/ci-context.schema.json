@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://accord.inforvans.com/contracts/ci/ci-context.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ci_system",
+    "remote_url",
+    "remote_ref",
+    "remote_sha",
+    "base_sha",
+    "tree_sha",
+    "run_id",
+    "workflow_id",
+    "builder_issuer",
+    "builder_subject",
+    "builder_audience",
+    "registry_repository",
+    "protected_environment",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "ci_system": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{1,31}$" },
+    "remote_url": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^(?:https|ssh)://[^\\s?#]+(?:[.]git)?$"
+    },
+    "remote_ref": {
+      "type": "string",
+      "pattern": "^refs/[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,253}[A-Za-z0-9])?$"
+    },
+    "remote_sha": { "$ref": "#/$defs/gitSha" },
+    "base_sha": { "$ref": "#/$defs/gitSha" },
+    "tree_sha": { "$ref": "#/$defs/gitSha" },
+    "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    "workflow_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$" },
+    "builder_issuer": { "type": "string", "format": "uri", "pattern": "^https://" },
+    "builder_subject": { "type": "string", "minLength": 8, "maxLength": 512 },
+    "builder_audience": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" },
+    "registry_repository": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?/[a-z0-9]+(?:[._/-][a-z0-9]+)*$"
+    },
+    "protected_environment": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$" },
+    "environment_class": { "enum": ["fixture", "development", "staging", "production"] },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["environment_class"],
+        "properties": { "environment_class": { "const": "production" } }
+      },
+      "then": {
+        "properties": {
+          "remote_url": { "not": { "type": "string", "pattern": "(?:[.]invalid)(?::|/|$)" } },
+          "registry_repository": { "not": { "type": "string", "pattern": "(?:[.]invalid)(?::|/|$)" } },
+          "builder_issuer": { "not": { "type": "string", "pattern": "(?:[.]invalid)(?::|/|$)" } },
+          "remote_sha": { "$ref": "#/$defs/productionGitSha" },
+          "base_sha": { "$ref": "#/$defs/productionGitSha" },
+          "tree_sha": { "$ref": "#/$defs/productionGitSha" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "not": { "const": "0000000000000000000000000000000000000000" }
+    },
+    "productionGitSha": {
+      "allOf": [
+        { "$ref": "#/$defs/gitSha" },
+        { "not": { "type": "string", "pattern": "^([0-9a-f])\\1{39}$" } }
+      ]
+    }
+  }
+}

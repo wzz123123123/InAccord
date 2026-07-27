@@ -1,14 +1,19 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { lstat, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import {
   assertNoSensitiveMaterial,
   atomicWriteJson,
+  canonicalJson,
+  ENVIRONMENT_CHECK_IDS,
   mergeVerdicts,
+  sha256,
   validateBlockedEvidence,
+  validateBootstrapResult,
+  validateCheckEvidence,
   validateVerdictDocument,
 } from '../../scripts/acceptance/merge-verdicts.mjs';
 import {
@@ -19,10 +24,17 @@ import {
   assertDetachedClean,
   createDetachedWorktree,
 } from '../../scripts/acceptance/create-detached-worktree.mjs';
+import { collectEnvironmentEvidence } from '../../scripts/acceptance/collect-environment-evidence.mjs';
 import {
+  executeRepositoryCheck,
+  parseAcceptanceCli,
   probeTool,
+  recordBootstrapFailure,
+  REPOSITORY_CHECKS,
   REQUIRED_TOOLCHAIN,
+  validateReleaseInputBindings,
 } from '../../scripts/acceptance/run-foundation-acceptance.mjs';
+import { verifyOfflineDependencies } from '../../scripts/verification/verify-offline-dependencies.mjs';
 
 const FIXTURE_ROOT = resolve('contracts', 'golden-fixtures', 'acceptance');
 
@@ -70,6 +82,84 @@ test('closed acceptance fixtures enforce status-specific evidence semantics', as
   const blockedWithoutEvidence = structuredClone(environment);
   blockedWithoutEvidence.checks = [passCheck('01.branch-protection')];
   await assert.rejects(validateVerdictDocument(blockedWithoutEvidence));
+
+  const blockedWithoutArtifacts = structuredClone(code);
+  blockedWithoutArtifacts.status = 'BLOCKED';
+  blockedWithoutArtifacts.image_lock_digest = null;
+  blockedWithoutArtifacts.release_manifest_digest = null;
+  blockedWithoutArtifacts.checks = [blocked];
+  await validateVerdictDocument(blockedWithoutArtifacts);
+
+  const passWithoutImageLock = structuredClone(code);
+  passWithoutImageLock.image_lock_digest = null;
+  await assert.rejects(validateVerdictDocument(passWithoutImageLock));
+
+  const failWithoutArtifacts = structuredClone(code);
+  failWithoutArtifacts.status = 'FAIL';
+  failWithoutArtifacts.image_lock_digest = null;
+  failWithoutArtifacts.release_manifest_digest = null;
+  failWithoutArtifacts.checks[0] = failCheck('01.architecture');
+  await assert.rejects(validateVerdictDocument(failWithoutArtifacts));
+
+  const failWithExplicitMissingImage = structuredClone(code);
+  failWithExplicitMissingImage.status = 'FAIL';
+  failWithExplicitMissingImage.image_lock_digest = null;
+  const imageCheck = failWithExplicitMissingImage.checks.findIndex(
+    (entry) => entry.check_id === '00.image-lock',
+  );
+  failWithExplicitMissingImage.checks[imageCheck] = failCheck('00.image-lock');
+  await validateVerdictDocument(failWithExplicitMissingImage);
+});
+
+test('PASS verdicts require the complete fixed code and environment inventories', async () => {
+  const code = await fixture('code-pass.json');
+  const incompleteCode = structuredClone(code);
+  incompleteCode.checks.pop();
+  await assert.rejects(
+    validateVerdictDocument(incompleteCode),
+    /CODE_(?:CHECK|TOOLCHAIN)_INVENTORY_INVALID/u,
+  );
+  const environment = asEnvironmentPass(code);
+  environment.checks.pop();
+  await assert.rejects(
+    validateVerdictDocument(environment),
+    /ENVIRONMENT_CHECK_INVENTORY_INVALID/u,
+  );
+});
+
+test('environment collection rejects a caller-supplied trust-root override', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'accord-trust-root-test-'));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const code = bindEvidenceBundle(await fixture('code-pass.json'));
+  const codePath = join(directory, 'code.json');
+  await atomicWriteJson(codePath, code);
+  await assert.rejects(
+    collectEnvironmentEvidence({
+      codeVerdictPath: codePath,
+      receiptsDirectory: join(directory, 'receipts'),
+      trustStorePath: join(directory, 'caller-controlled.json'),
+      outputPath: join(directory, 'environment.json'),
+    }),
+    /TRUST_STORE_OVERRIDE_FORBIDDEN/u,
+  );
+});
+
+test('outer acceptance independently validates the detached evidence bundle', async (context) => {
+  const acceptance = await import('../../scripts/acceptance/run-foundation-acceptance.mjs');
+  assert.equal(typeof acceptance.verifyDetachedAcceptanceEvidence, 'function');
+  const directory = await mkdtemp(join(tmpdir(), 'accord-detached-evidence-test-'));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  await writeFile(join(directory, 'summary.json'), '{"status":"PASS"}\n', 'utf8');
+  await assert.rejects(
+    acceptance.verifyDetachedAcceptanceEvidence({
+      evidenceDirectory: directory,
+      remoteUrl: 'https://git.example.com/accord/accord.git',
+      remoteRef: 'refs/heads/main',
+      remoteSha: 'a'.repeat(40),
+      treeSha: 'b'.repeat(40),
+    }),
+    /DETACHED_EVIDENCE_/u,
+  );
 });
 
 test('blocked documents reject raw diagnostic and private material at any depth', () => {
@@ -89,8 +179,8 @@ test('blocked documents reject raw diagnostic and private material at any depth'
 test('summary requires both PASS verdicts and byte-equal bindings', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'accord-verdict-test-'));
   context.after(() => rm(directory, { recursive: true, force: true }));
-  const code = await fixture('code-pass.json');
-  const environmentPass = asEnvironmentPass(code);
+  const code = bindEvidenceBundle(await fixture('code-pass.json'));
+  const environmentPass = bindEvidenceBundle(asEnvironmentPass(code));
   const codePath = join(directory, 'code.json');
   const environmentPath = join(directory, 'environment.json');
   const summaryPath = join(directory, 'summary.json');
@@ -100,6 +190,7 @@ test('summary requires both PASS verdicts and byte-equal bindings', async (conte
 
   const mismatch = structuredClone(environmentPass);
   mismatch.tree_sha = '9'.repeat(40);
+  bindEvidenceBundle(mismatch);
   await atomicWriteJson(environmentPath, mismatch);
   const mismatchSummary = await mergeVerdicts({ codePath, environmentPath, outputPath: summaryPath });
   assert.equal(mismatchSummary.status, 'BLOCKED');
@@ -107,15 +198,28 @@ test('summary requires both PASS verdicts and byte-equal bindings', async (conte
 
   const failure = structuredClone(code);
   failure.status = 'FAIL';
-  failure.checks[0] = failCheck('01.architecture');
+  failure.checks = failure.checks.map((check) => (
+    check.check_id === '01.architecture' ? failCheck('01.architecture') : check
+  ));
+  bindEvidenceBundle(failure);
   await atomicWriteJson(codePath, failure);
   await atomicWriteJson(environmentPath, environmentPass);
   assert.equal((await mergeVerdicts({ codePath, environmentPath, outputPath: summaryPath })).status, 'FAIL');
+
+  const tampered = structuredClone(code);
+  tampered.checks[0].evidence_digests = ['9'.repeat(64)];
+  await atomicWriteJson(codePath, tampered);
+  await assert.rejects(
+    mergeVerdicts({ codePath, environmentPath, outputPath: summaryPath }),
+    /VERDICT_EVIDENCE_BUNDLE_DIGEST_MISMATCH/u,
+  );
 });
 
-test('all nine unavailable required tools produce independent BLOCKED_TOOLCHAIN evidence', () => {
+test('full pinned toolchain produces independent BLOCKED_TOOLCHAIN evidence', async () => {
   assert.deepEqual(REQUIRED_TOOLCHAIN.map((entry) => entry.name), [
-    'buf', 'cosign', 'conftest', 'helm', 'kubeconform', 'oras', 'syft', 'tofu', 'trivy',
+    'buf', 'cosign', 'conftest', 'docker', 'docker-buildx', 'docker-compose', 'git',
+    'gradle-wrapper', 'helm', 'java', 'kubeconform', 'node', 'oras', 'pnpm', 'python',
+    'syft', 'tofu', 'trivy', 'uv',
   ]);
   const remoteSha = 'a'.repeat(40);
   const treeSha = 'b'.repeat(40);
@@ -133,12 +237,248 @@ test('all nine unavailable required tools produce independent BLOCKED_TOOLCHAIN 
     }),
     now: new Date('2026-07-26T00:00:00Z'),
   }));
-  assert.equal(new Set(outcomes.map((entry) => entry.check.check_id)).size, 9);
+  assert.equal(new Set(outcomes.map((entry) => entry.check.check_id)).size, REQUIRED_TOOLCHAIN.length);
   assert.ok(outcomes.every((entry) => (
     entry.check.status === 'BLOCKED'
     && entry.check.reason_code === 'BLOCKED_TOOLCHAIN'
     && entry.toolchain.status === 'BLOCKED'
   )));
+  await Promise.all(outcomes.map((entry) => validateCheckEvidence(entry.check)));
+
+  const mismatched = probeTool({
+    specification: REQUIRED_TOOLCHAIN[0],
+    root: process.cwd(),
+    remoteSha,
+    treeSha,
+    run: () => ({
+      exitCode: 0,
+      errorCode: null,
+      stdout: '0.0.1',
+      stderr: '',
+      durationMs: 1,
+    }),
+    now: new Date('2026-07-26T00:00:00Z'),
+  });
+  assert.equal(mismatched.toolchain.status, 'BLOCKED');
+  assert.equal(mismatched.check.reason_code, 'BLOCKED_TOOLCHAIN');
+  assert.equal(mismatched.check.tool.observed_version, '0.0.1');
+  await validateCheckEvidence(mismatched.check);
+
+  const java = REQUIRED_TOOLCHAIN.find((entry) => entry.name === 'java');
+  const exactJava = probeTool({
+    specification: java,
+    root: process.cwd(),
+    remoteSha,
+    treeSha,
+    run: () => ({
+      exitCode: 0,
+      errorCode: null,
+      stdout: 'openjdk 21.0.11 2026-04-21 LTS',
+      stderr: 'OpenJDK Runtime Environment Temurin-21.0.11+10 (build 21.0.11+10-LTS)',
+      durationMs: 1,
+    }),
+    now: new Date('2026-07-26T00:00:00Z'),
+  });
+  assert.equal(exactJava.toolchain.status, 'PASS');
+  await validateCheckEvidence(exactJava.check);
+});
+
+test('detached CLI accepts and preserves external release evidence inputs', () => {
+  const parsed = parseAcceptanceCli([
+    '--inside-detached',
+    '--remote-url', 'https://git.example.com/accord/accord.git',
+    '--remote-ref', 'refs/heads/main',
+    '--remote-sha', 'a'.repeat(40),
+    '--tree-sha', 'b'.repeat(40),
+    '--evidence-dir', 'C:/external/acceptance',
+    '--ci-context', 'C:/external/context.json',
+    '--release-manifest', 'C:/external/release-manifest.json',
+    '--release-evidence-index', 'C:/external/evidence-index.json',
+    '--release-evidence-root', 'C:/external',
+  ]);
+  assert.equal(parsed.ciContextPath, 'C:/external/context.json');
+  assert.equal(parsed.releaseEvidenceIndexPath, 'C:/external/evidence-index.json');
+  assert.equal(parsed.releaseEvidenceRootPath, 'C:/external');
+});
+
+test('release context and manifest must bind to the authoritative acceptance proof', () => {
+  const remoteSha = 'a'.repeat(40);
+  const treeSha = 'b'.repeat(40);
+  const context = { remote_sha: remoteSha, tree_sha: treeSha };
+  const manifest = { remote_sha: remoteSha, tree_sha: treeSha };
+  assert.doesNotThrow(() => validateReleaseInputBindings({ context, manifest, remoteSha, treeSha }));
+  assert.throws(
+    () => validateReleaseInputBindings({
+      context: { ...context, remote_sha: 'c'.repeat(40) },
+      manifest,
+      remoteSha,
+      treeSha,
+    }),
+    /RELEASE_INPUT_AUTHORITY_MISMATCH/u,
+  );
+});
+
+test('offline dependency gate covers Java, browser, Python, and protobuf without a shell', async () => {
+  const dependency = REPOSITORY_CHECKS.find((entry) => entry.checkId === '03.dependency-verification');
+  const telemetry = REPOSITORY_CHECKS.find((entry) => entry.checkId === '05.telemetry');
+  const release = REPOSITORY_CHECKS.find((entry) => entry.checkId === '07.release-chain');
+  assert.deepEqual(dependency.requiredTools, ['buf', 'gradle-wrapper', 'java', 'node', 'pnpm', 'python', 'uv']);
+  assert.deepEqual(telemetry.requiredTools, ['gradle-wrapper', 'java']);
+  assert.deepEqual(release.requiredTools, ['cosign', 'git', 'oras', 'syft', 'trivy']);
+  const source = await readFile(resolve('scripts', 'verification', 'verify-offline-dependencies.mjs'), 'utf8');
+  for (const required of [
+    'GradleWrapperMain', '--offline', '--dependency-verification=strict',
+    'install', '--frozen-lockfile', 'typecheck', 'contracts:lint',
+    'sync', '--frozen', 'ruff', 'mypy', 'pytest', 'lint', 'build',
+  ]) assert.ok(source.includes(required), `offline gate is missing ${required}`);
+  assert.doesNotMatch(source, /shell\s*:\s*true/u);
+});
+
+test('offline dependency gate invokes pnpm through Corepack on Windows', async () => {
+  const nodeExecutable = 'C:\\runtime\\node.exe';
+  const invocations = [];
+  await verifyOfflineDependencies({
+    platform: 'win32',
+    nodeExecutable,
+    run: async (executable, argv) => {
+      invocations.push({ executable, argv });
+      return { exitCode: 0, errorCode: null };
+    },
+  });
+
+  const pnpmInvocations = invocations.filter(({ argv }) => (
+    argv.includes('install') || argv.includes('contracts:lint') || argv.includes('--if-present')
+  ));
+  assert.equal(pnpmInvocations.length, 4);
+  for (const invocation of pnpmInvocations) {
+    assert.equal(invocation.executable, nodeExecutable);
+    assert.equal(
+      invocation.argv[0],
+      'C:\\runtime\\node_modules\\corepack\\dist\\pnpm.js',
+    );
+  }
+});
+
+test('Windows production gates invoke pnpm through Node and Corepack', async () => {
+  const preflight = await import('../../scripts/verification/preflight.mjs');
+  assert.equal(typeof preflight.nativeToolInvocation, 'function');
+  const nodeExecutable = 'C:\\runtime\\node.exe';
+  const expectedEntrypoint = 'C:\\runtime\\node_modules\\corepack\\dist\\pnpm.js';
+  assert.deepEqual(
+    preflight.nativeToolInvocation('pnpm', ['--version'], {
+      platform: 'win32',
+      nodeExecutable,
+    }),
+    { executable: nodeExecutable, argv: [expectedEntrypoint, '--version'] },
+  );
+
+  let captured;
+  const pnpm = REQUIRED_TOOLCHAIN.find((entry) => entry.name === 'pnpm');
+  const outcome = probeTool({
+    specification: pnpm,
+    root: process.cwd(),
+    remoteSha: 'a'.repeat(40),
+    treeSha: 'b'.repeat(40),
+    platform: 'win32',
+    nodeExecutable,
+    run: (executable, argv) => {
+      captured = { executable, argv };
+      return commandResult({ exitCode: 0, stdout: '10.12.4' });
+    },
+    now: new Date('2026-07-26T00:00:00Z'),
+  });
+  assert.deepEqual(captured, {
+    executable: nodeExecutable,
+    argv: [expectedEntrypoint, '--version'],
+  });
+  assert.equal(outcome.toolchain.status, 'PASS');
+
+  const ciSource = await readFile(resolve('scripts', 'ci', 'verify.mjs'), 'utf8');
+  assert.match(ciSource, /fullPreflight[\s\S]*nativeToolInvocation\(definition[.]executable/u);
+  assert.match(ciSource, /async function gate[\s\S]*nativeToolInvocation\(executable/u);
+});
+
+test('remote bootstrap failure writes closed auditable evidence without inventing a tree SHA', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'accord-bootstrap-result-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const remoteSha = 'a'.repeat(40);
+  const result = await recordBootstrapFailure({
+    repository: root,
+    outputBase: join(root, 'acceptance'),
+    remoteUrl: 'https://git.example.com/accord/accord.git',
+    remoteRef: 'refs/heads/main',
+    remoteSha,
+  }, Object.assign(new Error('raw network diagnostics must not be persisted'), {
+    code: 'REMOTE_AUTHORITY_UNAVAILABLE',
+    verdictStatus: 'BLOCKED',
+    reasonCode: 'BLOCKED_REMOTE_AUTHORITY',
+  }), new Date('2026-07-27T00:00:00Z'));
+  assert.equal(result.status, 'BLOCKED');
+  assert.equal(Object.hasOwn(result, 'tree_sha'), false);
+  await validateBootstrapResult(result);
+  const stored = await readFile(join(root, 'acceptance', remoteSha, 'remote-authority-result.json'), 'utf8');
+  assert.doesNotMatch(stored, /raw network diagnostics/u);
+});
+
+test('repository checks preserve external and missing-tool blockers while missing source fails', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'accord-repository-check-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const remoteSha = 'a'.repeat(40);
+  const treeSha = 'b'.repeat(40);
+  const now = new Date('2026-07-26T00:00:00Z');
+  const release = REPOSITORY_CHECKS.find((entry) => entry.checkId === '07.release-chain');
+  const dependency = REPOSITORY_CHECKS.find((entry) => entry.checkId === '03.dependency-verification');
+
+  for (const specification of [release, dependency]) {
+    const required = join(root, specification.requiredPath);
+    await mkdir(dirname(required), { recursive: true });
+    await writeFile(required, 'fixture', 'utf8');
+  }
+
+  const external = await executeRepositoryCheck({
+    root,
+    specification: release,
+    remoteSha,
+    treeSha,
+    run: () => commandResult({ exitCode: 2 }),
+    now,
+  });
+  assert.equal(external.status, 'BLOCKED');
+  assert.equal(external.reason_code, 'BLOCKED_REGISTRY');
+  await validateCheckEvidence(external);
+
+  const toolchain = await executeRepositoryCheck({
+    root,
+    specification: dependency,
+    remoteSha,
+    treeSha,
+    run: () => commandResult({ exitCode: null, errorCode: 'ENOENT' }),
+    now,
+  });
+  assert.equal(toolchain.status, 'BLOCKED');
+  assert.equal(toolchain.reason_code, 'BLOCKED_TOOLCHAIN');
+  assert.equal(toolchain.tool.name, 'java');
+  await validateCheckEvidence(toolchain);
+
+  await rm(join(root, release.requiredPath));
+  const missing = await executeRepositoryCheck({
+    root,
+    specification: release,
+    remoteSha,
+    treeSha,
+    run: () => assert.fail('missing repository checks must not execute'),
+    now,
+  });
+  assert.equal(missing.status, 'FAIL');
+  assert.equal(missing.reason_code, 'ASSERTION_FAILED');
+  await validateCheckEvidence(missing);
+});
+
+test('atomic JSON writes remove temporary files when serialization fails', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'accord-atomic-json-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await assert.rejects(atomicWriteJson(join(root, 'result.json'), { unsupported: 1n }));
+  assert.deepEqual(await readdir(root), []);
 });
 
 test('authoritative resolver fetches one exact remote ref and rejects a different SHA', async (context) => {
@@ -246,9 +586,16 @@ function asEnvironmentPass(code) {
     kind: 'ENVIRONMENT',
     dependency_lock_digests: [],
     toolchain_results: [],
-    checks: [passCheck('01.environment')],
+    checks: ENVIRONMENT_CHECK_IDS.map((checkId) => passCheck(checkId)),
     demo_evidence: [],
   };
+}
+
+function bindEvidenceBundle(verdict) {
+  const copy = { ...verdict };
+  delete copy.evidence_bundle_digest;
+  verdict.evidence_bundle_digest = sha256(canonicalJson(copy));
+  return verdict;
 }
 
 async function createRemoteFixture(context) {
@@ -282,4 +629,14 @@ function git(cwd, args) {
   assert.equal(result.error, undefined);
   assert.equal(result.status, 0, `git ${args[0]} failed`);
   return result.stdout.trim();
+}
+
+function commandResult({ exitCode, errorCode = null, stdout = '', stderr = '' }) {
+  return {
+    exitCode,
+    errorCode,
+    stdout,
+    stderr,
+    durationMs: 1,
+  };
 }

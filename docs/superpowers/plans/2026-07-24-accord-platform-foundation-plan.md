@@ -651,7 +651,7 @@ Create `apps/web/package.json`:
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "scripts": { "test": "node --test", "typecheck": "tsc --noEmit" },
+  "scripts": { "test": "node --test" },
   "dependencies": {
     "@tanstack/react-query": "5.81.5",
     "react": "19.1.0",
@@ -1571,7 +1571,6 @@ full commit binding, ancestry, pinned Buf `1.55.1`, and inequality with `HEAD` b
 - Generate: `apps/control-plane/{api,worker}/gradle.lockfile`
 - Generate: `apps/control-plane/modules/{platform-kernel,reliability}/gradle.lockfile`
 - Generate: `tests/{api,contract,fault-injection,integration,security-negative,state-machine}/gradle.lockfile`
-- Modify: `gradle/verification-metadata.xml`
 
 - [ ] **Step 1: Write failing module and trust-boundary tests**
 
@@ -5764,8 +5763,9 @@ database dependencies nor alters Task 10 TLS/fence semantics.
 
 Task 12 has two separately authorized checkpoints. Checkpoint A contains only the 29-path V004 and
 reliability-core manifest named below and may be implemented and committed before Task 10. It must
-not touch worker files or global verification metadata. Checkpoint B contains the remaining nine
-worker/metadata paths and remains blocked until all of Task 10 is committed and green. Neither
+not touch worker files or global verification metadata. Checkpoint B contains the remaining six
+worker paths, keeps global verification metadata byte-stable, and remains blocked until all of Task
+10 is committed and green. Neither
 checkpoint alone may be reported as complete Task 12.
 
 **Authoritative invariants:**
@@ -5807,7 +5807,9 @@ checkpoint alone may be reported as complete Task 12.
    database time and the installed tenant context to delete only rows with `state='COMPLETED' AND
    expires_at < clock_timestamp()`. It never deletes `STARTED`, regardless of lease or expiry.
 10. One tenant permit represents one bounded, single-channel turn selected from OUTBOX, INBOX, or
-     CLEANUP by the earliest effective ready timestamp after tenant context is installed. An outbox turn leases at most
+     CLEANUP by the earliest effective ready timestamp after tenant context is installed. If two or
+     three channels share that timestamp, select from the ordered tied set `[OUTBOX, INBOX, CLEANUP]`
+     with `floorMod(permitGeneration - 1, tiedChannelCount)`. An outbox turn leases at most
      `min(batch_size, available_concurrency)` and starts every leased external call immediately. An
      inbox turn leases exactly one message because its handler transaction locks and revalidates the
      same permit row. A cleanup turn deletes one bounded batch through the completed-only routine.
@@ -6147,7 +6149,7 @@ $task12CorePaths = @(
   'database/control-plane/src/test/java/com/inforvans/accord/database/FoundationHttpReliabilityMigrationTest.java'
   'apps/control-plane/modules/reliability/build.gradle'
   'apps/control-plane/modules/reliability/gradle.lockfile'
-  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReliableEventStore.java'
+  'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/ReliabilityValues.java'
   'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/ReliableEventStoreTest.java'
   'apps/control-plane/modules/reliability/src/test/java/com/inforvans/accord/reliability/PostgreSqlReliabilityTestSupport.java'
   'apps/control-plane/modules/reliability/src/main/java/com/inforvans/accord/reliability/TenantWorkPermit.java'
@@ -6259,36 +6261,34 @@ and cleanup never deletes a `STARTED` row.
 
 - [ ] **Step 13: Lock and commit the remaining worker slice after Task 10**
 
-Refresh only Task 12 Checkpoint B's worker lock and approved metadata without re-adding Task 10's
-baseline database closure, verify the second resolution is stable, then stage the exact remaining
-nine paths:
+Refresh only Task 12 Checkpoint B's worker lock without re-adding Task 10's baseline database
+closure, require the approved global metadata to remain byte-stable, verify the second resolution
+is stable, then stage the exact remaining six paths:
 
 ~~~powershell
 ./gradlew.bat :apps:control-plane:modules:reliability:dependencies :apps:control-plane:worker:dependencies --write-locks --no-configuration-cache --no-daemon --dependency-verification=strict
-./gradlew.bat resolveAndLockAll --write-verification-metadata sha256,pgp --no-configuration-cache --no-daemon
 ./gradlew.bat resolveAndLockAll --no-configuration-cache --no-daemon --dependency-verification=strict
+git diff --exit-code -- gradle/verification-metadata.xml
 git diff --check
 $task12WorkerPaths = @(
-  'apps/control-plane/worker/build.gradle'
-  'apps/control-plane/worker/gradle.lockfile'
   'apps/control-plane/worker/src/main/resources/application.yml'
   'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/WorkerReliabilityProperties.java'
   'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/WorkerScheduling.java'
   'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/WorkerDrainCoordinator.java'
   'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/WorkerSchedulingTest.java'
   'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/WorkerDrainCoordinatorTest.java'
-  'gradle/verification-metadata.xml'
 )
 git add -- $task12WorkerPaths
 $actual = @(git diff --cached --name-only | Sort-Object)
 $expected = @($task12WorkerPaths | Sort-Object)
 if (Compare-Object $expected $actual -SyncWindow 0) {
-  throw 'Checkpoint B index differs from the exact nine-path manifest'
+  throw 'Checkpoint B index differs from the exact six-path manifest'
 }
 git commit -m "feat: dispatch reliable work with durable fences"
 ~~~
 
-Expected: V003 and Checkpoint A remain unchanged; exactly nine worker/metadata paths are staged;
+Expected: V003, Checkpoint A, and global verification metadata remain unchanged; exactly six
+worker paths are staged;
 Task 10 mTLS/replay tests remain green; Task 12 is now complete; and Task 13 begins immediately after
 this section.
 
@@ -6305,6 +6305,8 @@ Provider facts without using GitHub product semantics.
 - Create: `contracts/supply-chain/image-lock.schema.json`
 - Create: `contracts/verification/check-result.schema.json`
 - Generate: `infra/images/images.lock.json`
+- Create: `infra/images/minio-source-approvals.json`
+- Create: `infra/images/minio-source-approval-evidence.json`
 - Create: `infra/local/compose.yaml`
 - Create: `infra/local/postgres/00-roles-and-databases.sql`
 - Create: `infra/local/temporal/server.yaml`
@@ -6346,7 +6348,10 @@ Task 16 consumes the same bytes when it renders Dockerfiles and never creates an
    canonical registry/repository,
    manifest-list digest, required platform digests, retrieval time, license identifier, and
    end-of-support date. Every digest is lowercase `sha256:<64 hex>` and is recomputed from fetched
-   manifest bytes.
+   manifest bytes. When direct Docker Hub access is unavailable, the only local exception is the
+   explicitly selected `docker.m.daocloud.io` public mirror; the lock keeps the official canonical
+   repository and records `approved-public-mirror-v1` provenance. No silent or arbitrary mirror
+   fallback exists.
 2. Compose image values are rendered into ignored `infra/local/state/images.env` from that lock.
    Every Compose `image` is a required environment expansion and resolves to the exact canonical
    repository plus locked digest. Dockerfile base entries are already present in the same lock;
@@ -6472,7 +6477,7 @@ git commit -m "build: update Java and Node toolchains"
 
 Expected: bootstrap and parsed assertions pass; exactly the four declared paths are committed with
 Temurin `21.0.11+10` and Node `22.22.1` consistent everywhere. This commit remains independent of
-Task 13's later 31-path manifest: Task 13 subsequently edits the already-maintained `.tool-versions`
+Task 13's later 35-path manifest: Task 13 subsequently edits the already-maintained `.tool-versions`
 path only to add Docker, Buildx, Compose, and Git pins, and does not restage the other three paths.
 
 - [ ] **Step 1: Write RED image-lock and check-result contract tests**
@@ -6608,15 +6613,28 @@ this plan for PostgreSQL 17.5, exact Temporal schema-tool source
 `temporalio/admin-tools:1.28.1-tctl-1.18.4-cli-1.4.1`, exact server source
 `temporalio/server:1.28.1`, Temporal UI 2.39.0,
 WireMock 3.13.1, LocalStack 4.6.0, and OTel Collector 0.129.1. Java sources are fixed to official
-`eclipse-temurin:21.0.11_10-jdk-ubi9-minimal` and
-`eclipse-temurin:21.0.11_10-jre-ubi9-minimal`. It does not invent MinIO tags. MinIO
+`eclipse-temurin:21.0.11_10-jdk-noble` and
+`eclipse-temurin:21.0.11_10-jre-noble`; these fixed Ubuntu 24.04 LTS variants provide both required
+AMD64 and ARM64 manifests, unlike the single-architecture UBI9 Minimal variants. It does not invent MinIO tags. MinIO
 sources are closed required inputs `ACCORD_MINIO_SERVER_SOURCE` and
 `ACCORD_MINIO_CLIENT_SOURCE`; each value must be an immutable-reviewed exact
 `registry/repository:source-tag`, and empty, `latest`, digest-only, tagless, or ambiguous values are
 rejected. Before either MinIO source can enter the lock, evidence must independently verify its SPDX
-license, upstream support/EOS date, and raw linux/amd64 plus linux/arm64 manifests. Until all four
+license, upstream tag/commit, support or project-owned local exception expiry, and raw linux/amd64
+plus linux/arm64 manifests. The committed exception is explicitly `local-foundation-only`, is not
+production authority, expires on 2026-10-27, and binds its own evidence bytes by SHA-256. Until all
 facts are approved, initialization returns `BLOCKED_EXTERNAL_IMAGE_RESOLUTION`, writes no lock, and
 does not guess a public tag or digest.
+
+The lock preserves `approval_scope=local-foundation-only` and `production_authority=false` beside
+that digest for both MinIO roles. Local Compose may consume those roles, but every production image
+publication entry point rejects the complete lock while either non-production authority marker is
+present; a local exception can never be laundered into release provenance by hashing the lock.
+
+On hosts where direct Docker Hub access is blocked, set
+`ACCORD_PUBLIC_IMAGE_MIRROR=docker.m.daocloud.io`. The parser accepts exactly that hostname, applies
+it only to Docker Hub reads, preserves Quay coordinates unchanged, and still hashes every raw index
+and required platform manifest. Any other value is rejected rather than used as an implicit mirror.
 
 The Temporal sources are not copied from this paragraph. The script parses Task 10 provenance,
 requires the exact official coordinates and digest pairs stated in invariant 5, resolves raw
@@ -7116,6 +7134,8 @@ $task13Paths = @(
   'contracts/supply-chain/image-lock.schema.json'
   'contracts/verification/check-result.schema.json'
   'infra/images/images.lock.json'
+  'infra/images/minio-source-approvals.json'
+  'infra/images/minio-source-approval-evidence.json'
   'infra/local/compose.yaml'
   'infra/local/postgres/00-roles-and-databases.sql'
   'infra/local/temporal/server.yaml'
@@ -7139,22 +7159,24 @@ $task13Paths = @(
   'tests/integration/local-foundation.test.mjs'
   'tests/integration/temporal-mtls.test.mjs'
   'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/LocalTemporalPki.java'
+  'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/LocalTemporalPkiWindowsAclTest.java'
   'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/TemporalLocalTopologyIT.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/WindowsTemporalSecretAclPolicy.java'
   'tests/integration/build.gradle'
   '.tool-versions'
   '.gitignore'
 )
-if ($task13Paths.Count -ne 31) { throw 'Task 13 manifest must contain exactly 31 paths' }
+if ($task13Paths.Count -ne 35) { throw 'Task 13 manifest must contain exactly 35 paths' }
 git add -- $task13Paths
 $actual = @(git diff --cached --name-only | Sort-Object)
 $expected = @($task13Paths | Sort-Object)
 if (Compare-Object $expected $actual -SyncWindow 0) {
-  throw 'Task 13 index differs from the exact 31-path manifest'
+  throw 'Task 13 index differs from the exact 35-path manifest'
 }
 git commit -m "build: add digest-locked Temporal mTLS topology"
 ~~~
 
-Expected: the sorted staged set contains exactly the declared 31 paths, including the single image lock and `.tool-versions` core pins, no generated
+Expected: the sorted staged set contains exactly the declared 35 paths, including the single image lock, its two bounded MinIO approval records, and `.tool-versions` core pins, no generated
 PKI/state, no GitHub product mock, and no undeclared Task 12-or-earlier implementation or migration change. The shared
 `tests/integration/build.gradle` is the only intentional pre-existing build path.
 Missing external image resolution leaves FT13 `BLOCKED` and does not produce a partial commit.
@@ -7180,11 +7202,18 @@ unknown or invalid span, metric, and log records cannot escape.
 - Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/GuardedMetricExporter.java`
 - Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/GuardedLogRecordExporter.java`
 - Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/AccordOpenTelemetryConfiguration.java`
+- Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/AccordHttpTelemetryFilter.java`
+- Create: `libs/java/observability/src/main/java/com/inforvans/accord/observability/AccordLogbackOpenTelemetryBridge.java`
+- Create: `libs/java/observability/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`
 - Create: `libs/java/observability/src/test/java/com/inforvans/accord/observability/TelemetryAttributesTest.java`
 - Create: `libs/java/observability/src/test/java/com/inforvans/accord/observability/TelemetryRecordGuardTest.java`
 - Create: `libs/java/observability/src/test/java/com/inforvans/accord/observability/TelemetryExporterGuardTest.java`
+- Create: `libs/java/observability/src/test/java/com/inforvans/accord/observability/AccordHttpTelemetryFilterTest.java`
+- Create: `libs/java/observability/src/test/java/com/inforvans/accord/observability/AccordHttpTelemetryAutoConfigurationTest.java`
 - Create: `tests/security-negative/src/test/java/com/inforvans/accord/security/TelemetryApiBoundaryTest.java`
 - Create: `tests/security-negative/src/test/java/com/inforvans/accord/security/TelemetryLeakTest.java`
+- Modify: `tests/security-negative/build.gradle`
+- Modify: `tests/security-negative/gradle.lockfile`
 - Modify: `libs/java/observability/build.gradle`
 - Modify: `libs/java/observability/gradle.lockfile`
 - Modify: `gradle/libs.versions.toml`
@@ -7503,28 +7532,45 @@ $task14Paths = @(
   'libs/java/observability/src/main/java/com/inforvans/accord/observability/GuardedMetricExporter.java'
   'libs/java/observability/src/main/java/com/inforvans/accord/observability/GuardedLogRecordExporter.java'
   'libs/java/observability/src/main/java/com/inforvans/accord/observability/AccordOpenTelemetryConfiguration.java'
+  'libs/java/observability/src/main/java/com/inforvans/accord/observability/AccordHttpTelemetryFilter.java'
+  'libs/java/observability/src/main/java/com/inforvans/accord/observability/AccordWorkflowTelemetry.java'
+  'libs/java/observability/src/main/java/com/inforvans/accord/observability/AccordLogbackOpenTelemetryBridge.java'
+  'libs/java/observability/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports'
   'libs/java/observability/src/test/java/com/inforvans/accord/observability/TelemetryAttributesTest.java'
   'libs/java/observability/src/test/java/com/inforvans/accord/observability/TelemetryRecordGuardTest.java'
   'libs/java/observability/src/test/java/com/inforvans/accord/observability/TelemetryExporterGuardTest.java'
+  'libs/java/observability/src/test/java/com/inforvans/accord/observability/AccordHttpTelemetryFilterTest.java'
+  'libs/java/observability/src/test/java/com/inforvans/accord/observability/AccordHttpTelemetryAutoConfigurationTest.java'
+  'libs/java/observability/src/test/java/com/inforvans/accord/observability/AccordWorkflowTelemetryTest.java'
   'libs/java/observability/build.gradle'
   'libs/java/observability/gradle.lockfile'
   'tests/security-negative/src/test/java/com/inforvans/accord/security/TelemetryApiBoundaryTest.java'
   'tests/security-negative/src/test/java/com/inforvans/accord/security/TelemetryLeakTest.java'
+  'tests/security-negative/build.gradle'
+  'tests/security-negative/gradle.lockfile'
   'gradle/libs.versions.toml'
   'gradle/verification-metadata.xml'
   'apps/control-plane/api/build.gradle'
   'apps/control-plane/api/gradle.lockfile'
   'apps/control-plane/worker/build.gradle'
   'apps/control-plane/worker/gradle.lockfile'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/reconciliation/FencedReconciliationObservation.java'
+  'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/reconciliation/FencedReconciliationObservationTest.java'
   'apps/webhook-edge/build.gradle'
+  'apps/webhook-edge/src/test/java/com/inforvans/accord/webhookedge/WebhookEdgeBoundaryTest.java'
   'apps/webhook-edge/gradle.lockfile'
   'apps/control-plane/api/src/main/resources/application.yml'
   'apps/control-plane/worker/src/main/resources/application.yml'
   'apps/webhook-edge/src/main/resources/application.yml'
   'infra/local/otel-collector.yaml'
 )
+if ($task14Paths.Count -ne 45) { throw 'Task 14 manifest must contain exactly 45 paths' }
 git add -- $task14Paths
-git diff --cached --name-only
+$actual = @(git diff --cached --name-only | Sort-Object)
+$expected = @($task14Paths | Sort-Object)
+if (Compare-Object $expected $actual -SyncWindow 0) {
+  throw 'Task 14 index differs from the exact 45-path manifest'
+}
 git commit -m "feat: enforce typed fail-closed telemetry"
 ~~~
 
@@ -7541,6 +7587,8 @@ and make Argo CD deploy only an immutable authoritative Accord source SHA.
 **Files:**
 - Create: `contracts/deployment/component-identity.schema.json`
 - Create: `contracts/deployment/promotion-input.schema.json`
+- Create: `contracts/deployment/production-tls-receipt.schema.json`
+- Create: `contracts/deployment/tls-trust-store.schema.json`
 - Create: `infra/helm/accord/Chart.yaml`
 - Create: `infra/helm/accord/values.yaml`
 - Create: `infra/helm/accord/values.schema.json`
@@ -7573,9 +7621,11 @@ and make Argo CD deploy only an immutable authoritative Accord source SHA.
 - Create: `tests/integration/fixtures/deployment/invalid-broad-egress.json`
 - Create: `tests/integration/fixtures/deployment/invalid-plaintext-secret.json`
 
-`values.yaml` contains safe non-secret defaults but no image reference. `render-values.mjs` consumes a
-schema-valid promotion input and writes an ignored rendered values file. Production rendering
-cannot substitute a syntactic test digest for Task 16's verified promotion manifest.
+`values.yaml` contains safe non-secret defaults but no image reference. Test-mode
+`render-values.mjs` consumes a schema-valid fixture promotion and writes an ignored rendered values
+file. Production mode never accepts a caller-supplied promotion: it reruns Task 16's complete
+`verify-release-chain.mjs` over an immutable context/manifest/evidence-index snapshot and derives
+the promotion only from that successful verifier output.
 
 **Authoritative invariants:**
 
@@ -7622,7 +7672,17 @@ cannot substitute a syntactic test digest for Task 16's verified promotion manif
     the authoritative remote. `spec.source.targetRevision` is the exact lowercase remote commit SHA,
     never a branch, tag, `HEAD`, local branch, or remote-tracking guess.
 12. GitHub may host Accord deployment Git and its thin CI adapter. Argo receives no GitLab product
-    token; GitLab remains the product Provider exercised by Task 11/13.
+   token; GitLab remains the product Provider exercised by Task 11/13.
+13. Production release authority is fixed to issuer
+    `https://token.actions.githubusercontent.com`, subject
+    `repo:inforvans/accord:environment:accord-release`, audience `sigstore`, and protected
+    environment `accord-release`. Production rendering binds the complete remote URL/ref/SHA/tree,
+    exact release-manifest digest, selected component image subjects, Accord source DSSE envelope,
+    and release-verifier output digest. Ordinary `renderValues` calls cannot obtain the internal
+    production authority. Deployment verification reruns the same production renderer and requires
+    byte-identical values. Production TLS trust is loaded only from the repository-pinned
+    `contracts/deployment/production-trust-store.json`; its absence is `BLOCKED`, and no CLI option
+    may replace it.
 
 - [ ] **Step 1: Write RED closed identity and promotion contract tests**
 
@@ -7632,8 +7692,9 @@ audience syntax and only its named provider fields.
 
 `promotion-input.schema.json` requires `schema_version`, environment class, authoritative remote
 SHA/tree, three component image repository-digest references, release-manifest digest, DSSE
-envelope digest, verification receipt digest, and creation time. Production requires
-`signature_verified: true` and `scan_policy_passed: true`; test fixtures explicitly use
+envelope digest, verification receipt digest, and creation time. Production documents contain
+`signature_verified: true` and `scan_policy_passed: true` only when derived after the complete
+release verifier succeeds; caller booleans are never authority. Test fixtures explicitly use
 `environment_class: test` and can never render a production release.
 
 `deployment-contract.test.mjs` first proves:
@@ -7655,9 +7716,11 @@ Expected RED: schemas, fixtures, chart, and renderers are absent.
 
 - [ ] **Step 2: Implement closed values and cross-bound Helm resources**
 
-`render-values.mjs` validates promotion input and component identity before producing the Helm
-values. It hashes both inputs into output annotations and refuses a remote SHA/tree or image digest
-mismatch. The three keyed component values have this exact ownership:
+`render-values.mjs` validates promotion input and component identity before producing test Helm
+values. Its production entry point first verifies the fixed release identity, snapshots all release
+inputs, reruns Task 16 verification, derives the promotion, and then uses a private in-process
+authority to render. It hashes both inputs into output annotations and refuses a remote SHA/tree or
+image digest mismatch. The three keyed component values have this exact ownership:
 
 | Component | ServiceAccount | Login/session role | Workload audience |
 | --- | --- | --- | --- |
@@ -7836,6 +7899,8 @@ Argo Application:
 $task15InfrastructurePaths = @(
   'contracts/deployment/component-identity.schema.json'
   'contracts/deployment/promotion-input.schema.json'
+  'contracts/deployment/production-tls-receipt.schema.json'
+  'contracts/deployment/tls-trust-store.schema.json'
   'infra/helm/accord/Chart.yaml'
   'infra/helm/accord/values.yaml'
   'infra/helm/accord/values.schema.json'
@@ -7896,6 +7961,8 @@ repository.
 **Files:**
 - Create: `contracts/ci/ci-context.schema.json`
 - Create: `contracts/dsse-payloads/build-provenance.schema.json`
+- Create: `contracts/supply-chain/artifact-inventory.schema.json`
+- Create: `contracts/supply-chain/artifact-inventory.json`
 - Create: `contracts/supply-chain/release-manifest.schema.json`
 - Create: `contracts/golden-fixtures/supply-chain/ci-context.json`
 - Create: `contracts/golden-fixtures/supply-chain/build-provenance.json`
@@ -7904,6 +7971,8 @@ repository.
 - Create: `apps/webhook-edge/Dockerfile`
 - Create: `apps/control-plane/worker/src/probe/java/com/inforvans/accord/controlplane/worker/probe/WorkerProbe.java`
 - Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/probe/WorkerProbeTest.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/WorkerProbeStatePublisher.java`
+- Modify: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/WorkerScheduling.java`
 - Create: `.dockerignore`
 - Create: `scripts/ci/create-ci-context.mjs`
 - Create: `scripts/ci/adapters/github-actions-context.mjs`
@@ -7919,6 +7988,7 @@ repository.
 - Create: `scripts/ci/verify.ps1`
 - Create: `tests/bootstrap/supply-chain-policy.test.mjs`
 - Create: `tests/bootstrap/ci-provider-neutral.test.mjs`
+- Create: `tests/bootstrap/build-images-cache-integrity.test.mjs`
 - Create: `tests/bootstrap/release-chain.test.mjs`
 - Create: `.github/workflows/verify.yml`
 - Create: `.github/workflows/release-images.yml`
@@ -7955,7 +8025,9 @@ manifest, not third-party lock entries.
    launches `node scripts/ci/verify.mjs` and propagates its exit code.
 5. Dockerfiles are rendered from the `java-build` and `java-runtime` entries in the Task 13 lock.
    Every effective `FROM` is an exact canonical repository digest. Overrides are accepted only when
-   byte-equal to the same locked role/platform reference.
+   byte-equal to the same locked role/platform reference. Before any registry build or release
+   provenance is created, production publication fail-closes if any entry in that lock carries a
+   local-only scope or `production_authority=false`, even when that entry is not a Dockerfile base.
 6. Build stages use a verified content-addressed Gradle cache, `--offline`,
    `--dependency-verification=strict`, and BuildKit `RUN --network=none`. Runtime images are
    shell-free, fixed non-root UIDs, read-only-root compatible, and contain one application JAR.
@@ -8212,6 +8284,8 @@ git diff --check
 $task16Paths = @(
   'contracts/ci/ci-context.schema.json'
   'contracts/dsse-payloads/build-provenance.schema.json'
+  'contracts/supply-chain/artifact-inventory.schema.json'
+  'contracts/supply-chain/artifact-inventory.json'
   'contracts/supply-chain/release-manifest.schema.json'
   'contracts/golden-fixtures/supply-chain/ci-context.json'
   'contracts/golden-fixtures/supply-chain/build-provenance.json'
@@ -8220,6 +8294,8 @@ $task16Paths = @(
   'apps/webhook-edge/Dockerfile'
   'apps/control-plane/worker/src/probe/java/com/inforvans/accord/controlplane/worker/probe/WorkerProbe.java'
   'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/probe/WorkerProbeTest.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/WorkerProbeStatePublisher.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/WorkerScheduling.java'
   'apps/control-plane/worker/build.gradle'
   'apps/control-plane/worker/gradle.lockfile'
   '.dockerignore'
@@ -8239,6 +8315,7 @@ $task16Paths = @(
   'scripts/ci/verify.ps1'
   'tests/bootstrap/supply-chain-policy.test.mjs'
   'tests/bootstrap/ci-provider-neutral.test.mjs'
+  'tests/bootstrap/build-images-cache-integrity.test.mjs'
   'tests/bootstrap/release-chain.test.mjs'
   '.github/workflows/verify.yml'
   '.github/workflows/release-images.yml'
@@ -8263,6 +8340,7 @@ verdicts whose overall result is PASS only when both are PASS for the same evide
 
 **Files:**
 - Create: `contracts/acceptance/blocked-evidence.schema.json`
+- Create: `contracts/acceptance/foundation-bootstrap-result.schema.json`
 - Create: `contracts/acceptance/foundation-verdict.schema.json`
 - Create: `contracts/acceptance/foundation-summary.schema.json`
 - Create: `contracts/golden-fixtures/acceptance/blocked-toolchain.json`
@@ -8274,13 +8352,29 @@ verdicts whose overall result is PASS only when both are PASS for the same evide
 - Create: `scripts/acceptance/run-foundation-acceptance.mjs`
 - Create: `scripts/acceptance/collect-environment-evidence.mjs`
 - Create: `scripts/acceptance/merge-verdicts.mjs`
+- Create: `scripts/verification/verify-offline-dependencies.mjs`
 - Create: `tests/integration/foundation-acceptance.test.mjs`
 - Create: `tests/integration/foundation-demo.test.mjs`
 - Create: `tests/integration/foundation-acceptance.ps1`
 - Create: `tests/integration/verify-sensitive-logs.mjs`
 - Create: `tests/integration/src/test/java/com/inforvans/accord/integration/FoundationProductLoopIT.java`
+- Create: `tests/integration/src/test/java/com/inforvans/accord/integration/FoundationWorkerProcessMain.java`
+- Create: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ContractValidationReconciliationRegistration.java`
+- Create: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationIdentityAdapter.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ContractValidationReconciliationMapper.java`
+- Create: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalReconciliationEventTransport.java`
+- Create: `apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/TemporalReconciliationEventTransportTest.java`
 - Create: `tests/architecture/verify-platform-foundation.mjs`
 - Create: `docs/architecture/platform-foundation.md`
+- Modify: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ContractValidationCommandService.java`
+- Modify: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ContractValidationController.java`
+- Modify: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationHttpConfiguration.java`
+- Modify: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationHttpSecurity.java`
+- Modify: `apps/control-plane/api/src/test/java/com/inforvans/accord/controlplane/http/ContractValidationApiTest.java`
+- Modify: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalRuntimeConfiguration.java`
+- Modify: `apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalWorkerLifecycle.java`
+- Modify: `apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/webhook/WebhookHandler.java`
+- Modify: `docs/superpowers/plans/2026-07-24-accord-platform-foundation-plan.md`
 - Modify: `tests/integration/build.gradle`
 - Modify: `tests/integration/gradle.lockfile`
 - Modify: `gradle/verification-metadata.xml`
@@ -8313,9 +8407,12 @@ receives no generated evidence, lock updates, manifests, or source edits.
    toolchain results, check results, demo evidence, start/end time, and evidence bundle digest.
 6. An environment verdict binds the same SHA/tree/image lock plus remote branch protection, mirror,
    OIDC, registry/referrers, Kubernetes, Argo, PKI, external-secret, production PostgreSQL/RPO/RTO,
-   object capability, restore-test, and signing/notarization evidence. In either verdict,
-   `release_manifest_digest` may be null only when status is `BLOCKED`; `PASS` and `FAIL` require the
-   digest of the exact release manifest under evaluation.
+   object capability, restore-test, and signing/notarization evidence. `PASS` always requires the
+   exact image-lock and release-manifest digests. `BLOCKED` may carry a null digest only when that
+   artifact is unavailable. `FAIL` may carry a null image-lock or release-manifest digest only when
+   its corresponding `00.image-lock` or `00.release-manifest` check explicitly ran and failed; every
+   other `FAIL` must bind the exact artifact digests under evaluation. A missing artifact is never
+   replaced with a fabricated digest.
 7. `blocked-evidence.schema.json` requires common remote SHA, tree SHA, check ID, reason code,
    attempted argv, attempt exit code or null, bounded evidence-digest array, rerun argv, UTC time,
    and accountable owner. Its `TOOLCHAIN` branch is selected only by `BLOCKED_TOOLCHAIN`, requires
@@ -8634,6 +8731,7 @@ After focused schema/unit tests pass, stage only Task 17 source files:
 git diff --check
 $task17Paths = @(
   'contracts/acceptance/blocked-evidence.schema.json'
+  'contracts/acceptance/foundation-bootstrap-result.schema.json'
   'contracts/acceptance/foundation-verdict.schema.json'
   'contracts/acceptance/foundation-summary.schema.json'
   'contracts/golden-fixtures/acceptance/blocked-toolchain.json'
@@ -8645,15 +8743,32 @@ $task17Paths = @(
   'scripts/acceptance/run-foundation-acceptance.mjs'
   'scripts/acceptance/collect-environment-evidence.mjs'
   'scripts/acceptance/merge-verdicts.mjs'
+  'scripts/verification/verify-offline-dependencies.mjs'
+  'apps/web/package.json'
   'tests/integration/foundation-acceptance.test.mjs'
   'tests/integration/foundation-demo.test.mjs'
   'tests/integration/foundation-acceptance.ps1'
   'tests/integration/verify-sensitive-logs.mjs'
   'tests/integration/src/test/java/com/inforvans/accord/integration/FoundationProductLoopIT.java'
+  'tests/integration/src/test/java/com/inforvans/accord/integration/FoundationWorkerProcessMain.java'
+  'apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ContractValidationReconciliationRegistration.java'
+  'apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationIdentityAdapter.java'
+  'apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ContractValidationCommandService.java'
+  'apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ContractValidationController.java'
+  'apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationHttpConfiguration.java'
+  'apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/FoundationHttpSecurity.java'
+  'apps/control-plane/api/src/test/java/com/inforvans/accord/controlplane/http/ContractValidationApiTest.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/ContractValidationReconciliationMapper.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalReconciliationEventTransport.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalRuntimeConfiguration.java'
+  'apps/control-plane/worker/src/main/java/com/inforvans/accord/controlplane/worker/temporal/TemporalWorkerLifecycle.java'
+  'apps/control-plane/worker/src/test/java/com/inforvans/accord/controlplane/worker/temporal/TemporalReconciliationEventTransportTest.java'
+  'apps/webhook-edge/src/main/java/com/inforvans/accord/webhookedge/webhook/WebhookHandler.java'
   'tests/integration/build.gradle'
   'tests/integration/gradle.lockfile'
   'tests/architecture/verify-platform-foundation.mjs'
   'docs/architecture/platform-foundation.md'
+  'docs/superpowers/plans/2026-07-24-accord-platform-foundation-plan.md'
   'gradle/verification-metadata.xml'
   '.gitignore'
 )
@@ -8693,5 +8808,5 @@ this plan's intended implementation paths, and a mechanically complete Task 13-1
 - [x] Task 10 owns exactly 36 active paths, treats `7f973ae` as an immutable clean ancestor, fixes V003 fixture scope, renews an acquired PT8S claim by PT30S inside tx1, bounds six identifier-only heartbeats under `PT2M`/`PT30S`/`PT10S`, and closes observation plus post-tx2-response crash recovery without a production test hook.
 - [x] Task 11 closes application/loader/runtime archive bytes under exact resource budgets and proves all four database/projection readiness combinations with bounded output and final child/reader death.
 - [x] Task 12 backfills V003-era work into one fair three-channel directory, keeps unscoped SQL behind typed directory operations, persists both historical fences, and enforces directory-first duplicate-inbox locking.
-- [x] Task 13 owns exactly 31 paths, mechanically binds both Temporal digest pairs, uses admin-tools for SQL and admin-mTLS namespace setup, lets one nonce-authorized Test worker lock/CAS a one-use attempt from PENDING to RUNNING, and lets only the PT4M Node process-tree supervisor verify the owned runner before CAS completion with exact receipt/XML digests in the hash-closed observation; direct Gradle reruns invalidate old PASS evidence, and unverified MinIO sources remain blocked.
+- [x] Task 13 owns exactly 35 paths, mechanically binds both Temporal digest pairs, uses admin-tools for SQL and admin-mTLS namespace setup, lets one nonce-authorized Test worker lock/CAS a one-use attempt from PENDING to RUNNING, and lets only the PT4M Node process-tree supervisor verify the owned runner before CAS completion with exact receipt/XML digests in the hash-closed observation; direct Gradle reruns invalidate old PASS evidence, and unverified MinIO sources remain blocked.
 - [x] Static scans, task/step numbering, fence balance, unfinished markers, repeated references, and architecture/runtime terms have been checked against this document.

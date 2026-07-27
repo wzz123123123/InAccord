@@ -35,7 +35,12 @@
     },
     "remote_sha": { "$ref": "#/$defs/gitObjectId" },
     "tree_sha": { "$ref": "#/$defs/gitObjectId" },
-    "image_lock_digest": { "$ref": "#/$defs/digest" },
+    "image_lock_digest": {
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/digest" }
+      ]
+    },
     "release_manifest_digest": {
       "anyOf": [
         { "type": "null" },
@@ -107,6 +112,7 @@
       "if": { "properties": { "status": { "const": "PASS" } }, "required": ["status"] },
       "then": {
         "properties": {
+          "image_lock_digest": { "$ref": "#/$defs/digest" },
           "release_manifest_digest": { "$ref": "#/$defs/digest" },
           "checks": { "type": "array", "items": { "$ref": "#/$defs/passCheck" } },
           "toolchain_results": {
@@ -123,7 +129,6 @@
       "if": { "properties": { "status": { "const": "FAIL" } }, "required": ["status"] },
       "then": {
         "properties": {
-          "release_manifest_digest": { "$ref": "#/$defs/digest" },
           "checks": {
             "type": "array",
             "contains": { "$ref": "#/$defs/failCheck" },
@@ -154,20 +159,6 @@
               "properties": { "status": { "enum": ["PASS", "BLOCKED"] } }
             }
           }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "status": { "enum": ["PASS", "FAIL"] }
-        },
-        "required": ["status"]
-      },
-      "then": {
-        "not": {
-          "properties": { "release_manifest_digest": { "type": "null" } },
-          "required": ["release_manifest_digest"]
         }
       }
     },

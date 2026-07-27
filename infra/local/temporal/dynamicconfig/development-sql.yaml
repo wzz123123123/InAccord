@@ -1,0 +1,15 @@
+limit.maxIDLength:
+  - value: 255
+    constraints: {}
+system.enableActivityEagerExecution:
+  - value: true
+    constraints: {}
+frontend.enableClientVersionCheck:
+  - value: true
+    constraints: {}
+history.persistenceMaxQPS:
+  - value: 3000
+    constraints: {}
+frontend.persistenceMaxQPS:
+  - value: 3000
+    constraints: {}

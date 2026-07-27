@@ -183,6 +183,7 @@ class FencedReconciliationObservationTest {
             .containsExactly(UUID.class, java.util.function.Function.class);
         assertThat(publicMethods[0].getGenericReturnType().getTypeName()).isEqualTo("T");
         assertThat(Arrays.stream(WorkerTenantTransactions.class.getDeclaredFields())
+                .filter(field -> !Modifier.isStatic(field.getModifiers()))
                 .map(field -> field.getType().getName()))
             .containsExactly(DSLContext.class.getName());
     }
@@ -532,6 +533,73 @@ class FencedReconciliationObservationTest {
         assertThat(count("domain_event")).isEqualTo(1);
         assertThat(count("outbox_event")).isEqualTo(1);
         assertPersistedEvent(intent, ReconciliationOutcome.CONVERGED);
+    }
+
+    @Test
+    void committedTerminalCompletionEmitsTelemetryAfterTheAtomicCommit() throws Exception {
+        ExternalIntentRef intent = seedOutcomeUnknown("action-terminal-telemetry-001");
+        AtomicInteger telemetrySignals = new AtomicInteger();
+        FencedReconciliationObservation observation = observationWithTelemetry(
+            (lease, timeout) -> new ReconciliationResolution.Succeeded(digest('b'), null),
+            ignored -> {},
+            () -> {
+                telemetrySignals.incrementAndGet();
+                try {
+                    ExternalIntentState committedState = transactions.inTenant(
+                        TENANT_ID,
+                        tx -> store.load(tx, TENANT_ID, intent.intentId())
+                            .orElseThrow()
+                            .state());
+                    assertThat(committedState).isEqualTo(ExternalIntentState.SUCCEEDED);
+                    assertThat(count("domain_event")).isEqualTo(1);
+                    assertThat(count("outbox_event")).isEqualTo(1);
+                } catch (Exception failure) {
+                    throw new AssertionError("terminal telemetry ran before commit", failure);
+                }
+            });
+
+        assertThat(observation.observe(
+                new ReconciliationWorkflowRef(TENANT_ID, intent.intentId())))
+            .isEqualTo(ReconciliationOutcome.CONVERGED);
+
+        assertThat(telemetrySignals).hasValue(1);
+    }
+
+    @Test
+    void stillUnknownCompletionDoesNotEmitSuccessTelemetry() throws Exception {
+        ExternalIntentRef intent = seedOutcomeUnknown("action-unknown-telemetry-001");
+        AtomicInteger telemetrySignals = new AtomicInteger();
+        FencedReconciliationObservation observation = observationWithTelemetry(
+            (lease, timeout) -> new ReconciliationResolution.StillUnknown(
+                "OBSERVATION_INCOMPLETE", null),
+            ignored -> {},
+            telemetrySignals::incrementAndGet);
+
+        assertThat(observation.observe(
+                new ReconciliationWorkflowRef(TENANT_ID, intent.intentId())))
+            .isEqualTo(ReconciliationOutcome.STILL_UNKNOWN);
+
+        assertThat(telemetrySignals).hasValue(0);
+    }
+
+    @Test
+    void rolledBackTerminalCompletionDoesNotEmitSuccessTelemetry() throws Exception {
+        ExternalIntentRef intent = seedOutcomeUnknown("action-rollback-telemetry-001");
+        AtomicInteger telemetrySignals = new AtomicInteger();
+        installTerminalWriteFailureTrigger(TerminalWriteStage.OUTBOX);
+        FencedReconciliationObservation observation = observationWithTelemetry(
+            (lease, timeout) -> new ReconciliationResolution.Succeeded(digest('b'), null),
+            ignored -> {},
+            telemetrySignals::incrementAndGet);
+        try {
+            assertFailure(ReconciliationFailure.Code.RECONCILIATION_INTERNAL, () ->
+                observation.observe(
+                    new ReconciliationWorkflowRef(TENANT_ID, intent.intentId())));
+        } finally {
+            removeTerminalWriteFailureTrigger(TerminalWriteStage.OUTBOX);
+        }
+
+        assertThat(telemetrySignals).hasValue(0);
     }
 
     @Test
@@ -2453,6 +2521,19 @@ class FencedReconciliationObservationTest {
             },
             new ReconciliationRuntimeProperties("reconciler-one", CLAIM_LEASE),
             heartbeats::add);
+    }
+
+    private FencedReconciliationObservation observationWithTelemetry(
+            ProviderObservationPort provider,
+            java.util.function.Consumer<UUID> heartbeat,
+            Runnable terminalSuccessTelemetry) {
+        return new FencedReconciliationObservation(
+            transactions,
+            store,
+            provider,
+            new ReconciliationRuntimeProperties("reconciler-one", CLAIM_LEASE),
+            heartbeat,
+            terminalSuccessTelemetry);
     }
 
     private void assertTerminalReplay(

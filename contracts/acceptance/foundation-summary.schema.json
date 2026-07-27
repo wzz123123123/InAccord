@@ -50,7 +50,12 @@
         "remote_ref": { "type": "string", "pattern": "^refs/[A-Za-z0-9][A-Za-z0-9._/-]{1,1023}$" },
         "remote_sha": { "$ref": "#/$defs/gitObjectId" },
         "tree_sha": { "$ref": "#/$defs/gitObjectId" },
-        "image_lock_digest": { "$ref": "#/$defs/digest" },
+        "image_lock_digest": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/digest" }
+          ]
+        },
         "release_manifest_digest": {
           "anyOf": [
             { "type": "null" },

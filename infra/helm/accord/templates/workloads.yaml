@@ -1,0 +1,231 @@
+{{- $root := . -}}
+{{- range $name := (include "accord.componentNames" . | fromJsonArray) }}
+{{- $component := index $root.Values.components $name }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $component.service_account | quote }}
+  namespace: {{ $root.Release.Namespace | quote }}
+  labels:
+    {{- include "accord.componentLabels" (dict "root" $root "name" $name "component" $component) | nindent 4 }}
+  annotations:
+    {{- include "accord.contractAnnotations" $root | nindent 4 }}
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  minReadySeconds: 10
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name | quote }}
+      app.kubernetes.io/instance: {{ printf "%s-%s" $root.Release.Name $name | quote }}
+  template:
+    metadata:
+      labels:
+        {{- include "accord.componentLabels" (dict "root" $root "name" $name "component" $component) | nindent 8 }}
+        {{- if eq $component.identity.provider "AZURE" }}
+        azure.workload.identity/use: "true"
+        {{- end }}
+      annotations:
+        {{- include "accord.contractAnnotations" $root | nindent 8 }}
+        accord.inforvans.com/external-secret-target: {{ $component.external_secret.target_name | quote }}
+    spec:
+      serviceAccountName: {{ $component.service_account | quote }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ $component.runtime.uid }}
+        runAsGroup: {{ $component.runtime.gid }}
+        fsGroup: {{ $component.runtime.gid }}
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ $name | quote }}
+              app.kubernetes.io/instance: {{ printf "%s-%s" $root.Release.Name $name | quote }}
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ $name | quote }}
+              app.kubernetes.io/instance: {{ printf "%s-%s" $root.Release.Name $name | quote }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: {{ $name | quote }}
+                    app.kubernetes.io/instance: {{ printf "%s-%s" $root.Release.Name $name | quote }}
+      containers:
+        - name: {{ $name | quote }}
+          image: {{ $component.image.reference | quote }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: {{ $component.runtime.uid }}
+            runAsGroup: {{ $component.runtime.gid }}
+            capabilities:
+              drop: [ALL]
+          {{- if ne $name "control-worker" }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          {{- end }}
+          env:
+            - name: ACCORD_COMPONENT
+              value: {{ $name | quote }}
+            - name: ACCORD_DEPLOYMENT_ENVIRONMENT
+              value: {{ $root.Values.environment_class | quote }}
+            - name: ACCORD_SERVICE_VERSION
+              value: {{ $root.Values.contract.remote_sha | quote }}
+            - name: ACCORD_DATABASE_NAME
+              value: {{ $component.database.database_name | quote }}
+            - name: ACCORD_DATABASE_LOGIN_ROLE
+              value: {{ $component.database.login_role | quote }}
+            - name: ACCORD_DATABASE_SESSION_ROLE
+              value: {{ $component.database.session_role | quote }}
+            - name: SPRING_DATASOURCE_URL
+              value: {{ printf "jdbc:postgresql://%s:5432/%s?sslmode=verify-full&sslrootcert=/var/run/accord/secrets/%s" $component.tls.postgres.server_name $component.database.database_name $component.tls.postgres.ca_secret_key | quote }}
+            - name: SPRING_DATASOURCE_USERNAME
+              value: {{ $component.database.login_role | quote }}
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $component.database.secret_name | quote }}
+                  key: {{ $component.database.password_key | quote }}
+            - name: SPRING_DATASOURCE_HIKARI_CONNECTION_INIT_SQL
+              value: {{ printf "SET ROLE %s" $component.database.session_role | quote }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ printf "https://%s:4318" $component.tls.otlp.server_name | quote }}
+            - name: OTEL_EXPORTER_OTLP_CERTIFICATE
+              value: /var/run/accord/secrets/{{ $component.tls.otlp.ca_secret_key }}
+            - name: ACCORD_OTLP_SERVER_NAME
+              value: {{ $component.tls.otlp.server_name | quote }}
+            {{- if eq $name "control-worker" }}
+            - name: ACCORD_PROCESS_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.uid
+            - name: ACCORD_TEMPORAL_ENDPOINT
+              value: {{ printf "grpcs://%s:7233" $component.tls.temporal.server_name | quote }}
+            - name: ACCORD_TEMPORAL_NAMESPACE
+              value: {{ $component.tls.temporal.namespace | quote }}
+            - name: ACCORD_TEMPORAL_RECONCILIATION_TASK_QUEUE
+              value: {{ $component.tls.temporal.task_queue | quote }}
+            - name: ACCORD_TEMPORAL_SERVER_NAME
+              value: {{ $component.tls.temporal.server_name | quote }}
+            - name: ACCORD_TEMPORAL_SECRET_ROOT
+              value: /var/run/accord/secrets
+            - name: ACCORD_TEMPORAL_TRUST_CERTIFICATE
+              value: /var/run/accord/secrets/{{ $component.tls.temporal.ca_secret_key }}
+            - name: ACCORD_TEMPORAL_CLIENT_CERTIFICATE
+              value: /var/run/accord/secrets/{{ $component.tls.temporal.client_certificate_secret_key }}
+            - name: ACCORD_TEMPORAL_CLIENT_PRIVATE_KEY
+              value: /var/run/accord/secrets/{{ $component.tls.temporal.client_private_key_secret_key }}
+            - name: ACCORD_WORKER_PROBE_STATE_ENABLED
+              value: "true"
+            {{- end }}
+            {{- if eq $name "webhook-edge" }}
+            - name: ACCORD_WEBHOOK_EDGE_BINDINGS_FILE
+              value: /var/run/accord/secrets/{{ $component.external_secret.target_keys.webhook_bindings }}
+            {{- end }}
+          {{- if eq $component.probes.type "HTTP" }}
+          livenessProbe:
+            httpGet:
+              path: {{ $component.probes.liveness_path | quote }}
+              port: {{ $component.probes.port_name | quote }}
+              scheme: HTTP
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: {{ $component.probes.readiness_path | quote }}
+              port: {{ $component.probes.port_name | quote }}
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          {{- else }}
+          livenessProbe:
+            exec:
+              command:
+                - {{ $component.probes.java_path | quote }}
+                - -jar
+                - {{ $component.probes.jar | quote }}
+                - {{ $component.probes.liveness_argument | quote }}
+                - "30"
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - {{ $component.probes.java_path | quote }}
+                - -jar
+                - {{ $component.probes.jar | quote }}
+                - {{ $component.probes.readiness_argument | quote }}
+                - "15"
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          {{- end }}
+          resources:
+            {{- toYaml $component.resources | nindent 12 }}
+          volumeMounts:
+            - name: runtime-secrets
+              mountPath: /var/run/accord/secrets
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            {{- if ne $component.identity.provider "KUBERNETES" }}
+            - name: workload-identity-token
+              mountPath: /var/run/secrets/accord-identity
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: runtime-secrets
+          secret:
+            secretName: {{ $component.external_secret.target_name | quote }}
+            defaultMode: 0440
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
+        {{- if ne $component.identity.provider "KUBERNETES" }}
+        - name: workload-identity-token
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  audience: {{ $component.identity.audience | quote }}
+                  expirationSeconds: {{ $component.identity.token_expiration_seconds }}
+                  path: token
+        {{- end }}
+{{- end }}

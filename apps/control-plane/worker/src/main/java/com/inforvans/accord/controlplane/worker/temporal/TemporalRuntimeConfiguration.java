@@ -5,6 +5,8 @@ import com.inforvans.accord.controlplane.worker.reconciliation.ProviderObservati
 import com.inforvans.accord.controlplane.worker.reconciliation.ReconciliationRuntimeProperties;
 import com.inforvans.accord.controlplane.worker.reconciliation.WorkerTenantTransactions;
 import com.inforvans.accord.controlplane.worker.temporal.workflow.ReadOnlyReconciliationActivity;
+import com.inforvans.accord.controlplane.worker.WorkerScheduling;
+import com.inforvans.accord.observability.AccordWorkflowTelemetry;
 import com.inforvans.accord.reliability.JooqExternalIntentStore;
 import java.io.IOException;
 import org.jooq.DSLContext;
@@ -57,9 +59,10 @@ public class TemporalRuntimeConfiguration {
             WorkerTenantTransactions transactions,
             JooqExternalIntentStore store,
             ProviderObservationPort provider,
-            ReconciliationRuntimeProperties properties) {
+            ReconciliationRuntimeProperties properties,
+            AccordWorkflowTelemetry telemetry) {
         return new FencedReconciliationObservation(
-            transactions, store, provider, properties);
+            transactions, store, provider, properties, telemetry);
     }
 
     @Bean
@@ -74,5 +77,22 @@ public class TemporalRuntimeConfiguration {
             TemporalServiceStubsFactory stubsFactory,
             ReadOnlyReconciliationActivity activity) {
         return new TemporalWorkerLifecycle(properties, stubsFactory, activity);
+    }
+
+    @Bean
+    WorkerScheduling.DestinationAdapter contractValidationReconciliationDestination(
+            TemporalWorkerLifecycle lifecycle,
+            TemporalConnectionProperties properties,
+            WorkerTenantTransactions transactions,
+            JooqExternalIntentStore intents,
+            ReconciliationRuntimeProperties reconciliation) {
+        return new WorkerScheduling.DestinationAdapter(
+            TemporalReconciliationEventTransport.DESTINATION,
+            new TemporalReconciliationEventTransport(
+                lifecycle::workflowClient,
+                properties.taskQueue(),
+                transactions,
+                intents,
+                reconciliation));
     }
 }

@@ -12,6 +12,7 @@ import java.nio.file.attribute.AclFileAttributeView;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.UserPrincipal;
 import java.nio.file.attribute.UserPrincipalLookupService;
+import java.nio.file.attribute.UserPrincipalNotFoundException;
 import java.util.EnumSet;
 import java.util.Set;
 
@@ -32,18 +33,41 @@ public final class WindowsTemporalSecretAclPolicy implements TemporalSecretAclPo
             FileSystems.getDefault().getUserPrincipalLookupService();
         this.approved = Set.of(
             lookup.lookupPrincipalByName(System.getProperty("user.name")),
-            lookup.lookupPrincipalByName("S-1-5-18"),
-            lookup.lookupPrincipalByGroupName("S-1-5-32-544"));
+            lookupPrincipalByName(lookup, "S-1-5-18", "NT AUTHORITY\\SYSTEM"),
+            lookupPrincipalByGroupName(
+                lookup, "S-1-5-32-544", "BUILTIN\\Administrators"));
     }
 
     WindowsTemporalSecretAclPolicy(Set<UserPrincipal> approved) {
         this.approved = Set.copyOf(approved);
     }
 
+    private static UserPrincipal lookupPrincipalByName(
+            UserPrincipalLookupService lookup, String sid, String fallbackName)
+            throws IOException {
+        try {
+            return lookup.lookupPrincipalByName(sid);
+        } catch (UserPrincipalNotFoundException missingSid) {
+            return lookup.lookupPrincipalByName(fallbackName);
+        }
+    }
+
+    private static UserPrincipal lookupPrincipalByGroupName(
+            UserPrincipalLookupService lookup, String sid, String fallbackName)
+            throws IOException {
+        try {
+            return lookup.lookupPrincipalByGroupName(sid);
+        } catch (UserPrincipalNotFoundException missingSid) {
+            return lookup.lookupPrincipalByGroupName(fallbackName);
+        }
+    }
+
     @Override
     public void validate(Path path, BasicFileAttributes attributes, SecretKind kind)
             throws IOException {
-        if (attributes.fileKey() == null) {
+        if (attributes.isSymbolicLink()
+                || kind == SecretKind.DIRECTORY && !attributes.isDirectory()
+                || kind != SecretKind.DIRECTORY && !attributes.isRegularFile()) {
             throw new IOException("invalid Temporal secret ACL");
         }
         AclFileAttributeView view = Files.getFileAttributeView(

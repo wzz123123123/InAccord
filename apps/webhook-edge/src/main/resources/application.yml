@@ -47,7 +47,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus
   endpoint:
     health:
       probes:
@@ -61,7 +61,39 @@ management:
       show-details: never
     shutdown:
       access: none
+  tracing:
+    baggage:
+      enabled: false
+    sampling:
+      probability: ${ACCORD_TRACE_SAMPLE_RATE:0.1}
+  metrics:
+    tags:
+      service: ${spring.application.name}
 
 accord:
   webhook-edge:
     bindings-file: ${ACCORD_WEBHOOK_EDGE_BINDINGS_FILE}
+  telemetry:
+    endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318}
+    trust-certificate: ${OTEL_EXPORTER_OTLP_CERTIFICATE:}
+    server-name: ${ACCORD_OTLP_SERVER_NAME:}
+    environment: ${ACCORD_DEPLOYMENT_ENVIRONMENT:local}
+    service-version: ${ACCORD_SERVICE_VERSION:0.1.0}
+    queue-capacity: 2048
+    batch-size: 256
+    export-timeout: PT2S
+    shutdown-timeout: PT5S
+    sentinels: ${ACCORD_TELEMETRY_SENTINELS:}
+
+otel:
+  instrumentation:
+    http:
+      client:
+        capture-request-headers: ""
+        capture-response-headers: ""
+      server:
+        capture-request-headers: ""
+        capture-response-headers: ""
+    logback-appender:
+      capture-mdc-attributes: ""
+      capture-experimental-attributes: false

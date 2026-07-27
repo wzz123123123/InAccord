@@ -1,0 +1,106 @@
+log:
+  stdout: true
+  level: info
+
+persistence:
+  numHistoryShards: 4
+  defaultStore: default
+  visibilityStore: visibility
+  datastores:
+    default:
+      sql:
+        pluginName: postgres12
+        driverName: postgres12
+        databaseName: accord_temporal
+        connectAddr: postgres:5432
+        connectProtocol: tcp
+        user: accord_temporal_runtime_login
+        password: ${TEMPORAL_DB_PASSWORD}
+        maxConns: 20
+        maxConnLifetime: 1h
+    visibility:
+      sql:
+        pluginName: postgres12
+        driverName: postgres12
+        databaseName: accord_temporal_visibility
+        connectAddr: postgres:5432
+        connectProtocol: tcp
+        user: accord_temporal_runtime_login
+        password: ${TEMPORAL_VISIBILITY_DB_PASSWORD}
+        maxConns: 10
+        maxConnLifetime: 1h
+
+global:
+  membership:
+    maxJoinDuration: 30s
+    broadcastAddress: temporal-server
+  pprof:
+    port: 7936
+  metrics:
+    tags:
+      type: local-foundation
+  tls:
+    frontend:
+      server:
+        certFile: /run/accord/temporal/pki/server.pem
+        keyFile: /run/accord/temporal/pki/server-key.pem
+        clientCaFiles:
+          - /run/accord/temporal/pki/client-ca.pem
+        requireClientAuth: true
+        minVersion: "1.3"
+      client:
+        serverName: temporal
+        disableHostVerification: false
+        rootCaFiles:
+          - /run/accord/temporal/pki/server-ca.pem
+        certFile: /run/accord/temporal/pki/server-internode.pem
+        keyFile: /run/accord/temporal/pki/server-internode-key.pem
+
+services:
+  frontend:
+    rpc:
+      grpcPort: 7233
+      membershipPort: 6933
+      bindOnLocalHost: false
+  matching:
+    rpc:
+      grpcPort: 7235
+      membershipPort: 6935
+      bindOnLocalHost: false
+  history:
+    rpc:
+      grpcPort: 7234
+      membershipPort: 6934
+      bindOnLocalHost: false
+  worker:
+    rpc:
+      grpcPort: 7239
+      membershipPort: 6939
+      bindOnLocalHost: false
+
+clusterMetadata:
+  enableGlobalNamespace: false
+  failoverVersionIncrement: 10
+  masterClusterName: active
+  currentClusterName: active
+  clusterInformation:
+    active:
+      enabled: true
+      initialFailoverVersion: 1
+      rpcAddress: temporal-server:7233
+
+dcRedirectionPolicy:
+  policy: noop
+
+archival:
+  history:
+    state: disabled
+  visibility:
+    state: disabled
+
+publicClient:
+  hostPort: temporal-server:7233
+
+dynamicConfigClient:
+  filepath: /etc/temporal/config/dynamicconfig/development-sql.yaml
+  pollInterval: 10s

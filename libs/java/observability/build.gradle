@@ -3,7 +3,36 @@ plugins {
 }
 
 dependencies {
-    testImplementation platform(libs.junit.bom)
+    api platform('io.opentelemetry:opentelemetry-bom:1.49.0')
+    api 'io.opentelemetry:opentelemetry-api'
+    api 'io.opentelemetry:opentelemetry-sdk'
+    api 'io.opentelemetry:opentelemetry-sdk-trace'
+    api 'io.opentelemetry:opentelemetry-sdk-metrics'
+    api 'io.opentelemetry:opentelemetry-sdk-logs'
+    api('io.opentelemetry:opentelemetry-exporter-otlp') {
+        exclude group: 'io.opentelemetry', module: 'opentelemetry-exporter-sender-okhttp'
+    }
+    runtimeOnly 'io.opentelemetry:opentelemetry-exporter-sender-jdk'
+    compileOnly enforcedPlatform(libs.spring.boot.bom)
+    compileOnly 'org.springframework.boot:spring-boot-autoconfigure'
+    compileOnly 'org.springframework:spring-web'
+    compileOnly('org.apache.tomcat.embed:tomcat-embed-core') {
+        exclude group: 'org.apache.tomcat', module: 'tomcat-annotations-api'
+    }
+    compileOnly 'io.micrometer:micrometer-core'
+    compileOnly 'ch.qos.logback:logback-classic'
     testImplementation libs.junit.jupiter
     testImplementation libs.assertj.core
+    testImplementation enforcedPlatform(libs.spring.boot.bom)
+    testImplementation 'org.springframework.boot:spring-boot-autoconfigure'
+    testImplementation 'org.springframework.boot:spring-boot-test'
+    testImplementation 'org.springframework:spring-test'
+    testImplementation 'org.springframework:spring-web'
+    testImplementation 'org.springframework:spring-webmvc'
+    testImplementation('org.apache.tomcat.embed:tomcat-embed-core') {
+        exclude group: 'org.apache.tomcat', module: 'tomcat-annotations-api'
+    }
+    testImplementation 'io.micrometer:micrometer-core'
+    testImplementation 'ch.qos.logback:logback-classic'
+    testImplementation 'io.opentelemetry:opentelemetry-sdk-testing'
 }

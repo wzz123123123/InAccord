@@ -7,6 +7,8 @@ import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
 import java.util.UUID;
 import org.springframework.http.ResponseEntity;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -14,6 +16,8 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 final class ContractValidationController {
+    private static final Logger LOGGER = LoggerFactory.getLogger(
+        ContractValidationController.class);
     private final FoundationHttpRequestPolicy requestPolicy;
     private final ContractValidationJson json;
     private final HttpIdempotencyFingerprint fingerprint;
@@ -44,7 +48,9 @@ final class ContractValidationController {
             principal, validationId, parsed, decoded.bodyDigest());
         StoredHttpResult result = command.execute(
             principal, validationId, parsed, decoded, requestFingerprint);
-        return ProblemAdvice.response(result);
+        ResponseEntity<byte[]> response = ProblemAdvice.response(result);
+        LOGGER.info("foundation_api_request_completed");
+        return response;
     }
 }
 

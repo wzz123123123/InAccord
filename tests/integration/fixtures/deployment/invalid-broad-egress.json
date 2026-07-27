@@ -1,0 +1,13 @@
+{
+  "case": "INVALID_BROAD_EGRESS",
+  "component": "control-worker",
+  "destination": "temporal",
+  "route": {
+    "mode": "AUDITED_CIDR",
+    "cidrs": ["0.0.0.0/0"],
+    "evidence_digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+    "evidence_expires_at": "2099-01-01T00:00:00Z",
+    "owner": "platform-network",
+    "ports": [{ "protocol": "TCP", "port": 7233 }]
+  }
+}

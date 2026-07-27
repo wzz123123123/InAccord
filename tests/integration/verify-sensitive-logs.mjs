@@ -41,7 +41,7 @@ export function scanSensitiveText(text, sentinels = []) {
     .map(([rule_id, count]) => ({ rule_id, count }));
 }
 
-export async function verifySensitiveLogs({ services, sentinels = [] }) {
+export async function verifySensitiveLogs({ services, texts = [], sentinels = [] }) {
   const aggregated = new Map();
   let filesScanned = 0;
   for (const entry of [...services].sort((left, right) => left.service.localeCompare(right.service))) {
@@ -57,6 +57,17 @@ export async function verifySensitiveLogs({ services, sentinels = [] }) {
       }
     }
   }
+  for (const entry of [...texts].sort((left, right) => left.service.localeCompare(right.service))) {
+    validateServiceName(entry.service);
+    if (typeof entry.text !== 'string'
+        || Buffer.byteLength(entry.text, 'utf8') > MAX_FILE_BYTES) {
+      throw safeError('LOG_TEXT_INVALID');
+    }
+    for (const match of scanSensitiveText(entry.text, sentinels)) {
+      const key = `${entry.service}\u0000${match.rule_id}`;
+      aggregated.set(key, (aggregated.get(key) ?? 0) + match.count);
+    }
+  }
   const matches = [...aggregated.entries()]
     .map(([key, count]) => {
       const [service, rule_id] = key.split('\u0000');
@@ -69,7 +80,7 @@ export async function verifySensitiveLogs({ services, sentinels = [] }) {
     });
   return {
     schema_version: '1.0.0',
-    status: matches.length === 0 ? 'PASS' : 'FAIL',
+    outcome: matches.length === 0 ? 'PASS' : 'FAIL',
     files_scanned: filesScanned,
     matches,
   };
@@ -137,8 +148,8 @@ async function main() {
     if (!Array.isArray(sentinels)) throw safeError('SENTINEL_FILE_INVALID');
     const result = await verifySensitiveLogs({ services: options.services, sentinels });
     if (options.output) await atomicWriteJson(options.output, result);
-    process.stdout.write(`sensitive-log-verification: ${result.status}\n`);
-    process.exitCode = result.status === 'PASS' ? 0 : 1;
+    process.stdout.write(`sensitive-log-verification: ${result.outcome}\n`);
+    process.exitCode = result.outcome === 'PASS' ? 0 : 1;
   } catch (error) {
     const code = typeof error?.code === 'string' ? error.code : 'UNEXPECTED_ERROR';
     process.stderr.write(`sensitive-log-verification: FAIL (${code})\n`);

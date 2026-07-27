@@ -1,7 +1,7 @@
 import { verify as verifySignature } from 'node:crypto';
 import { lstat, readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   assertNoSensitiveMaterial,
   atomicWriteJson,
@@ -13,6 +13,13 @@ import {
 
 const OWNER = 'platform-engineering';
 const MAX_RECEIPT_AGE_MS = 24 * 60 * 60 * 1000;
+const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const PINNED_TRUST_STORE = resolve(
+  REPOSITORY_ROOT,
+  'contracts',
+  'acceptance',
+  'environment-trust-store.json',
+);
 const EXTERNAL_CHECKS = [
   externalCheck('01.branch-protection', 'BLOCKED_BRANCH_PROTECTION', 'authoritative-branch-protection', 'accord-source-host', 'branch-protection-receipt-v1'),
   externalCheck('02.mirror', 'BLOCKED_MIRROR', 'authenticated-artifact-mirror', 'enterprise-mirror', 'mirror-provenance-receipt-v1'),
@@ -45,11 +52,12 @@ export async function collectEnvironmentEvidence({
   outputPath,
   now = new Date(),
 }) {
+  if (trustStorePath !== undefined) throw safeError('TRUST_STORE_OVERRIDE_FORBIDDEN');
   const startedAt = now.toISOString();
   const code = JSON.parse(await readFile(resolve(codeVerdictPath), 'utf8'));
   await validateVerdictDocument(code);
   if (code.kind !== 'CODE') throw safeError('CODE_VERDICT_REQUIRED');
-  const trustStore = trustStorePath ? await loadTrustStore(trustStorePath) : null;
+  const trustStore = await loadPinnedTrustStore();
   const specs = [...EXTERNAL_CHECKS];
   if (code.checks.some((check) => check.check_id === '08.foundation-demo' && check.status === 'PASS')) {
     specs.push(PROVIDER_CHECK);
@@ -115,9 +123,10 @@ async function collectOneReceipt({ spec, code, receiptsDirectory, trustStore, no
     return blockedCheck(spec, code, now, []);
   }
   const receiptDigest = sha256(bytes);
-  if (trustStore === null) return blockedCheck(spec, code, now, [receiptDigest]);
   try {
     const receipt = JSON.parse(bytes.toString('utf8'));
+    verifyReceiptStructure({ receipt, spec, code, now });
+    if (trustStore === null) return blockedCheck(spec, code, now, [receiptDigest]);
     verifyReceipt({ receipt, receiptDigest, spec, code, trustStore, now });
     return passedCheck(spec, now, receiptDigest);
   } catch {
@@ -126,6 +135,26 @@ async function collectOneReceipt({ spec, code, receiptsDirectory, trustStore, no
 }
 
 export function verifyReceipt({ receipt, spec, code, trustStore, now = new Date() }) {
+  verifyReceiptStructure({ receipt, spec, code, now });
+  const trustedKey = trustStore.keys.find((entry) => (
+    entry.authority === receipt.authority
+    && entry.key_id === receipt.signing.key_id
+    && entry.algorithm === 'Ed25519'
+  ));
+  if (!trustedKey) throw safeError('EXTERNAL_RECEIPT_SIGNER_UNTRUSTED');
+  const unsigned = structuredClone(receipt);
+  delete unsigned.signing.signature;
+  const valid = verifySignature(
+    null,
+    Buffer.from(canonicalJson(unsigned), 'utf8'),
+    trustedKey.public_key_pem,
+    Buffer.from(receipt.signing.signature, 'base64'),
+  );
+  if (!valid) throw safeError('EXTERNAL_RECEIPT_SIGNATURE_INVALID');
+  return true;
+}
+
+export function verifyReceiptStructure({ receipt, spec, code, now = new Date() }) {
   assertExactKeys(receipt, [
     'schema_version',
     'check_id',
@@ -175,31 +204,21 @@ export function verifyReceipt({ receipt, spec, code, trustStore, now = new Date(
   ) {
     throw safeError('EXTERNAL_RECEIPT_TIME_INVALID');
   }
-  const trustedKey = trustStore.keys.find((entry) => (
-    entry.authority === receipt.authority
-    && entry.key_id === receipt.signing.key_id
-    && entry.algorithm === 'Ed25519'
-  ));
-  if (!trustedKey) throw safeError('EXTERNAL_RECEIPT_SIGNER_UNTRUSTED');
-  const unsigned = structuredClone(receipt);
-  delete unsigned.signing.signature;
-  const valid = verifySignature(
-    null,
-    Buffer.from(canonicalJson(unsigned), 'utf8'),
-    trustedKey.public_key_pem,
-    Buffer.from(receipt.signing.signature, 'base64'),
-  );
-  if (!valid) throw safeError('EXTERNAL_RECEIPT_SIGNATURE_INVALID');
   return true;
 }
 
-async function loadTrustStore(path) {
-  const resolved = resolve(path);
-  const info = await lstat(resolved);
+async function loadPinnedTrustStore() {
+  let info;
+  try {
+    info = await lstat(PINNED_TRUST_STORE);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
   if (!info.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024) {
     throw safeError('TRUST_STORE_INVALID');
   }
-  const store = JSON.parse(await readFile(resolved, 'utf8'));
+  const store = JSON.parse(await readFile(PINNED_TRUST_STORE, 'utf8'));
   assertExactKeys(store, ['schema_version', 'keys']);
   if (store.schema_version !== '1.0.0' || !Array.isArray(store.keys) || store.keys.length === 0) {
     throw safeError('TRUST_STORE_INVALID');
@@ -292,7 +311,6 @@ function parseCli(argv) {
     const key = {
       '--code': 'codeVerdictPath',
       '--receipts': 'receiptsDirectory',
-      '--trust-store': 'trustStorePath',
       '--output': 'outputPath',
     }[flag];
     if (!key) throw safeError('ARGUMENTS_INVALID');

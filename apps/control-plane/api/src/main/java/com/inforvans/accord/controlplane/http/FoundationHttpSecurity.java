@@ -18,6 +18,7 @@ import java.util.HexFormat;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.authorization.AuthorizationDecision;
@@ -65,6 +66,7 @@ class FoundationHttpSecurity {
     SecurityFilterChain foundationSecurityFilterChain(
             HttpSecurity http,
             FoundationProblemFactory problems,
+            ObjectProvider<FoundationIdentityAdapter> identityAdapters,
             @Value("${accord.security.allowed-origin}") String allowedOrigin) throws Exception {
         http
             .csrf(csrf -> csrf.ignoringRequestMatchers(FOUNDATION_MUTATION))
@@ -93,6 +95,8 @@ class FoundationHttpSecurity {
             .addFilterAfter(
                 new FoundationBrowserCsrfFilter(allowedOrigin, problems),
                 AuthorizationFilter.class);
+        identityAdapters.orderedStream().forEach(adapter ->
+            http.addFilterBefore(adapter, AuthorizationFilter.class));
         return http.build();
     }
 }

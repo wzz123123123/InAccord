@@ -1,0 +1,126 @@
+name: release-accordctl
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+          - runner: windows-2025
+            platform: windows/amd64
+          - runner: macos-13
+            platform: darwin/amd64
+          - runner: macos-14
+            platform: darwin/arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    environment: accord-release
+    env:
+      ACCORD_PLATFORM_EVIDENCE: ${{ matrix.platform == 'windows/amd64' && vars.ACCORD_WINDOWS_AMD64_PLATFORM_EVIDENCE || matrix.platform == 'darwin/amd64' && vars.ACCORD_DARWIN_AMD64_PLATFORM_EVIDENCE || matrix.platform == 'darwin/arm64' && vars.ACCORD_DARWIN_ARM64_PLATFORM_EVIDENCE || '' }}
+      ACCORD_PLATFORM_EVIDENCE_BUNDLE: ${{ matrix.platform == 'windows/amd64' && vars.ACCORD_WINDOWS_AMD64_PLATFORM_EVIDENCE_BUNDLE || matrix.platform == 'darwin/amd64' && vars.ACCORD_DARWIN_AMD64_PLATFORM_EVIDENCE_BUNDLE || matrix.platform == 'darwin/arm64' && vars.ACCORD_DARWIN_ARM64_PLATFORM_EVIDENCE_BUNDLE || '' }}
+      ACCORD_PLATFORM_EVIDENCE_RECEIPT: ${{ matrix.platform == 'windows/amd64' && vars.ACCORD_WINDOWS_AMD64_PLATFORM_EVIDENCE_RECEIPT || matrix.platform == 'darwin/amd64' && vars.ACCORD_DARWIN_AMD64_PLATFORM_EVIDENCE_RECEIPT || matrix.platform == 'darwin/arm64' && vars.ACCORD_DARWIN_ARM64_PLATFORM_EVIDENCE_RECEIPT || '' }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@1e60f620b9541dca1515405becc46822e103e051
+        with:
+          node-version: 22.22.1
+      - uses: actions/setup-java@7a445ee88d4e23b52c33c877a7915e2354c30b0b
+        with:
+          distribution: temurin
+          java-version: '21.0.11+10'
+      - name: Bind protected semantic tag
+        shell: bash
+        run: |
+          node scripts/ci/adapters/github-actions-context.mjs --expected-repository inforvans/accord --registry-repository ghcr.io/inforvans/accord --protected-environment accord-release --environment-class production --output build/ci/adapter.json
+          node scripts/ci/create-ci-context.mjs --adapter-json build/ci/adapter.json --output build/ci/context.json
+      - name: Seed verified Gradle cache
+        shell: bash
+        env:
+          ACCORD_GRADLE_PLUGIN_MIRROR_URL: ${{ vars.ACCORD_GRADLE_PLUGIN_MIRROR_URL }}
+          ACCORD_MAVEN_MIRROR_URL: ${{ vars.ACCORD_MAVEN_MIRROR_URL }}
+          ACCORD_APPROVED_MIRROR_HOSTS: ${{ vars.ACCORD_APPROVED_MIRROR_HOSTS }}
+        run: node scripts/ci/seed-gradle-cache.mjs > build/ci/cache-result.json
+      - name: Build and smoke-test native package
+        shell: bash
+        run: |
+          CACHE_SHA256=$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('build/ci/cache-result.json')).cache_sha256)")
+          PLATFORM_EVIDENCE_ARGS=()
+          if [[ -n "$ACCORD_PLATFORM_EVIDENCE" || -n "$ACCORD_PLATFORM_EVIDENCE_BUNDLE" || -n "$ACCORD_PLATFORM_EVIDENCE_RECEIPT" ]]; then
+            PLATFORM_EVIDENCE_ARGS=(--platform-evidence "$ACCORD_PLATFORM_EVIDENCE" --platform-evidence-bundle "$ACCORD_PLATFORM_EVIDENCE_BUNDLE" --platform-evidence-receipt "$ACCORD_PLATFORM_EVIDENCE_RECEIPT")
+          fi
+          node scripts/ci/package-accordctl.mjs --context build/ci/context.json --cache-sha256 "$CACHE_SHA256" --platform "${{ matrix.platform }}" --output "build/ci/accordctl-${{ matrix.platform == 'linux/amd64' && 'linux-amd64' || matrix.platform == 'windows/amd64' && 'windows-amd64' || matrix.platform == 'darwin/amd64' && 'darwin-amd64' || 'darwin-arm64' }}.json" "${PLATFORM_EVIDENCE_ARGS[@]}" --require-ga-evidence
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: accordctl-${{ matrix.platform == 'linux/amd64' && 'linux-amd64' || matrix.platform == 'windows/amd64' && 'windows-amd64' || matrix.platform == 'darwin/amd64' && 'darwin-amd64' || 'darwin-arm64' }}
+          path: |
+            build/ci/accordctl-*.json
+            build/ci/platform-evidence/**
+            cmd/accordctl/build/distributions/*.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  attest-and-promote:
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: accord-release
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@1e60f620b9541dca1515405becc46822e103e051
+        with:
+          node-version: 22.22.1
+      - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: accordctl-*
+          path: build/ci/packages
+      - name: Rebind protected semantic tag
+        run: |
+          node scripts/ci/adapters/github-actions-context.mjs --expected-repository inforvans/accord --registry-repository ghcr.io/inforvans/accord --protected-environment accord-release --environment-class production --output build/ci/adapter.json
+          node scripts/ci/create-ci-context.mjs --adapter-json build/ci/adapter.json --output build/ci/context.json
+      - name: Restore archives at their digest-bound fact paths
+        run: |
+          mkdir -p cmd/accordctl/build/distributions build/ci/platform-evidence
+          find build/ci/packages -type f -name 'accordctl-*.zip' -exec cp {} cmd/accordctl/build/distributions/ \;
+          find build/ci/packages -type f -path '*/platform-evidence/*' -exec cp {} build/ci/platform-evidence/ \;
+      - name: Validate package SBOMs and scans
+        run: node scripts/ci/generate-sboms.mjs --context build/ci/context.json --facts build/ci/packages/accordctl-linux-amd64/accordctl-linux-amd64.json --facts build/ci/packages/accordctl-windows-amd64/accordctl-windows-amd64.json --facts build/ci/packages/accordctl-darwin-amd64/accordctl-darwin-amd64.json --facts build/ci/packages/accordctl-darwin-arm64/accordctl-darwin-arm64.json --output build/ci/sboms/index.json
+      - name: Scan package subjects
+        run: node scripts/ci/scan-artifacts.mjs --context build/ci/context.json --sboms build/ci/sboms/index.json --output build/ci/scans/index.json
+      - name: Sign, attest, attach, and verify
+        run: |
+          node scripts/ci/attest-artifacts.mjs --context build/ci/context.json --facts build/ci/packages/accordctl-linux-amd64/accordctl-linux-amd64.json --facts build/ci/packages/accordctl-windows-amd64/accordctl-windows-amd64.json --facts build/ci/packages/accordctl-darwin-amd64/accordctl-darwin-amd64.json --facts build/ci/packages/accordctl-darwin-arm64/accordctl-darwin-arm64.json --sboms build/ci/sboms/index.json --scans build/ci/scans/index.json --output build/ci/release-manifest.json --evidence-index build/ci/evidence-index.json
+          node scripts/ci/verify-release-chain.mjs --context build/ci/context.json --manifest build/ci/release-manifest.json --evidence-index build/ci/evidence-index.json --evidence-root "$GITHUB_WORKSPACE" --output build/ci/promotion-input.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verified-accordctl-promotion
+          path: build/ci/promotion-input.json
+          if-no-files-found: error
+          retention-days: 30

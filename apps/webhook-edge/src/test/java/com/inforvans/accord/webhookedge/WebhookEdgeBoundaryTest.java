@@ -82,6 +82,10 @@ class WebhookEdgeBoundaryTest {
             "org.springframework.boot.loader.launch.JarLauncher";
     private static final String LOADER_SERVICE =
             "META-INF/services/java.nio.file.spi.FileSystemProvider";
+    private static final String TRUSTED_OBSERVABILITY_PROJECT = ":libs:java:observability";
+    private static final String ACCORD_PACKAGE_ROOT = "com/inforvans/accord/";
+    private static final String OBSERVABILITY_PACKAGE_ROOT =
+            "com/inforvans/accord/observability/";
     private static final byte[] LOADER_SERVICE_CONTENTS =
             "org.springframework.boot.loader.nio.file.NestedFileSystemProvider\n"
                     .getBytes(StandardCharsets.UTF_8);
@@ -104,7 +108,9 @@ class WebhookEdgeBoundaryTest {
             "org/gitlab4j/",
             "org/kohsuke/github/");
     private static final List<String> FORBIDDEN_NESTED_PACKAGE_PATHS = List.of(
-            "com/inforvans/accord/",
+            "com/inforvans/accord/controlplane/",
+            "com/inforvans/accord/reliability/",
+            "com/inforvans/accord/database/",
             "org/eclipse/jgit/",
             "org/gitlab4j/",
             "org/kohsuke/github/");
@@ -196,6 +202,8 @@ class WebhookEdgeBoundaryTest {
                 .isNotEmpty()
                 .anyMatch(value -> value.contains("org.springframework.boot:spring-boot"))
                 .anyMatch(value -> value.contains("org.postgresql:postgresql"))
+                .anyMatch(value -> value.startsWith(
+                        "PROJECT|" + TRUSTED_OBSERVABILITY_PROJECT + "|"))
                 .noneMatch(value -> FORBIDDEN_ARTIFACT_FRAGMENTS.stream().anyMatch(value::contains));
     }
 
@@ -259,6 +267,20 @@ class WebhookEdgeBoundaryTest {
                     .hasMessageContaining("BOOT-INF/lib/library-" + fixtureIndex));
         }
         assertAll(assertions);
+    }
+
+    @Test
+    void bootJarGateRejectsChangedTrustedObservabilityArtifact(@TempDir Path temporary)
+            throws Exception {
+        Map<String, byte[]> entries = validSyntheticBootJarEntries();
+        String trustedLibrary = trustedObservabilityLibraries().keySet().iterator().next();
+        entries.put(trustedLibrary, mutateFirstByte(entries.get(trustedLibrary)));
+        Path artifact = temporary.resolve("changed-observability.jar");
+        writeZip(artifact, entries);
+
+        assertThatThrownBy(() -> assertBootJarBoundary(artifact))
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining("trusted observability library SHA-256 mismatch");
     }
 
     @Test
@@ -492,7 +514,8 @@ class WebhookEdgeBoundaryTest {
     }
 
     @Test
-    void buildDeclaresAnIndependentBootRuntimeWithoutProjectDependencies() throws Exception {
+    void buildDeclaresAnIndependentBootRuntimeWithOnlyTheTelemetryFoundationProject()
+            throws Exception {
         Path root = repositoryRoot();
         String build = Files.readString(
                 root.resolve("apps/webhook-edge/build.gradle"), StandardCharsets.UTF_8);
@@ -506,11 +529,14 @@ class WebhookEdgeBoundaryTest {
                 .contains("implementation libs.spring.boot.jooq")
                 .contains("runtimeOnly libs.postgresql")
                 .contains("testImplementation libs.flyway.core")
-                .contains("testImplementation libs.testcontainers.postgresql")
-                .doesNotContain("project(");
+                .contains("testImplementation libs.testcontainers.postgresql");
         assertThat(dependencies)
+                .contains("implementation project(':libs:java:observability')")
                 .doesNotContain("control-plane")
                 .doesNotContain("reliability");
+        assertThat(dependencies.replace(
+                        "implementation project(':libs:java:observability')", ""))
+                .doesNotContain("project(");
     }
 
     @Test
@@ -794,7 +820,10 @@ class WebhookEdgeBoundaryTest {
         Path scratch = Files.createTempDirectory("webhook-edge-boundary-");
         try {
             new BootJarBoundaryScanner(
-                            scratch, expectedApplicationEntries(), expectedLoaderEntries())
+                            scratch,
+                            expectedApplicationEntries(),
+                            expectedLoaderEntries(),
+                            trustedObservabilityLibraries())
                     .verify(artifact);
         } finally {
             deleteRecursively(scratch);
@@ -984,6 +1013,30 @@ class WebhookEdgeBoundaryTest {
         return expectedEntries(loaderReferenceContents());
     }
 
+    private static Map<String, ExpectedEntry> trustedObservabilityLibraries() throws IOException {
+        String serialized = System.getProperty("accord.webhook-edge.runtime-coordinates");
+        if (serialized == null) {
+            throw expectedBoundary("runtime coordinates are unavailable");
+        }
+        List<String> projects = serialized.lines()
+                .filter(value -> value.startsWith("PROJECT|"))
+                .toList();
+        if (projects.size() != 1) {
+            throw expectedBoundary("trusted observability project artifact is not unique");
+        }
+        String[] fields = projects.get(0).split("\\|", -1);
+        if (fields.length != 5
+                || !TRUSTED_OBSERVABILITY_PROJECT.equals(fields[1])
+                || !fields[2].matches("observability-[A-Za-z0-9.+_-]+[.]jar")
+                || !fields[3].matches("[1-9][0-9]*")
+                || !fields[4].matches("[0-9a-f]{64}")) {
+            throw expectedBoundary("trusted observability project artifact is malformed");
+        }
+        return Map.of(
+                "BOOT-INF/lib/" + fields[2],
+                new ExpectedEntry(Long.parseLong(fields[3]), fields[4]));
+    }
+
     private static Map<String, ExpectedEntry> expectedEntries(Map<String, byte[]> contents) {
         Map<String, ExpectedEntry> expected = new LinkedHashMap<>();
         contents.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> expected.put(
@@ -1094,6 +1147,7 @@ class WebhookEdgeBoundaryTest {
         private final Path scratch;
         private final Map<String, ExpectedEntry> expectedApplicationEntries;
         private final Map<String, ExpectedEntry> expectedLoaderEntries;
+        private final Map<String, ExpectedEntry> trustedObservabilityLibraries;
         private long startedAtNanos;
         private int nextArchive;
         private int outerEntries;
@@ -1105,10 +1159,12 @@ class WebhookEdgeBoundaryTest {
         private BootJarBoundaryScanner(
                 Path scratch,
                 Map<String, ExpectedEntry> expectedApplicationEntries,
-                Map<String, ExpectedEntry> expectedLoaderEntries) {
+                Map<String, ExpectedEntry> expectedLoaderEntries,
+                Map<String, ExpectedEntry> trustedObservabilityLibraries) {
             this.scratch = scratch;
             this.expectedApplicationEntries = Map.copyOf(expectedApplicationEntries);
             this.expectedLoaderEntries = Map.copyOf(expectedLoaderEntries);
+            this.trustedObservabilityLibraries = Map.copyOf(trustedObservabilityLibraries);
         }
 
         private void verify(Path artifact) throws IOException {
@@ -1125,6 +1181,7 @@ class WebhookEdgeBoundaryTest {
             Set<String> entries = new LinkedHashSet<>();
             Set<String> applicationEntries = new LinkedHashSet<>();
             Set<String> loaderEntries = new LinkedHashSet<>();
+            Set<String> trustedLibraries = new LinkedHashSet<>();
             ZipFile jar;
             try {
                 jar = new ZipFile(artifact.toFile());
@@ -1179,7 +1236,7 @@ class WebhookEdgeBoundaryTest {
                         loaderEntries.add(name);
                     }
                     if (name.startsWith("BOOT-INF/lib/")) {
-                        copyAndScanLibrary(jar, entry);
+                        copyAndScanLibrary(jar, entry, trustedLibraries);
                     }
                 }
                 verifyManifest(jar);
@@ -1202,6 +1259,12 @@ class WebhookEdgeBoundaryTest {
             if (!loaderEntries.equals(expectedLoaderEntries.keySet())) {
                 throw boundary(describeSetDifference(
                         "Boot loader entries", expectedLoaderEntries.keySet(), loaderEntries));
+            }
+            if (!trustedLibraries.equals(trustedObservabilityLibraries.keySet())) {
+                throw boundary(describeSetDifference(
+                        "trusted observability libraries",
+                        trustedObservabilityLibraries.keySet(),
+                        trustedLibraries));
             }
             checkElapsed();
         }
@@ -1272,7 +1335,8 @@ class WebhookEdgeBoundaryTest {
             }
         }
 
-        private void copyAndScanLibrary(ZipFile outer, ZipEntry library) throws IOException {
+        private void copyAndScanLibrary(
+                ZipFile outer, ZipEntry library, Set<String> trustedLibraries) throws IOException {
             checkElapsed();
             if (library.getSize() <= 0) {
                 throw boundary(library.getName() + ": empty nested archive");
@@ -1304,10 +1368,21 @@ class WebhookEdgeBoundaryTest {
             if (library.getSize() >= 0 && copied != library.getSize()) {
                 throw boundary(library.getName() + ": nested archive size mismatch");
             }
-            scanArchive(copy, library.getName(), 1);
+            ExpectedEntry trusted = trustedObservabilityLibraries.get(library.getName());
+            if (trusted != null) {
+                if (copied != trusted.bytes()
+                        || !sha256(Files.readAllBytes(copy)).equals(trusted.sha256())) {
+                    throw boundary(library.getName()
+                            + ": trusted observability library SHA-256 mismatch");
+                }
+                trustedLibraries.add(library.getName());
+            }
+            scanArchive(copy, library.getName(), 1, trusted != null);
         }
 
-        private void scanArchive(Path archive, String displayName, int depth) throws IOException {
+        private void scanArchive(
+                Path archive, String displayName, int depth, boolean trustedObservability)
+                throws IOException {
             checkElapsed();
             if (depth > MAX_DEPTH) {
                 throw boundary(displayName + ": nested archive depth budget exceeded");
@@ -1351,7 +1426,10 @@ class WebhookEdgeBoundaryTest {
                         continue;
                     }
                     regularEntries++;
-                    if (containsAny(name, FORBIDDEN_NESTED_PACKAGE_PATHS)) {
+                    if (containsAny(name, FORBIDDEN_NESTED_PACKAGE_PATHS)
+                            || name.startsWith(ACCORD_PACKAGE_ROOT)
+                                    && !(trustedObservability
+                                            && name.startsWith(OBSERVABILITY_PACKAGE_ROOT))) {
                         throw boundary(displayName + "!/" + name
                                 + ": forbidden nested class path");
                     }
@@ -1363,7 +1441,7 @@ class WebhookEdgeBoundaryTest {
                             displayName + "!/" + name
                                     + ": per-archive expanded byte budget exceeded");
                     if (read.archive() != null) {
-                        scanArchive(read.archive(), displayName + "!/" + name, depth + 1);
+                        scanArchive(read.archive(), displayName + "!/" + name, depth + 1, false);
                     }
                 }
                 if (regularEntries == 0) {
@@ -1539,6 +1617,15 @@ class WebhookEdgeBoundaryTest {
             entries.putAll(applicationOutputContents());
             entries.putAll(loaderReferenceContents());
             entries.put(LOADER_SERVICE, LOADER_SERVICE_CONTENTS);
+            try (ZipFile packaged = new ZipFile(bootJar().toFile())) {
+                for (String name : trustedObservabilityLibraries().keySet()) {
+                    ZipEntry library = packaged.getEntry(name);
+                    if (library == null || library.isDirectory()) {
+                        throw expectedBoundary("trusted observability library is absent");
+                    }
+                    entries.put(name, packaged.getInputStream(library).readAllBytes());
+                }
+            }
         } catch (IOException exception) {
             throw new IllegalStateException("authoritative archive output unavailable", exception);
         }

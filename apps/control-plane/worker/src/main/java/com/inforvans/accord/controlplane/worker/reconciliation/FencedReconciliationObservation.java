@@ -6,6 +6,7 @@ import com.inforvans.accord.controlplane.worker.temporal.workflow.Reconciliation
 import com.inforvans.accord.controlplane.worker.temporal.workflow.ReconciliationOutcome;
 import com.inforvans.accord.controlplane.worker.temporal.workflow.ReconciliationWorkflowRef;
 import com.inforvans.accord.platformkernel.CanonicalJson;
+import com.inforvans.accord.observability.AccordWorkflowTelemetry;
 import com.inforvans.accord.reliability.DomainEvent;
 import com.inforvans.accord.reliability.ExternalIntentSnapshot;
 import com.inforvans.accord.reliability.ExternalIntentState;
@@ -33,6 +34,7 @@ public final class FencedReconciliationObservation implements ReconciliationObse
     private final ProviderObservationPort provider;
     private final ReconciliationRuntimeProperties properties;
     private final Consumer<UUID> heartbeat;
+    private final Runnable terminalSuccessTelemetry;
 
     public FencedReconciliationObservation(
             WorkerTenantTransactions transactions,
@@ -40,7 +42,20 @@ public final class FencedReconciliationObservation implements ReconciliationObse
             ProviderObservationPort provider,
             ReconciliationRuntimeProperties properties) {
         this(transactions, store, provider, properties,
-            intentId -> Activity.getExecutionContext().heartbeat(intentId));
+            intentId -> Activity.getExecutionContext().heartbeat(intentId),
+            () -> {});
+    }
+
+    public FencedReconciliationObservation(
+            WorkerTenantTransactions transactions,
+            JooqExternalIntentStore store,
+            ProviderObservationPort provider,
+            ReconciliationRuntimeProperties properties,
+            AccordWorkflowTelemetry telemetry) {
+        this(transactions, store, provider, properties,
+            intentId -> Activity.getExecutionContext().heartbeat(intentId),
+            Objects.requireNonNull(telemetry, "telemetry")
+                ::recordProviderReconciliationSuccess);
     }
 
     FencedReconciliationObservation(
@@ -49,11 +64,23 @@ public final class FencedReconciliationObservation implements ReconciliationObse
             ProviderObservationPort provider,
             ReconciliationRuntimeProperties properties,
             Consumer<UUID> heartbeat) {
+        this(transactions, store, provider, properties, heartbeat, () -> {});
+    }
+
+    FencedReconciliationObservation(
+            WorkerTenantTransactions transactions,
+            JooqExternalIntentStore store,
+            ProviderObservationPort provider,
+            ReconciliationRuntimeProperties properties,
+            Consumer<UUID> heartbeat,
+            Runnable terminalSuccessTelemetry) {
         this.transactions = Objects.requireNonNull(transactions, "transactions");
         this.store = Objects.requireNonNull(store, "store");
         this.provider = Objects.requireNonNull(provider, "provider");
         this.properties = Objects.requireNonNull(properties, "properties");
         this.heartbeat = Objects.requireNonNull(heartbeat, "heartbeat");
+        this.terminalSuccessTelemetry = Objects.requireNonNull(
+            terminalSuccessTelemetry, "terminalSuccessTelemetry");
     }
 
     @Override
@@ -145,6 +172,9 @@ public final class FencedReconciliationObservation implements ReconciliationObse
         budget.heartbeat(ref.intentId(), heartbeat);
         if (deferredFailure != null) {
             throw deferredFailure;
+        }
+        if (outcome != ReconciliationOutcome.STILL_UNKNOWN) {
+            terminalSuccessTelemetry.run();
         }
         return outcome;
     }

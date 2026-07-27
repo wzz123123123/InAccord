@@ -1,0 +1,19 @@
+{{- $root := . -}}
+{{- range $name := (include "accord.componentNames" . | fromJsonArray) }}
+{{- $component := index $root.Values.components $name }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $component.service_account | quote }}
+  namespace: {{ $root.Release.Namespace | quote }}
+  labels:
+    {{- include "accord.componentLabels" (dict "root" $root "name" $name "component" $component) | nindent 4 }}
+spec:
+  minAvailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name | quote }}
+      app.kubernetes.io/instance: {{ printf "%s-%s" $root.Release.Name $name | quote }}
+{{- end }}
