@@ -1039,14 +1039,18 @@ class JooqCommandGateTest {
                 "validation", AGGREGATE_ID, version, Duration.ofHours(1));
             return null;
         });
-        try (Connection connection = adminConnection();
-             PreparedStatement update = connection.prepareStatement("""
+        try (Connection connection = adminConnection()) {
+            connection.setAutoCommit(false);
+            setTenantContext(connection);
+            try (PreparedStatement update = connection.prepareStatement("""
                  UPDATE idempotency_result
                  SET response_headers = '{"X-Nested":{"unsafe":true}}'::jsonb
                  WHERE tenant_id=? AND actor_id=? AND route_key=? AND idempotency_key=?
                  """)) {
-            bindKey(update, key);
-            assertEquals(1, update.executeUpdate());
+                bindKey(update, key);
+                assertEquals(1, update.executeUpdate());
+            }
+            connection.commit();
         }
 
         assertThrows(
@@ -1104,7 +1108,7 @@ class JooqCommandGateTest {
                 }
             }));
             assertTrue(conflictInsertFinished.await(5, SECONDS));
-            Future<Integer> deleted = executor.submit(() -> inWorkerTenant(tx -> tx.execute("""
+            Future<Integer> deleted = executor.submit(() -> inAdminTenant(tx -> tx.execute("""
                 DELETE FROM idempotency_result
                 WHERE tenant_id=? AND actor_id=? AND route_key=? AND idempotency_key=?
                 """, key.tenantId(), key.actorId(), key.routeKey(), key.idempotencyKey())));
@@ -1180,6 +1184,12 @@ class JooqCommandGateTest {
 
     private <T> T inWorkerTenant(SqlWork<T> work) throws Exception {
         try (Connection connection = openWorkerConnection()) {
+            return runTransaction(connection, true, work);
+        }
+    }
+
+    private <T> T inAdminTenant(SqlWork<T> work) throws Exception {
+        try (Connection connection = adminConnection()) {
             return runTransaction(connection, true, work);
         }
     }
