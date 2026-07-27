@@ -129,7 +129,7 @@ $settings = Get-Content -Raw -Encoding utf8 settings.gradle
 }
 $toolVersions = Get-Content -Encoding utf8 .tool-versions
 $expectedTools = [ordered]@{
-  java = 'temurin-21.0.7+6.0.LTS'; gradle = '8.14.3'; nodejs = '22.17.0';
+  java = 'temurin-21.0.11+10'; gradle = '8.14.3'; nodejs = '22.22.1';
   pnpm = '10.12.4'; python = '3.12.11'; uv = '0.7.13'; buf = '1.55.1';
   helm = '3.17.3'; opentofu = '1.9.1'; k6 = '0.57.0';
   conftest = '0.61.2'; kubeconform = '0.7.0'; syft = '1.27.1';

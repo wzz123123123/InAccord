@@ -129,7 +129,7 @@ The backend task that adds an action-bearing response owns the OpenAPI conforman
 - Create: `apps/web/src/main.tsx`
 - Create: `apps/web/src/app/App.tsx`
 
-The platform-foundation plan Task 1 is a hard prerequisite. It owns the repository bootstrap and creates every file marked `Modify` or `Verify` above with Node `22.17.0`, pnpm `10.12.4`, React `19.1.0`, TypeScript `5.8.3`, and Vite `7.0.2`. This task preserves those pins and extends that single workspace; it does not recreate manifests, introduce a second lockfile, or replace foundation scripts and dependencies unrelated to the web application.
+The platform-foundation plan Task 1 is a hard prerequisite. It owns the repository bootstrap and creates every file marked `Modify` or `Verify` above with Node `22.22.1`, pnpm `10.12.4`, React `19.1.0`, TypeScript `5.8.3`, and Vite `7.0.2`. This task preserves those pins and extends that single workspace; it does not recreate manifests, introduce a second lockfile, or replace foundation scripts and dependencies unrelated to the web application.
 
 - [ ] **Step 1: Write the failing extension contract test**
 
@@ -146,7 +146,7 @@ test('web workspace extends the locked foundation toolchain', async () => {
   const workspace = await readFile(new URL('../../pnpm-workspace.yaml', import.meta.url), 'utf8');
 
   assert.equal(root.packageManager, 'pnpm@10.12.4');
-  assert.equal(root.engines.node, '22.17.0');
+  assert.equal(root.engines.node, '22.22.1');
   assert.equal(web.dependencies.react, '19.1.0');
   assert.match(web.dependencies['react-router'], /^7\./);
   assert.match(web.dependencies['@tanstack/react-query'], /^5\./);
