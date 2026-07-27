@@ -62,10 +62,11 @@ abstract class PostgreSqlReliabilityTestSupport {
     @BeforeEach
     void clearRows() throws Exception {
         try (Connection connection = adminConnection();
-             Statement statement = connection.createStatement()) {
+            Statement statement = connection.createStatement()) {
             statement.execute("""
-                TRUNCATE TABLE external_call_intent, inbox_message, outbox_event,
-                  domain_event, aggregate_head, idempotency_result CASCADE
+                TRUNCATE TABLE outbox_delivery_receipt,inbox_handler_receipt,
+                  external_call_intent,inbox_message,outbox_event,domain_event,
+                  aggregate_head,idempotency_result,reliability_tenant_work CASCADE
                 """);
         }
     }
@@ -94,6 +95,19 @@ abstract class PostgreSqlReliabilityTestSupport {
             ControlPlaneTestRoles.WORKER_PASSWORD,
             "accord_worker",
             tenantId);
+    }
+
+    protected Connection openUnscopedWorker() throws Exception {
+        return openRoleWithoutTenant(
+            ControlPlaneTestRoles.WORKER_LOGIN,
+            ControlPlaneTestRoles.WORKER_PASSWORD,
+            "accord_worker");
+    }
+
+    protected <T> T inUnscopedWorker(SqlWork<T> work) throws Exception {
+        try (Connection connection = openUnscopedWorker()) {
+            return runTransaction(connection, work);
+        }
     }
 
     protected Connection openApi(UUID tenantId) throws Exception {
@@ -131,6 +145,20 @@ abstract class PostgreSqlReliabilityTestSupport {
             statement.execute("SET ROLE " + roleName);
         }
         setTenant(connection, tenantId);
+        return connection;
+    }
+
+    private Connection openRoleWithoutTenant(
+            String login, String password, String roleName) throws Exception {
+        Connection connection = DriverManager.getConnection(
+            postgres.getJdbcUrl(), login, password);
+        connection.setAutoCommit(false);
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("SET ROLE " + roleName);
+        } catch (Exception error) {
+            connection.close();
+            throw error;
+        }
         return connection;
     }
 

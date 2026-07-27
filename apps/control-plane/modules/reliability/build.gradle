@@ -13,6 +13,7 @@ dependencies {
     testImplementation enforcedPlatform(libs.slf4j.bom)
     testImplementation libs.junit.jupiter
     testImplementation libs.assertj.core
+    testImplementation libs.jqwik
     testImplementation testFixtures(project(':database:control-plane'))
     testImplementation libs.flyway.core
     testImplementation libs.flyway.postgresql

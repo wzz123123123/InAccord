@@ -56,8 +56,26 @@ class ReliableDeliveryMigrationTest {
                 ControlPlaneTestRoles.MIGRATOR_PASSWORD)
             .initSql("SET ROLE accord_migrator")
             .locations("classpath:db/migration")
+            .target("002")
             .load()
             .migrate();
+    }
+
+    @Test
+    void recordsTheExactV002HistoricalChecksum() throws Exception {
+        try (Connection connection = adminConnection();
+             Statement statement = connection.createStatement();
+             ResultSet rows = statement.executeQuery("""
+                 SELECT version,checksum,success
+                 FROM flyway_schema_history
+                 WHERE version='002'
+                 """)) {
+            assertThat(rows.next()).isTrue();
+            assertThat(rows.getString(1)).isEqualTo("002");
+            assertThat(rows.getInt(2)).isEqualTo(997992209);
+            assertThat(rows.getBoolean(3)).isTrue();
+            assertThat(rows.next()).isFalse();
+        }
     }
 
     @AfterAll

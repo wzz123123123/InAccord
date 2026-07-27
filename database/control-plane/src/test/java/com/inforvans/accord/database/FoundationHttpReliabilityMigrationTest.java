@@ -42,8 +42,26 @@ final class FoundationHttpReliabilityMigrationTest {
                 ControlPlaneTestRoles.MIGRATOR_PASSWORD)
             .initSql("SET ROLE accord_migrator")
             .locations("classpath:db/migration")
+            .target("003")
             .load()
             .migrate();
+    }
+
+    @Test
+    void recordsTheExactV003HistoricalChecksum() throws Exception {
+        try (Connection connection = adminConnection();
+             Statement statement = connection.createStatement();
+             java.sql.ResultSet rows = statement.executeQuery("""
+                 SELECT version,checksum,success
+                 FROM flyway_schema_history
+                 WHERE version='003'
+                 """)) {
+            org.junit.jupiter.api.Assertions.assertTrue(rows.next());
+            org.junit.jupiter.api.Assertions.assertEquals("003", rows.getString(1));
+            org.junit.jupiter.api.Assertions.assertEquals(2145439011, rows.getInt(2));
+            org.junit.jupiter.api.Assertions.assertTrue(rows.getBoolean(3));
+            org.junit.jupiter.api.Assertions.assertFalse(rows.next());
+        }
     }
 
     @AfterAll

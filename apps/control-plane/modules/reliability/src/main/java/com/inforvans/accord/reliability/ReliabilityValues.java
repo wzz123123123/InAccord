@@ -26,6 +26,11 @@ final class ReliabilityValues {
         Pattern.compile("^[a-z][a-z0-9_.-]+$");
     private static final Pattern ERROR_CODE =
         Pattern.compile("^[A-Z][A-Z0-9_]{0,127}$");
+    private static final Pattern OPAQUE_RECEIPT_ID =
+        Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$");
+    private static final Pattern SENSITIVE_RECEIPT_ID = Pattern.compile(
+        "(?i)(authorization|credential|secret|password|cookie|session|csrf|"
+            + "bearer|basic|token|glpat|ghp|whsec|private|pem)");
     private static final Set<String> EXACT_INTEGER_PAYLOAD_SCHEMAS =
         Set.of("contract-validation.completed/1.0.0");
 
@@ -95,6 +100,16 @@ final class ReliabilityValues {
     static String errorCode(String value) {
         if (value == null || !ERROR_CODE.matcher(value).matches()) {
             throw new IllegalArgumentException("errorCode is not normalized");
+        }
+        return value;
+    }
+
+    static String receiptId(String value) {
+        if (value == null
+                || !OPAQUE_RECEIPT_ID.matcher(value).matches()
+                || URI_PREFIX.matcher(value).find()
+                || SENSITIVE_RECEIPT_ID.matcher(value).find()) {
+            throw new IllegalArgumentException("receiptId is not a safe opaque identifier");
         }
         return value;
     }

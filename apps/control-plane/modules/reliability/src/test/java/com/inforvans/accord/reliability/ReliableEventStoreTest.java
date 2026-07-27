@@ -37,6 +37,34 @@ class ReliableEventStoreTest extends PostgreSqlReliabilityTestSupport {
     }
 
     @Test
+    void firstMessageInsertsSignalExactlyOneDirectoryRowAndRollbackSignalsNothing()
+            throws Exception {
+        inApi(TENANT_ID, tx -> {
+            store.append(tx, event(1), outbox());
+            return null;
+        });
+        assertEquals(1, count("reliability_tenant_work"));
+
+        assertThrows(IllegalStateException.class, () -> inApi(OTHER_TENANT_ID, tx -> {
+            store.append(tx, new DomainEvent(
+                OTHER_TENANT_ID, UUID.randomUUID(), "tenant", OTHER_TENANT_ID.toString(),
+                "requirement", UUID.randomUUID(), 1, "requirement.changed", "1.0.0",
+                UUID.randomUUID(), UUID.randomUUID(), "user-1", "{}",
+                OffsetDateTime.parse("2026-07-26T00:00:00Z")), outbox());
+            throw new IllegalStateException("force rollback");
+        }));
+        assertEquals(1, count("reliability_tenant_work"));
+    }
+
+    @Test
+    void firstInboxAcceptanceCreatesVisibleTenantWork() throws Exception {
+        assertInstanceOf(InboxAcceptance.Accepted.class,
+            inWorker(TENANT_ID, tx -> store.acceptInbox(
+                tx, inbox("directory-message", digest('d')))));
+        assertEquals(1, count("reliability_tenant_work"));
+    }
+
+    @Test
     void inboxNaturalKeyDeduplicatesDigestAndRejectsChangedDigest() throws Exception {
         InboxMessage first = inbox("message-1", digest('a'));
         assertInstanceOf(
