@@ -1,0 +1,58 @@
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "predicate": {
+    "artifact": {
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "immutable_locator": "registry.example.invalid/accord/control-plane-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "kind": "image",
+      "platform": "linux/amd64"
+    },
+    "builder": {
+      "audience": "sigstore",
+      "issuer": "https://issuer.example.invalid",
+      "subject": "repo:accord:ref:refs/heads/foundation"
+    },
+    "ci": {
+      "run_id": "fixture-run-1",
+      "system": "test",
+      "workflow_id": "fixture-workflow-1"
+    },
+    "domain": "accord.build-provenance.v1",
+    "materials": {
+      "dependency_locks": [
+        {
+          "path": "gradle.lockfile",
+          "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "image_lock_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "parameters": {
+      "network": "none",
+      "platform": "linux/amd64",
+      "reproducible": true,
+      "source_date_epoch": 1785024000
+    },
+    "sboms": {
+      "cyclonedx_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "spdx_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "scan_sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "source": {
+      "base_sha": "2222222222222222222222222222222222222222",
+      "remote_ref": "refs/heads/foundation",
+      "remote_sha": "1111111111111111111111111111111111111111",
+      "remote_url": "ssh://git.example.invalid/accord.git",
+      "tree_sha": "3333333333333333333333333333333333333333"
+    }
+  },
+  "predicateType": "https://schemas.accord.inforvans.com/provenance/build/v1",
+  "subject": [
+    {
+      "digest": {
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "name": "registry.example.invalid/accord/control-plane-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}

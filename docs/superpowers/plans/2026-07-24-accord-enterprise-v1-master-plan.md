@@ -4,7 +4,7 @@
 
 **Goal:** Deliver the complete production Accord Enterprise V1, from tenant-safe requirement intake through source-free Agent analysis, controlled Git delivery, exact-candidate acceptance, recovery, and evidence-derived GA certification.
 
-**Architecture:** A Java 21 Spring Modulith control plane owns business truth in PostgreSQL and runs as separately permissioned API and worker processes; Temporal only coordinates retries and waits. Independent Java 21 services isolate webhook ingress, signed Agent Pack download, signing, requirement publication, strict merging, attachment scanning, and emergency operations without sharing identities or privileged credentials. A Java/Picocli `accordctl` ships as a jlink runtime image, a Python/Pydantic Agent Runtime performs typed source-free model work, and a React/Vite SPA renders server-owned state and actions. All boundaries are versioned through JSON Schema, OpenAPI, protobuf/gRPC with mTLS, RFC 8785 JCS, and DSSE, and all deployment artifacts are Kubernetes/Helm/OpenTofu/Argo CD resources.
+**Architecture:** A Java 21 Spring Modulith control plane owns business truth in PostgreSQL and runs as separately permissioned API and worker processes; Temporal only coordinates retries and waits. Independent Java 21 services isolate webhook ingress, signed Agent Pack download, signing, Provider connection, credential resolution, strict merging, attachment scanning, and emergency operations without sharing identities or privileged credentials. Signed Requirement Baselines, Development Packages, Project Context, and Patches remain in Accord/OSS; branch release creates only zero-diff refs through typed Provider APIs, while developers alone clone, edit, commit, and push customer source. A Java/Picocli `accordctl` ships as a jlink runtime image, a Python/Pydantic Agent Runtime performs typed source-free model work, and a React/Vite SPA renders server-owned state and actions. All boundaries are versioned through JSON Schema, OpenAPI, protobuf/gRPC with mTLS, RFC 8785 JCS, and DSSE, and all deployment artifacts are Kubernetes/Helm/OpenTofu/Argo CD resources.
 
 **Tech Stack:** Java 21, Gradle 8.14.3 Groovy DSL, Spring Boot 3.5.3, Spring Modulith 1.4.1, Picocli 4.7.7, jlink, jOOQ 3.19.24, Flyway 11.8.2, PostgreSQL 17.5, Temporal, Python 3.12, Pydantic v2, React 19.1, TypeScript 5.8, Vite 7, JSON Schema 2020-12, OpenAPI 3.1, protobuf/gRPC+mTLS, RFC 8785 JCS, DSSE, OSS/S3-compatible object storage, Kubernetes, Helm, OpenTofu, Argo CD, OpenTelemetry, Playwright, Testcontainers, pytest, JUnit 5, AssertJ, jqwik, and Cosign.
 
@@ -12,7 +12,7 @@
 
 ## Specification Binding And Delivery Rule
 
-This plan implements `requirements-agent-platform-design.md` at SHA-256 `EB662C6A0FB2B0192AAE20D4DD2DD520DB29BD5E554141210C41F2C338A10BB1`. The approved runtime binding is `docs/superpowers/specs/2026-07-25-accord-java-python-runtime-design.md`. Recompute both digests before every milestone review. A changed digest requires an explicit specification or runtime-design review and updated coverage matrix; an implementer must never silently implement against a different document.
+This plan implements `requirements-agent-platform-design.md` at normalized UTF-8/LF SHA-256 `0755A08228254311588EE0B867AFEBED6CD49E26B0FCCB790247BFDA31AB2C77`. The approved runtime binding is `docs/superpowers/specs/2026-07-25-accord-java-python-runtime-design.md` at normalized UTF-8/LF SHA-256 `46DE7309CB28F8E59B3FDAB4D6FA664AE4D932FC7F517741681CC25C3B84E4E1`. Recompute both digests with the exact normalization function below before every milestone review; raw platform-native line endings are not part of the identity. A changed digest requires an explicit specification or runtime-design review and updated coverage matrix; an implementer must never silently implement against a different document.
 
 M0 through M6 are an internal dependency sequence, not independently marketable products. A milestone can be demonstrated only after its exit gate passes, and the product can be called production V1 only after every M6 certification gate passes. No later gate can waive an earlier security, product, or evidence failure.
 
@@ -37,13 +37,14 @@ apps/
     api/                                # Java HTTP/SSE entry point
     worker/                             # Java outbox, reconciliation, Temporal workers
     modules/                            # bounded Spring Modulith business modules
-  webhook-edge/                        # isolated Java, untrusted provider ingress
+  webhook-edge/                        # isolated Java image; distinct webhook and auth-callback workload profiles
   agent-pack-gateway/                  # isolated Java, one-use Pack capability consumer
   agent-runtime/                       # Python 3.12/Pydantic, source-free Agent jobs
   attachment-scanner/                  # isolated Java, quarantine-only scanner identity
 security-services/
   signing-service/                     # isolated Java, purpose-separated DSSE signing
-  requirement-publisher/               # isolated Java, metadata-only Git writer
+  provider-connector/                  # isolated Java, capability-gated Provider operations
+  credential-broker/                   # isolated Java, external-secret resolution only
   merge-controller/                    # isolated Java, strict-mode one-shot merger
   break-glass-broker/                  # isolated Java, emergency-only credential lane
 contracts/
@@ -68,11 +69,13 @@ The root Gradle build owns all Java processes, test runners, and `accordctl` thr
 | `control-api` | authenticated commands/queries, PostgreSQL business transactions | trust browser tenant headers, hold Git-content or signing credentials |
 | `control-worker` | outbox/inbox, reconciliation, typed Temporal activities | decide business truth from workflow history or retry an uncertain effect blindly |
 | `webhook-edge` | verify raw provider delivery and persist normalized metadata signal | authorize state transitions or read repository blobs/diffs |
+| `provider-auth-callback-edge` | consume one-time Provider OAuth/App callbacks, encrypt the assertion and forward only an opaque receipt | read webhook/domain rows, hold Provider credentials, call repository APIs, or reuse a callback |
 | `agent-pack-gateway` | authenticate an actor-bound one-use capability, fetch one allowlisted fixed OCI digest, verify it fully into encrypted cache, atomically consume, and stream that exact object | accept tags/arbitrary registries, expose a token or registry credential, access customer Git/source, or stream any unverified byte |
 | Python Agent Runtime | authorized Requirement, Context, and attachment projections in typed jobs | read customer repositories, approve, publish, merge, or directly update aggregates |
 | Signing Service | sign allowed DSSE domains after workload and payload-policy checks | publish Git content, merge, or share keys across purposes |
-| Requirement Publisher | write generated `.requirements/**` payloads for an authorized revision | read or alter customer source, merge work PRs, sign with merge keys |
-| Merge Controller | merge one already-existing, fully verified subject onto a protected strict ref: WorkItem PR, requirement-metadata PR, accepted delivery Candidate, or emergency change | create/edit source or metadata, resolve conflicts, reuse authorization, change subject type/digest, or merge when provider facts are uncertain |
+| Provider Connector | execute one typed, capability-gated repository/ref/ChangeRequest/check/protection/merge operation for an exact installation and immutable repository | expose a generic Provider proxy, read blobs/source/diffs, accept caller URLs, or reuse one credential profile for another operation class |
+| Credential Broker | resolve an installation-scoped external-secret reference for one authenticated Connector audience and short execution window | return credentials to the control plane/browser, persist access tokens, broaden scopes, or authorize a Provider operation |
+| Merge Controller | merge one already-existing, fully verified current-v2 subject onto a protected strict ref: WorkItem PR, accepted delivery Candidate, or emergency change | create/edit source or metadata, resolve conflicts, reuse authorization, change subject type/digest, or merge when Provider facts are uncertain |
 | Attachment Scanner | read quarantined object versions and emit signed verdict metadata | expose unscanned content or access unrelated tenant objects |
 | React web | render OpenAPI projections and submit allowed, versioned commands | infer RBAC/state transitions or cache data across tenant partitions |
 | Customer Codex/CI | read source, create code/patches, test, build, attest | impersonate platform confirmation, publication, acceptance, or audit authority |
@@ -91,7 +94,7 @@ The following map is normative. Compatibility tests reject a boundary that lacks
 | Domain events | `contracts/events/*.json` + `domain-event.schema.json` | Java transaction -> Java workers/projections | tenant/scope, aggregate sequence, causation/correlation, schema version, transactional outbox |
 | Agent jobs | `contracts/json-schema/agent-job.schema.json` | Java worker -> Python runtime | allowlisted projection references/digests, no source text/locator, run id, deadline, model bundle |
 | Agent results | `contracts/json-schema/agent-result.schema.json` | Python runtime -> Java inbox | job digest, structured claims/evidence/unknowns, model/prompt IDs, idempotent result id |
-| Security calls | `contracts/protobuf/accord/{signing,publisher,merge}/v1/*.proto` | Java worker -> isolated Java security services | mTLS workload identity, tenant/repository/ref, expected provider fact, nonce/expiry, request digest |
+| Security calls | `contracts/protobuf/accord/{signing,connector,credential,merge}/v1/*.proto` | Java worker -> isolated Java security services | mTLS workload identity, tenant/installation/repository/ref, capability snapshot, expected Provider fact, nonce/expiry, request digest |
 | Signed payloads | `contracts/dsse-payloads/*.schema.json` | authorized signer -> all verifiers | domain-separated payload type, JCS content digest, purpose key, trust time, no self-referential digest |
 | Customer CLI/CI | JSON Schema + DSSE golden fixtures | Java `accordctl`/CI -> Java API | repository immutable ID, exact heads/trees, patch/evidence digest, signed identity and replay defense |
 | Agent Pack download | closed OpenAPI capability response + signed release metadata | Java API -> isolated Java Gateway -> customer browser/CI | exact HTTPS origin, actor/session-or-workload audience, fixed OCI/release digests, distribution epoch, one use, at most 60 seconds, no redirect/token persistence |
@@ -110,7 +113,7 @@ Execute each component plan task-by-task; this master adds ordering and integrat
 | `docs/superpowers/plans/2026-07-24-accord-requirement-workflow-plan.md` | Requirement Graph, drafts, attachments, proposals, ActionRequests, confirmation | M1-M3 |
 | `docs/superpowers/plans/2026-07-24-accord-web-experience-plan.md` | complete role-oriented React web journeys and accessibility | M1-M6 |
 | `docs/superpowers/plans/2026-07-24-accord-agent-context-assessment-plan.md` | Agent Pack, Project Context, Agent Runtime, assessment | M2-M6 |
-| `docs/superpowers/plans/2026-07-24-accord-git-delivery-control-plan.md` | batch, WorkItem, provider adapters, publication, merge modes, recovery | M3-M5 |
+| `docs/superpowers/plans/2026-07-24-accord-git-delivery-control-plan.md` | batch, WorkItem, Provider adapters, Development Packages, branch release, merge modes, recovery | M3-M5 |
 | `docs/superpowers/plans/2026-07-24-accord-candidate-acceptance-plan.md` | Candidate, AcceptanceRun, CorrectionRun, promotion, completion | M4-M6 |
 | `docs/superpowers/plans/2026-07-24-accord-production-operations-ga-plan.md` | observability, resilience, supply chain, release, certification | M0-M6 |
 
@@ -123,7 +126,8 @@ The cumulative HTTP surface is one OpenAPI document and one generated TypeScript
 | `identity-public` | 72 | M0 |
 | `requirement-workflow` | 47 | M1 |
 | `agent-context-assessment` | 53 | M2 |
-| `delivery-control` | 22 | M3/M5 |
+| `provider-onboarding` | 12 | M3 |
+| `delivery-control` | 24 | M3/M5 |
 | `candidate-acceptance` | 26 | M4 |
 
 Foundation operations remain protected by their own baseline test and every later cumulative merge must retain them. An alias, handwritten browser URL/DTO, operation present in only one layer, deleted earlier owner key, or owner-count drift is a release-blocking contract failure rather than acceptable generated-client churn.
@@ -135,9 +139,9 @@ Foundation operations remain protected by their own baseline test and every late
 | M0 Contract and trust foundation | none | Admin creates a tenant/project, maps a human and Git identity, sees an authorized action plus immutable audit proof, and a cross-tenant attempt is denied without disclosure | JCS/DSSE independent-consumer vectors, protobuf/OpenAPI compatibility, RLS/authorization negative matrix, audit-chain verification, outbox replay |
 | M1 Business requirement loop | M0 | Business user creates structured text/material intake, sees graph/canvas/list and development projection, resolves an ActionRequest, compares revisions, and confirms only the exact current revision | attachment quarantine/access tests, graph/revision properties, API/SSE and Playwright journey, p95 visibility probe |
 | M2 Project context and assessment | M1 | Developer installs a signed pack, submits CI-attested source-free Context, reviews impact, confirms policy/scores, handles anomaly override, and reaches or is truthfully blocked from developable | pack verification, no-source canary, patch lineage, B/H/A/D property tests, model quality report |
-| M3 Alignment and formal publication | M2 | Both sides complete ordered confirmation, select Ready Pool items, freeze one DeliveryBatch, receive a signed `.requirements/**` publication, and complete the standard-mode path with bypass detection | proposal/receipt invalidation, batch admission, publisher signature, provider metadata reconciliation, standard-mode recovery |
-| M4 Development and exact acceptance | M3 | Assigned developer uses `accordctl`/Codex from the published branch, CI proves completion/patch, business accepts the exact Candidate, a failure takes the correct correction path, and the exact artifact digest is promoted | WorkItem gates, candidate immutability, acceptance continuity, artifact digest match, atomic completion formula |
-| M5 Strict delivery and recovery | M4 | Every protected-ref subject in a strict project is merged at most once and only by Merge Controller; operators demonstrate WorkItem/metadata/Candidate/emergency paths plus drift suspension, convergence, abort eligibility, and break-glass degradation/restoration | subject-bound controller authorization/replay tests, protection proof, uncertainty reconciliation, hotfix/abort/break-glass fault matrix |
+| M3 Alignment, package and branch release | M2 | Both sides complete ordered confirmation, freeze one cross-Provider DeliveryBatch, retrieve signed per-repository Development Packages, release complete zero-diff branch refs, and complete the standard-mode path with bypass detection | proposal/receipt invalidation, project-scoped Ready Pool CAS, package signature, per-repository release proofs, Provider metadata reconciliation, standard-mode recovery |
+| M4 Development and exact acceptance | M3 | Assigned developers use `accordctl`/Codex with the signed packages and native Git, CI proves completion/patch, business accepts each exact repository Candidate, a failure takes the correct correction path, and exact artifact digests are aggregated into CompletionSet | WorkItem gates, candidate immutability, acceptance continuity, artifact digest match, atomic completion formula |
+| M5 Strict delivery and recovery | M4 | Every current-v2 protected-ref merge subject in a strict project is merged at most once and only by Merge Controller; operators demonstrate WorkItem/Candidate/emergency paths plus drift suspension, convergence, abort eligibility, and break-glass degradation/restoration | subject-bound controller authorization/replay tests, protection proof, uncertainty reconciliation, hotfix/abort/break-glass fault matrix |
 | M6 Production GA certification | M5 | Each certification unit shows its support status and a signed evidence bundle; all roles complete the end-to-end journey; SLO, recovery, security, model, value, documentation, and contractual gates are green | production rehearsal, 21-section traceability, zero-tolerance counters, regional drill, model/value reports, unit-scoped `contractual-terms` evidence with `contractual_terms_pass=true`, derived GA status |
 
 ## Production, Security, And GA Gates
@@ -168,7 +172,7 @@ Foundation operations remain protected by their own baseline test and every late
 | 8 Assessment | agent/context Tasks 9-14 | policy versioning, B/H/A/D gates, override, public API contract, evaluation report, and per-support-unit quality evidence |
 | 9 Collaboration and confirmation | requirement workflow Tasks 6, 8-10 | proposal rounds, invalidation, ordered exact-revision receipts |
 | 10 Ready Pool and DeliveryBatch | requirement workflow Task 8; Git delivery Tasks 1-2 | admission/freeze/amendment and one-active-batch proofs |
-| 11 Git contract and modes | Git delivery Tasks 3-6, 8-11 | source-free SPI, signed publication, standard/strict certification |
+| 11 Git contract and modes | Git delivery Tasks 3-6, 8-11 | source-free SPI, signed Development Packages, zero-diff branch release, standard/strict certification |
 | 12 WorkItem and Context Patch | Git delivery Task 7; agent/context Tasks 2, 6 | assignment, PR gate, completion, patch/no-change lineage |
 | 13 Candidate and acceptance | candidate/acceptance Tasks 1-10 | immutable candidate through exact artifact promotion journey |
 | 14 Roles, delegation, separation | identity/tenancy/audit; web | positive/negative authorization matrix and role UX |
@@ -226,9 +230,11 @@ test('the V1 runtime and contract boundaries are singular', async () => {
   });
   assert.equal(manifest.infrastructure.iac, 'opentofu');
   assert.deepEqual(manifest.security_services.sort(),
-    ['break-glass-broker', 'merge-controller', 'requirement-publisher', 'signing-service']);
+    ['break-glass-broker', 'credential-broker', 'merge-controller', 'provider-connector', 'signing-service']);
   assert.deepEqual(manifest.edge_services.sort(),
     ['agent-pack-gateway', 'attachment-scanner', 'webhook-edge']);
+  assert.deepEqual(manifest.edge_workload_profiles.sort(),
+    ['agent-pack-gateway', 'attachment-scanner', 'provider-auth-callback-edge', 'webhook-edge']);
   assert.equal(manifest.contracts.http, 'contracts/openapi/accord-control-api.yaml');
   assert.match(raw, /database\/control-plane\/migrations/);
   assert.match(milestoneBuild, /milestoneTest\s*\{/);
@@ -256,8 +262,9 @@ runtimes:
   cli: java-21-picocli-jlink
   agent_runtime: python-3.12-pydantic
   web: react-19.1-typescript-5.8-vite-7
-security_services: [signing-service, requirement-publisher, merge-controller, break-glass-broker]
+security_services: [signing-service, provider-connector, credential-broker, merge-controller, break-glass-broker]
 edge_services: [webhook-edge, attachment-scanner, agent-pack-gateway]
+edge_workload_profiles: [webhook-edge, provider-auth-callback-edge, attachment-scanner, agent-pack-gateway]
 contracts:
   http: contracts/openapi/accord-control-api.yaml
   events: contracts/events
@@ -280,7 +287,7 @@ reference_deployment:
   architecture_assumption: false
 ```
 
-`docs/architecture/accord-v1-boundaries.yaml` expands this manifest with each deployable, workload identity, database role, egress allowlist, credential purpose, and prohibited dependency. It assigns the Agent Pack component chart to the Agent Context plan but makes `infra/helm/accord` the only production release, and binds the Gateway to its separate IRSA/cache-KMS/OCI allowlist with no customer-Git egress. ADR-0001 records the same decisions, explicitly states that Temporal is not business truth, and rejects a TypeScript server control plane, direct customer-source access, independently installed Gateway release, shared security credentials, and provider webhooks as authority. Add `"architecture:test": "node --test tests/architecture/*.test.mjs"` to the root `package.json`.
+`docs/architecture/accord-v1-boundaries.yaml` expands this manifest with each deployable, workload identity, database role, egress allowlist, credential purpose, and prohibited dependency. `edge_services` is the three-project build/image inventory, while `edge_workload_profiles` is the four-entry independently authorized runtime identity inventory. Its extra entry exists because `webhook-edge` and `provider-auth-callback-edge` use the exact same signed `webhook-edge` image digest but have different ServiceAccounts, database roles, encryption keys, ingress paths, mTLS audiences, queues and NetworkPolicies. It assigns the Agent Pack component chart to the Agent Context plan but makes `infra/helm/accord` the only production release, and binds the Gateway to its separate IRSA/cache-KMS/OCI allowlist with no customer-Git egress. ADR-0001 records the same decisions, explicitly states that Temporal is not business truth, and rejects a TypeScript server control plane, direct customer-source access, independently installed Gateway release, shared security credentials, and provider webhooks as authority. Add `"architecture:test": "node --test tests/architecture/*.test.mjs"` to the root `package.json`.
 
 Append this isolated source set and task to `tests/integration/build.gradle`; preserve all Foundation dependencies and task configuration:
 
@@ -662,7 +669,7 @@ git add tests/e2e/milestones/m2-agent-context-assessment.ps1 tests/integration/g
 git commit -m "test: certify the M2 context and assessment loop"
 ```
 
-### Task 5: Integrate M3 Alignment, Batch Freeze, Publication, And Standard Mode
+### Task 5: Integrate M3 Alignment, Multi-Repository Package Release, And Standard Mode
 
 **Files:**
 - Create: `tests/integration/src/milestoneTest/java/com/inforvans/accord/milestones/M3ExitGateIT.java`
@@ -671,77 +678,100 @@ git commit -m "test: certify the M2 context and assessment loop"
 - Create: `tests/milestones/m3/gate.yaml`
 - Create: `docs/operations/milestones/m3-demo.md`
 
-- [ ] **Step 1: Write the failing M3 transaction and provider test**
+- [ ] **Step 1: Write the failing M3 cross-Provider transaction and branch-release test**
 
-Create `M3ExitGateIT.java` in the isolated source set. Its nested fixture talks through public HTTP and the metadata-only provider sandbox, so it compiles without importing future Delivery, publisher, or reconciliation implementation classes. Use string contract values for `STANDARD`, `suspended`, `reconciliation_required`, and assurance state, and keep this required sequence:
+Create `M3ExitGateIT.java` in the isolated source set. Its nested fixture talks through public HTTP plus GitHub and GitLab metadata-only Provider sandboxes, so it compiles without importing future Delivery, Connector, package, or reconciliation implementation classes. Use string contract values for `STANDARD`, `PUBLISHING`, `READY`, `SUSPENDED`, `RECONCILIATION_REQUIRED`, `PARTIAL`, and `COMPLETE`, and keep this required sequence:
 
 ```java
 @Test
-void confirmedRevisionFreezesPublishesAndRemainsTruthfulInStandardMode() {
-    var revision = fixture.developableRevision();
-    fixture.developmentConfirms(revision.hash());
-    fixture.businessConfirms(revision.hash());
-    var batch = api.createBatch(List.of(revision.ref()), "standard");
-    var receipt = publisher.publish(batch.id(), fixture.deliveryHead());
-    assertEquals(revision.hash(), receipt.requirementRevisionHash());
-    assertTrue(receipt.dsseVerified());
-    assertEquals(".requirements/batches/%s/manifest.json".formatted(batch.id()), receipt.path());
-    assertEquals(batch.deliveryRef(), receipt.deliveryRef());
-    assertEquals(provider.deliveryCommitSha(), receipt.publishedCommitSha());
-    assertEquals(provider.deliveryTreeSha(), receipt.publishedTreeSha());
-    assertEquals(fixture.contractSetDigest(), receipt.contractSetDigest());
-    assertEquals(fixture.publicationAttestationDigest(), receipt.publicationAttestationDigest());
-    assertEquals(fixture.pathSetDigest(), receipt.pathSetDigest());
-    assertEquals(provider.factDigest(), receipt.providerFactDigest());
-    assertEquals(provider.observedAt(), receipt.providerObservedAt());
-    assertEquals("VERIFIED", receipt.providerState());
-    assertEquals(receipt.receiptDigest(), fixture.recomputePublicationReceiptDigest(receipt));
-    assertTrue(api.batch(batch.id()).pullable());
-    provider.simulateAdministratorBypass(batch.repositoryId());
-    reconciliation.run(batch.repositoryId());
-    assertEquals("suspended", api.batch(batch.id()).phase());
-    assertEquals("reconciliation_required", api.batch(batch.id()).consistencyState());
-    assertNotEquals("strict", api.batch(batch.id()).assuranceState());
+void confirmedRevisionsReleaseEveryRepositoryWithoutWritingGitContentAndRemainTruthful() {
+    var githubRepository = fixture.connectDiscoverAndBind("GITHUB", githubCloudSandbox);
+    var gitlabRepository = fixture.connectDiscoverAndBind("GITLAB", gitlabSaasSandbox);
+    assertEquals("ACTIVE", githubRepository.bindingState());
+    assertEquals("ACTIVE", gitlabRepository.bindingState());
+    assertTrue(githubRepository.currentTrustRegistrationCapabilityAndEpochAgree());
+    assertTrue(gitlabRepository.currentTrustRegistrationCapabilityAndEpochAgree());
+
+    var githubRevision = fixture.developableRevision(githubRepository);
+    var gitlabRevision = fixture.developableRevision(gitlabRepository);
+    fixture.confirmDevelopmentThenBusiness(githubRevision.hash());
+    fixture.confirmDevelopmentThenBusiness(gitlabRevision.hash());
+
+    var readyPool = api.readyPool();
+    var batch = api.createBatch(
+        readyPool.etag(), "STANDARD",
+        List.of(fixture.workSet(githubRepository, githubRevision),
+                fixture.workSet(gitlabRepository, gitlabRevision)));
+
+    var githubPackage = api.developmentPackage(batch.id(), batch.githubWorkSetId());
+    var gitlabPackage = api.developmentPackage(batch.id(), batch.gitlabWorkSetId());
+    assertTrue(githubPackage.dsseVerified());
+    assertTrue(gitlabPackage.dsseVerified());
+    assertEquals(batch.effectiveManifestDigest(), githubPackage.effectiveManifestDigest());
+    assertEquals(batch.effectiveManifestDigest(), gitlabPackage.effectiveManifestDigest());
+
+    release.releaseAndReconcile(batch.id(), batch.githubWorkSetId());
+    assertEquals("PARTIAL", api.batch(batch.id()).repositoryReleaseCoverage());
+    assertEquals("PUBLISHING", api.batch(batch.id()).phase());
+
+    release.releaseAndReconcile(batch.id(), batch.gitlabWorkSetId());
+    var ready = api.batch(batch.id());
+    assertEquals("COMPLETE", ready.repositoryReleaseCoverage());
+    assertEquals("READY", ready.phase());
+    assertEquals(github.defaultHeadSha(), github.deliveryHeadSha());
+    assertEquals(github.defaultTreeSha(), github.deliveryTreeSha());
+    assertEquals(gitlab.defaultHeadSha(), gitlab.deliveryHeadSha());
+    assertEquals(gitlab.defaultTreeSha(), gitlab.deliveryTreeSha());
+    assertEquals(0, github.contentMutationCalls() + gitlab.contentMutationCalls());
+
+    gitlab.simulateAdministratorBypass(batch.gitlabWorkSetId());
+    reconciliation.run(gitlabRepository.id());
+    var suspended = api.batch(batch.id());
+    assertEquals("SUSPENDED", suspended.operationalState());
+    assertEquals("RECONCILIATION_REQUIRED", suspended.consistencyState());
+    assertNotEquals("STRICT", suspended.assuranceState());
 }
 ```
 
-- [ ] **Step 2: Run the M3 test before batch and publisher integration exists**
+- [ ] **Step 2: Run the M3 test before batch, package, Connector, and release integration exists**
 
 Run: `./gradlew :tests:integration:milestoneTest --tests '*M3ExitGateIT'`
 
-Expected: the target compiles, M0 and M1 remain green, and M3 FAILS because batch creation/publication or standard-mode reconciliation returns an absent-operation problem or does not reach the asserted failed-closed state. An unresolved implementation type is forbidden in this black-box gate.
+Expected: the target compiles, M0 through M2 remain green, and M3 FAILS because Provider connection/discovery/Binding onboarding, cross-repository Batch creation, signed package retrieval, branch release, or standard-mode reconciliation returns an absent-operation problem or does not reach the asserted failed-closed state. An unresolved implementation type is forbidden in this black-box gate.
 
 - [ ] **Step 3: Complete Git delivery and its web slices through standard mode**
 
-Requirement Workflow Tasks 1-10 were completed in order at M1; do not rerun or cherry-pick individual tasks here. Complete Git Delivery Tasks 1-8 in order, run `pnpm api:generate && pnpm --filter @accord/api-client check:generated`, then complete Web Experience Tasks 13-14 in order. The `provider-facts.json` fixture includes immutable repository ID, delivery/default refs, expected and actual heads/trees, PR/check/protection metadata, merge actor, webhook cursor gap, and one closed signed publication receipt containing `publication_id`, effective manifest digest, `delivery_ref`, published commit/tree, contract-set/publication-attestation/path-set/provider-fact digests, `provider_state=VERIFIED`, receipt-bound `provider_observed_at`, external-intent binding, and recomputable `receipt_digest`; it contains no blob, diff, or source text. A Provider timestamp is evidence, not a browser-clock TTL: a later contradictory current fact suspends publication, while an unchanged later observation does not become invalid merely due to age. Create `gate.yaml`:
+Requirement Workflow Tasks 1-10 were completed in order at M1; do not rerun or cherry-pick individual tasks here. Complete Git Delivery Tasks 1-8 in order, run `pnpm api:generate && pnpm --filter @accord/api-client check:generated`, then complete Web Experience Tasks 13-14 in order. Git migrations V040 and V041 are one indivisible M3 rollout: the migration Job must apply both under one Flyway lock before any M3 application pod starts, readiness must reject a schema history ending at V040, and no production deployment may run a V040-only control plane. The `provider-facts.json` fixture contains two single-use connection/callback receipts, active Provider installations, opaque discovery receipts, Identity trust-establishment receipts, registry associations, repositories, immutable repository IDs, default/delivery refs, exact base and observed heads/trees, capability snapshots, PR/check/protection metadata, merge actor and a webhook cursor gap. It contains no callback code, credential, raw state, arbitrary endpoint, source body or Provider-native identity accepted from an API caller. Each repository has one closed signed Development Package publication and one branch-release receipt containing `release_id`, Batch/RepositoryWorkSet/installation/repository/effective-manifest identifiers, `delivery_ref`, unchanged baseline commit/tree, capability/package/Provider-fact digests, `provider_state=VERIFIED`, receipt-bound `provider_observed_at`, external-intent binding and recomputable `receipt_digest`; it contains no repository path, published commit, blob, diff, source text or credential. A Provider timestamp is evidence, not a browser-clock TTL: a later contradictory current fact suspends the affected WorkSet and Batch, while an unchanged later observation does not become invalid merely due to age. Create `gate.yaml`:
 
 ```yaml
 milestone: M3
 requires: [M2]
 gates:
+  - five-family-provider-connection-discovery-and-identity-owned-binding
+  - exact-12-operation-provider-onboarding-owner-set
   - proposal-rounds-field-ownership-and-revision-invalidation
   - development-then-business-confirmation-of-one-hash
-  - ready-pool-and-one-active-batch-per-repository
+  - project-scoped-ready-pool-cas-and-one-active-batch-per-repository
   - frozen-delivery-commitment-and-amendment-rules
-  - isolated-java-requirement-publisher-only-formal-writer
-  - signed-appendix-a-contract-and-provider-cas
-  - complete-publication-proof-before-ready-pullable-or-workitem-start
-  - exact-22-operation-delivery-owner-set
+  - signed-platform-development-packages-never-written-to-git
+  - cross-provider-zero-diff-branch-release-with-provider-cas
+  - complete-per-repository-release-proof-before-ready-or-workitem-start
+  - exact-24-operation-delivery-owner-set
   - standard-mode-check-detect-suspend-reconcile
 maximum_bypass_detection_seconds: 900
 ```
 
-- [ ] **Step 4: Verify M3 publication and standard-mode recovery**
+- [ ] **Step 4: Verify M3 package/branch release and standard-mode recovery**
 
-Run: `./gradlew :tests:integration:dependencies --configuration milestoneTestRuntimeClasspath --write-locks && ./gradlew :apps:control-plane:modules:requirement-graph:test :apps:control-plane:modules:delivery:test :tests:api:test :security-services:requirement-publisher:test :apps:webhook-edge:test --tests '*DeliveryOpenApiContractTest' && ./gradlew :tests:integration:milestoneTest --tests '*M3ExitGateIT' && corepack pnpm@10.12.4 --filter @accord/api-client check:generated && corepack pnpm@10.12.4 --filter @accord/web test -- ready-pool.test.tsx batch-workspace.test.tsx batch-manifest-review.test.tsx batch-progress.test.tsx context-overview.test.tsx work-item-table.test.tsx git-checks-panel.test.tsx reconciliation-panel.test.tsx && pwsh -NoProfile -File tests/architecture/verify-protobuf-compatibility.ps1`
+Run: `./gradlew :tests:integration:dependencies --configuration milestoneTestRuntimeClasspath --write-locks && ./gradlew :apps:control-plane:modules:requirement-graph:test :apps:control-plane:modules:delivery:test :apps:control-plane:modules:development-package:test :apps:control-plane:modules:git-coordination:test :security-services:provider-connector:test :security-services:credential-broker:test :apps:webhook-edge:test :tests:api:test --tests '*DeliveryOpenApiContractTest' --tests '*ProviderOnboardingOpenApiContractTest' && ./gradlew :tests:integration:milestoneTest --tests '*M3ExitGateIT' && corepack pnpm@10.12.4 --filter @accord/api-client check:generated && corepack pnpm@10.12.4 --filter @accord/web test -- ready-pool.test.tsx batch-workspace.test.tsx batch-manifest-review.test.tsx batch-branch-release-panel.test.tsx batch-progress.test.tsx context-overview.test.tsx work-item-table.test.tsx git-checks-panel.test.tsx reconciliation-panel.test.tsx && pwsh -NoProfile -File tests/architecture/verify-protobuf-compatibility.ps1`
 
-Expected: PASS; the exact `delivery-control` OpenAPI/controller/application/generated-client/Web owner set contains 22 operations; only the independently deployed Java Requirement Publisher writes the exact signed contract; `READY`, pullability and WorkItem start are impossible until the closed receipt and current Provider fact agree on every ref/commit/tree/digest field; one normal batch executes per repository; bypass is found within 900 seconds; and the product shows `suspended/reconciliation_required` rather than a false strict claim.
+Expected: PASS; the exact `provider-onboarding` owner set contains 12 operations and the separate callback contract is absent from the browser client; all five Provider families pass their declared Cloud/Enterprise path; Identity alone owns Binding activation and no Binding is selectable before current trust, registration, unexpired capability facts and an exact CapabilitySnapshot-to-installation credential-epoch match agree. The exact `delivery-control` OpenAPI/controller/application/generated-client/Web owner set contains 24 operations; signed platform Development Packages remain in immutable Accord/OSS storage; platform Provider operations create only zero-diff refs and never repository content; `READY` and WorkItem start are impossible until every current RepositoryWorkSet has a complete package plus branch-release receipt whose current Provider fact agrees on every installation/repository/ref/commit/tree/manifest/capability/package digest; one normal batch executes per repository even when a Batch spans Providers; bypass is found within 900 seconds; and the product shows `SUSPENDED/RECONCILIATION_REQUIRED` rather than a false strict claim.
 
 - [ ] **Step 5: Commit the M3 integration gate**
 
 ```bash
 git add tests/integration/src/milestoneTest/java/com/inforvans/accord/milestones/M3ExitGateIT.java tests/integration/gradle.lockfile tests/milestones/m3 docs/operations/milestones/m3-demo.md
-git commit -m "test: certify M3 publication and standard delivery"
+git commit -m "test: certify M3 package release and standard delivery"
 ```
 
 ### Task 6: Integrate M4 WorkItem, Candidate, Acceptance, And Completion
@@ -891,7 +921,7 @@ if ($report.immutable_environment_id -ne $EnvironmentId) { throw 'recovery repor
 if ($report.provider_baseline_digest -ne $ProviderBaselineDigest) { throw 'recovery report provider baseline mismatch' }
 if ($report.matrix_digest -ne $matrixDigest) { throw 'recovery report matrix mismatch' }
 if ($report.normal_merge_controller_ratio -ne 1.0) { throw 'strict merge actor breach' }
-foreach ($subjectType in @('work_item_pr', 'requirement_metadata', 'accepted_delivery_candidate', 'emergency_change')) {
+foreach ($subjectType in @('work_item_pr', 'accepted_delivery_candidate', 'emergency_change')) {
   if ($report.merge_subject_authorization_counts.$subjectType -lt 1) { throw "strict subject was not exercised: $subjectType" }
 }
 if ($report.authorization_replay_total -ne 0) { throw 'merge authorization replayed' }
@@ -928,13 +958,13 @@ Apply these normative OpenTofu integration requirements while executing Operatio
 - Operations Tasks 4-7 grow the union deterministically from 12 to 16 to 17 to the final 18 modules: `accord-autoscaling`, `accord-foundation-contract`, `aws-agent-pack-distribution`, `aws-backup`, `aws-budgets`, `aws-container-registry`, `aws-edge`, `aws-eks`, `aws-network`, `aws-object-storage`, `aws-operations-evidence`, `aws-postgresql`, `aws-purpose-keys`, `aws-regional-dr`, `aws-state-backends`, `aws-telemetry`, `aws-temporal`, and `aws-workload-identity`. Every module is an explicit integration-root source and at least one production/bootstrap-root source. Gateway distribution additionally proves immutable OCI replication, region-local encrypted object cache, exact IRSA, fixed egress and epoch fencing. PostgreSQL modules provision the durable coordination schemas, leases, and fencing tokens; no cache service is authoritative or required.
 - `verify-opentofu.ps1 -Manifest infra/opentofu/roots.json` first invokes the HCL/JSON root verifier, requires exactly OpenTofu `1.9.1`, resolves all paths beneath the repository, proves each lock tracked and unchanged, then runs `init -backend=false -input=false -lockfile=readonly`, `fmt -check`, `validate`, and `test` only for declared test roots. It rejects missing/extra roots or modules, symlink/path escape, mutable provider selections, initialization changes, real backend/apply attempts, and any lock diff. Every filtered `tofu test` command runs this verifier first; the final result is exactly `roots=4 modules=18`.
 
-Create `fault-matrix.yaml` with `schema_version: "1.0"`, immutable `report_type: accord.milestone.m5.strict-recovery.v1`, and scenarios `strict-work-item-merge`, `strict-requirement-metadata-merge`, `strict-accepted-candidate-merge`, `worker-crash-before-call`, `worker-crash-after-call`, `webhook-gap`, `provider-throttle`, `provider-result-unknown`, `protection-drift`, `non-controller-write`, `context-patch-gap`, `artifact-promotion-unknown`, `abort-inflight-merge`, `emergency-hotfix`, and `break-glass`. The first three and `emergency-hotfix` prove the four closed `VerifiedMergeSubject` types against protected refs, exact fact bindings, distinct purpose-bound authorization, one-time consumption, and current Provider result. Every row declares injection, expected failed-closed state, source of current facts, convergence proof, forbidden outcome, maximum detection, and retained audit evidence. The matrix also names the exact current-fact queries from which the runner derives `uncertain_result_state`, `break_glass_assurance_state`, `strict_restored_after_new_context_candidate_acceptance`, `merge_subject_authorization_counts`, `authorization_replay_total`, `all_scenarios_converged`, and `provider_baseline_restored`; these values are never supplied as CLI inputs.
+Create `fault-matrix.yaml` with `schema_version: "1.0"`, immutable `report_type: accord.milestone.m5.strict-recovery.v1`, and scenarios `strict-work-item-merge`, `strict-accepted-candidate-merge`, `worker-crash-before-call`, `worker-crash-after-call`, `webhook-gap`, `provider-throttle`, `provider-result-unknown`, `protection-drift`, `non-controller-write`, `context-patch-gap`, `artifact-promotion-unknown`, `abort-inflight-merge`, `emergency-hotfix`, and `break-glass`. `strict-work-item-merge`, `strict-accepted-candidate-merge`, and `emergency-hotfix` prove the three closed current-v2 `VerifiedMergeSubject` types against protected refs, exact fact bindings, distinct purpose-bound authorization, one-time reservation/finalization, and current Provider result. Branch creation is exercised separately as an exact zero-diff create-ref capability and never counted as a merge subject. Historical v1 `REQUIREMENT_METADATA` fixtures remain verification-only compatibility evidence and cannot be issued, reserved, merged, or counted by this current-protocol report. Every row declares injection, expected failed-closed state, source of current facts, convergence proof, forbidden outcome, maximum detection, and retained audit evidence. The matrix also names the exact current-fact queries from which the runner derives `uncertain_result_state`, `break_glass_assurance_state`, `strict_restored_after_new_context_candidate_acceptance`, `merge_subject_authorization_counts`, `authorization_replay_total`, `all_scenarios_converged`, and `provider_baseline_restored`; these values are never supplied as CLI inputs.
 
-Create `milestone-m5-strict-recovery-report.schema.json` as the closed JSON Schema 2020-12 M5 profile over `contracts/json-schema/operations-chaos-report.schema.json`. Its `allOf` references that base schema and then requires `report_type` to equal `accord.milestone.m5.strict-recovery.v1`; the base schema remains the single owner of `additionalProperties: false`, scalar patterns, and common field definitions. Require the complete common report fields: `schema_version`, `report_type`, `certified_release_bundle_digest`, full `source_commit_sha`, `logical_environment`, immutable `immutable_environment_id`, `tool_artifact_digest`, `policy_digest`, `input_set_digest`, `provider_baseline_digest`, `matrix_digest`, `fixture_set_digest`, `evidence_index_digest`, `audit_correlation_id`, `run_id`, `started_at`, `completed_at`, `retention_until`, `result`, `normal_merge_controller_ratio`, `merge_subject_authorization_counts`, `authorization_replay_total`, `all_scenarios_converged`, `provider_baseline_restored`, `forbidden_outcome_total`, `wrong_completed_total`, and nonempty `scenario_evidence`. `merge_subject_authorization_counts` is a closed object requiring exactly nonnegative integer keys `work_item_pr`, `requirement_metadata`, `accepted_delivery_candidate`, and `emergency_change`; a passing M5 profile requires each to be at least one. The generic Operations-only `agent_pack_distribution_outcomes` field is forbidden in this M5 profile. M5 additionally requires `uncertain_result_state`, `break_glass_assurance_state`, and `strict_restored_after_new_context_candidate_acceptance`. Each scenario entry binds scenario ID, current-fact source, injection receipt digest, convergence evidence digest, cleanup/baseline-restoration digest, result, intermediate states, forbidden-outcome count, and start/end time. Require SHA-256 and Git-SHA patterns, UUID run/audit correlation IDs, ratios in 0-1, nonnegative counters, at least 400 days of retention, and exact release-bundle/environment bindings; the verifier performs cross-field time-order, exact-scenario, subject-count/evidence correspondence, zero replay/forbidden/wrong-completion totals, exact matrix membership, and digest closure checks that JSON Schema cannot express.
+Create `milestone-m5-strict-recovery-report.schema.json` as the closed JSON Schema 2020-12 M5 profile over `contracts/json-schema/operations-chaos-report.schema.json`. Its `allOf` references that base schema and then requires `report_type` to equal `accord.milestone.m5.strict-recovery.v1`; the base schema remains the single owner of `additionalProperties: false`, scalar patterns, and common field definitions. Require the complete common report fields: `schema_version`, `report_type`, `certified_release_bundle_digest`, full `source_commit_sha`, `logical_environment`, immutable `immutable_environment_id`, `tool_artifact_digest`, `policy_digest`, `input_set_digest`, `provider_baseline_digest`, `matrix_digest`, `fixture_set_digest`, `evidence_index_digest`, `audit_correlation_id`, `run_id`, `started_at`, `completed_at`, `retention_until`, `result`, `normal_merge_controller_ratio`, `merge_subject_authorization_counts`, `authorization_replay_total`, `all_scenarios_converged`, `provider_baseline_restored`, `forbidden_outcome_total`, `wrong_completed_total`, and nonempty `scenario_evidence`. `merge_subject_authorization_counts` is a closed object requiring exactly nonnegative integer keys `work_item_pr`, `accepted_delivery_candidate`, and `emergency_change`; a passing M5 profile requires each to be at least one and rejects any historical or unknown key. The generic Operations-only `agent_pack_distribution_outcomes` field is forbidden in this M5 profile. M5 additionally requires `uncertain_result_state`, `break_glass_assurance_state`, and `strict_restored_after_new_context_candidate_acceptance`. Each scenario entry binds scenario ID, current-fact source, injection receipt digest, convergence evidence digest, cleanup/baseline-restoration digest, result, intermediate states, forbidden-outcome count, and start/end time. Require SHA-256 and Git-SHA patterns, UUID run/audit correlation IDs, ratios in 0-1, nonnegative counters, at least 400 days of retention, and exact release-bundle/environment bindings; the verifier performs cross-field time-order, exact-scenario, subject-count/evidence correspondence, zero replay/forbidden/wrong-completion totals, exact matrix membership, and digest closure checks that JSON Schema cannot express.
 
 `ops chaos run` resolves the logical environment to `expected-environment-id`, binds the mandatory signed release bundle to the exact source commit, rejects a missing `--confirm-drill` before provider access, verifies the signed provider baseline before injection, hashes the matrix and all referenced fixtures, runs every row, restores and verifies the exact baseline, signs the closed report, and atomically writes the DSSE envelope. A deliberately injected unknown Provider result may exit `0` only after the durable failed-closed observation is followed by authoritative reconciliation to `converged`, every forbidden-outcome count is zero, evidence is persisted, and the exact Provider baseline is restored. A known `diverged`/final `uncertain` result, incomplete-but-known cleanup, or baseline mismatch still writes retained signed failure evidence and exits `1`; exit `2` is invalid invocation/preflight, while exit `3` is reserved for inability to determine whether injection, durable evidence persistence, or cleanup occurred. None can satisfy M5 or GA. The signing trust domain is the platform-level operations evidence signer defined by Operations Task 9, the DSSE `payloadType` is `application/vnd.accord.operations-chaos-report.v1+jcs`, and the signed payload's `report_type` is the M5 constant above; these three values are distinct and all are verified.
 
-`ops chaos verify` validates the selected closed schema, platform signer identity/purpose/payloadType/trust time, payload `report_type`, exact source-commit/release-bundle/environment/provider bindings, scenario evidence digests, completeness, and time ordering before writing canonical payload JSON to `summary-output`. It takes those four protected expectations explicitly, independently hashes the exact regular non-symlink matrix path and every closed relative fixture reference, and requires the resulting matrix/fixture digests to match the signed report; no expected value comes from the report itself. For the M5 profile it additionally requires every expected scenario exactly once, every result `converged`, every scenario and aggregate forbidden-outcome count zero, all four subject counts backed by distinct authorization/consumption/current-result receipts, replay and wrong-completed totals zero, and exact baseline restoration; an authentic signed failure report therefore verifies as retained evidence but returns a non-passing exit and cannot produce the success summary consumed above. The signed report contains a preassigned `audit_correlation_id`, not a circular audit-event digest. After immutable envelope storage, an external audit receipt binds that correlation ID to the envelope digest, object version, and retention deadline; the verifier resolves and checks the receipt independently. Tests cover changed reports, wrong release bundle/commit/environment, stale baselines, changed matrix/fixture bytes, missing/non-converged/duplicate scenarios, subject type or digest confusion, replay, forged signatures, missing/mismatched audit receipts, and output-path failures; stdout is not parsed as evidence.
+`ops chaos verify` validates the selected closed schema, platform signer identity/purpose/payloadType/trust time, payload `report_type`, exact source-commit/release-bundle/environment/provider bindings, scenario evidence digests, completeness, and time ordering before writing canonical payload JSON to `summary-output`. It takes those four protected expectations explicitly, independently hashes the exact regular non-symlink matrix path and every closed relative fixture reference, and requires the resulting matrix/fixture digests to match the signed report; no expected value comes from the report itself. For the M5 profile it additionally requires every expected scenario exactly once, every result `converged`, every scenario and aggregate forbidden-outcome count zero, all three current-v2 subject counts backed by distinct authorization/reservation/finalization/current-result receipts, replay and wrong-completed totals zero, and exact baseline restoration; an authentic signed failure report therefore verifies as retained evidence but returns a non-passing exit and cannot produce the success summary consumed above. The signed report contains a preassigned `audit_correlation_id`, not a circular audit-event digest. After immutable envelope storage, an external audit receipt binds that correlation ID to the envelope digest, object version, and retention deadline; the verifier resolves and checks the receipt independently. Tests cover changed reports, wrong release bundle/commit/environment, stale baselines, changed matrix/fixture bytes, missing/non-converged/duplicate scenarios, historical/unknown subject keys, subject type or digest confusion, replay, forged signatures, missing/mismatched audit receipts, and output-path failures; stdout is not parsed as evidence.
 
 Create `gate.yaml`:
 
@@ -943,7 +973,7 @@ milestone: M5
 requires: [M4]
 gates:
   - strict-protection-capability-proof
-  - one-time-exact-authorization-for-every-verified-merge-subject
+  - one-time-exact-authorization-for-every-current-v2-verified-merge-subject
   - one-hundred-percent-controller-normal-merges
   - metadata-only-reconciliation-and-convergence
   - abort-only-before-default-merge-with-no-inflight-intent
@@ -1017,12 +1047,13 @@ Tasks 1-10 were completed at M5 and must not be repeated. Execute this exact rem
 Populate `spec-coverage.yaml` with this schema:
 
 ```yaml
+digest_normalization: utf8-lf
 specification:
   path: requirements-agent-platform-design.md
-  sha256: EB662C6A0FB2B0192AAE20D4DD2DD520DB29BD5E554141210C41F2C338A10BB1
+  sha256: 0755A08228254311588EE0B867AFEBED6CD49E26B0FCCB790247BFDA31AB2C77
 runtime_design:
   path: docs/superpowers/specs/2026-07-25-accord-java-python-runtime-design.md
-  sha256: 9780DD3A502072A38190A30FCDF326452052311E1B240545D8455A2811F3029A
+  sha256: 46DE7309CB28F8E59B3FDAB4D6FA664AE4D932FC7F517741681CC25C3B84E4E1
 evidence_resolution:
   root: certification/evidence
   digest_directory_encoding: sha256-<64-lowercase-hex>
@@ -1044,7 +1075,7 @@ coverage:
   section_08: { plan: accord-agent-context-assessment, gate: assessment-policy-score-and-admission, evidence_type: assessment }
   section_09: { plan: accord-requirement-workflow, gate: proposal-revision-and-ordered-confirmation, evidence_type: collaboration }
   section_10: { plan: accord-git-delivery-control, gate: ready-pool-batch-and-commitment, evidence_type: delivery-batch }
-  section_11: { plan: accord-git-delivery-control, gate: publication-standard-and-strict-modes, evidence_type: git-delivery }
+  section_11: { plan: accord-git-delivery-control, gate: package-branch-release-standard-and-strict-modes, evidence_type: git-delivery }
   section_12: { plan: accord-git-delivery-control-and-agent-context-assessment, gate: workitem-completion-and-context-patch, evidence_type: workitem-and-patch }
   section_13: { plan: accord-candidate-acceptance, gate: candidate-acceptance-correction-and-promotion, evidence_type: candidate-and-acceptance }
   section_14: { plan: accord-identity-tenancy-audit, gate: rbac-delegation-and-separation, evidence_type: authorization }
@@ -1123,10 +1154,21 @@ if ($accordRestorePoint -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{
 if ($accordProviderBaseline -cnotmatch '^sha256:[0-9a-f]{64}$') { throw 'Provider baseline digest is invalid' }
 if (git status --porcelain --untracked-files=all) { throw 'release checkout is not clean' }
 
-$accordSpecHash = (Get-FileHash -Algorithm SHA256 requirements-agent-platform-design.md).Hash
-if ($accordSpecHash -ne 'EB662C6A0FB2B0192AAE20D4DD2DD520DB29BD5E554141210C41F2C338A10BB1') { throw 'specification digest mismatch' }
-$accordRuntimeDesignHash = (Get-FileHash -Algorithm SHA256 docs/superpowers/specs/2026-07-25-accord-java-python-runtime-design.md).Hash
-if ($accordRuntimeDesignHash -ne '9780DD3A502072A38190A30FCDF326452052311E1B240545D8455A2811F3029A') { throw 'runtime design digest mismatch' }
+function Get-AccordNormalizedSha256([string]$Path) {
+  $accordUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+  $accordBytes = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $Path))
+  $accordNormalizedBytes = $accordUtf8.GetBytes($accordUtf8.GetString($accordBytes).Replace("`r`n", "`n"))
+  $accordSha256 = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    return [BitConverter]::ToString($accordSha256.ComputeHash($accordNormalizedBytes)).Replace('-', '')
+  } finally {
+    $accordSha256.Dispose()
+  }
+}
+$accordSpecHash = Get-AccordNormalizedSha256 requirements-agent-platform-design.md
+if ($accordSpecHash -cne '0755A08228254311588EE0B867AFEBED6CD49E26B0FCCB790247BFDA31AB2C77') { throw 'specification digest mismatch' }
+$accordRuntimeDesignHash = Get-AccordNormalizedSha256 docs/superpowers/specs/2026-07-25-accord-java-python-runtime-design.md
+if ($accordRuntimeDesignHash -cne '46DE7309CB28F8E59B3FDAB4D6FA664AE4D932FC7F517741681CC25C3B84E4E1') { throw 'runtime design digest mismatch' }
 
 corepack pnpm@10.12.4 install --frozen-lockfile
 node --test tests/architecture/v1-boundaries.test.mjs tests/milestones/verify-master-plan.mjs
@@ -1135,7 +1177,7 @@ corepack pnpm@10.12.4 --filter @accord/api-client check:generated
 corepack pnpm@10.12.4 lint
 corepack pnpm@10.12.4 typecheck
 ./gradlew clean test :tests:integration:milestoneTest
-./gradlew :apps:webhook-edge:test :apps:agent-pack-gateway:test :apps:attachment-scanner:test :security-services:signing-service:test :security-services:requirement-publisher:test :security-services:merge-controller:test :security-services:break-glass-broker:test :cmd:accordctl:test :cmd:accordctl:jlink
+./gradlew :apps:webhook-edge:test :apps:agent-pack-gateway:test :apps:attachment-scanner:test :security-services:signing-service:test :security-services:provider-connector:test :security-services:credential-broker:test :security-services:merge-controller:test :security-services:break-glass-broker:test :cmd:accordctl:test :cmd:accordctl:jlink
 uv run --project apps/agent-runtime pytest apps/agent-runtime/tests -q
 corepack pnpm@10.12.4 -r test
 corepack pnpm@10.12.4 build:web
@@ -1172,7 +1214,7 @@ if ((git rev-parse HEAD).Trim() -ne $accordReleaseCommit) { throw 'release commi
 if (git status --porcelain --untracked-files=all) { throw 'preflight changed tracked or unignored files' }
 ```
 
-The cumulative OpenAPI test verifies the final ownership manifest and merged surface exactly: Identity `72`, Requirement `47`, Agent `53`, Delivery `22`, and Candidate `26`. A missing, duplicate, reassigned, or unowned operation fails preflight before any protected GA lane starts.
+The cumulative OpenAPI test verifies the final ownership manifest and merged surface exactly: Identity `72`, Requirement `47`, Agent `53`, Provider Onboarding `12`, Delivery `24`, and Candidate `26`. A missing, duplicate, reassigned, or unowned operation fails preflight before any protected GA lane starts. The separate Provider callback-edge OpenAPI is verified independently and cannot appear in the browser-generated ownership union.
 
 Before certification, release automation resolves the exact final candidate's `release-artifact-handoff.json` and downloads only its named manifest, manifest Cosign bundle, `accordctl` SLSA provenance, and immutable release receipt by exact digest and object version. It verifies the unsigned handoff schema and Object Lock identity, then independently verifies the signed manifest, Cosign issuer/workflow identity, provenance builder/materials/subjects, final `source_commit`, release-bundle digest, and canonical natural-person release author. The verified release-artifact tuple is a required immutable predecessor, not a seventh run binding; a missing body, mutable locator, cross-release object, caller-nominated author, or handoff without independent body verification stops the protocol before `ga-certification.yaml`.
 

@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://accord.inforvans.com/contracts/deployment/promotion-input.schema.json",
+  "title": "Accord immutable deployment promotion input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "environment_class",
+    "remote_url",
+    "remote_ref",
+    "remote_sha",
+    "remote_tree_sha",
+    "images",
+    "release_manifest_digest",
+    "dsse_envelope_digest",
+    "verification_receipt_digest",
+    "signature_verified",
+    "scan_policy_passed",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "environment_class": { "enum": ["test", "production"] },
+    "remote_url": { "$ref": "#/$defs/remoteRepository" },
+    "remote_ref": {
+      "type": "string",
+      "pattern": "^refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$",
+      "not": { "type": "string", "pattern": "(?:^|/)(?:HEAD|head|latest)$" }
+    },
+    "remote_sha": { "$ref": "#/$defs/gitSha" },
+    "remote_tree_sha": { "$ref": "#/$defs/gitSha" },
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["control-api", "control-worker", "webhook-edge"],
+      "properties": {
+        "control-api": {
+          "type": "object",
+          "$ref": "#/$defs/image",
+          "properties": {
+            "repository": { "type": "string", "pattern": "/accord-control-api$" }
+          }
+        },
+        "control-worker": {
+          "type": "object",
+          "$ref": "#/$defs/image",
+          "properties": {
+            "repository": { "type": "string", "pattern": "/accord-control-worker$" }
+          }
+        },
+        "webhook-edge": {
+          "type": "object",
+          "$ref": "#/$defs/image",
+          "properties": {
+            "repository": { "type": "string", "pattern": "/accord-webhook-edge$" }
+          }
+        }
+      }
+    },
+    "release_manifest_digest": { "$ref": "#/$defs/digest" },
+    "dsse_envelope_digest": { "$ref": "#/$defs/digest" },
+    "verification_receipt_digest": { "$ref": "#/$defs/digest" },
+    "signature_verified": { "type": "boolean" },
+    "scan_policy_passed": { "type": "boolean" },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "properties": { "environment_class": { "const": "production" } },
+        "required": ["environment_class"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "signature_verified": { "const": true },
+          "scan_policy_passed": { "const": true }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "not": { "const": "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+    },
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "not": { "const": "0000000000000000000000000000000000000000" }
+    },
+    "remoteRepository": {
+      "type": "string",
+      "pattern": "^https://github[.]com/[a-z0-9](?:[a-z0-9-]{0,38})/[A-Za-z0-9._-]+[.]git$",
+      "maxLength": 512
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^(?:ghcr[.]io|public[.]ecr[.]aws|[a-z0-9.-]+[.]azurecr[.]io|[a-z0-9.-]+-docker[.]pkg[.]dev)/[a-z0-9]+(?:[._/-][a-z0-9]+)*$",
+      "not": { "type": "string", "pattern": "[@:]" }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "digest"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/repository" },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    }
+  }
+}

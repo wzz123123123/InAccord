@@ -13,7 +13,7 @@
 ## Scope And Security Invariants
 
 - Implement sections 14, 16.8, and 17 of `requirements-agent-platform-design.md` on top of `2026-07-24-accord-platform-foundation-plan.md`. Do not add delivery, requirement, or acceptance business workflows except for narrow authorization fixtures that prove these controls.
-- Every row, object key, cache key, index document, queue message, and log context has `tenant_id`. Repository-scoped resources also have the provider's immutable repository ID. Tenant-level and pre-binding resources never receive a fabricated repository ID.
+- Every row, object key, cache key, index document, queue message, and log context has `tenant_id`. Repository-scoped resources use the platform `repository_binding_id` as scope authority and retain or reference the complete Provider endpoint/installation/immutable-repository tuple as evidence. Tenant-level and pre-binding resources never receive a fabricated repository identity.
 - The same provider repository cannot be bound to two tenants. Display owner/name and URL may change without changing immutable identity. Transfer, unbind, and rebind require fresh authentication, reconciliation, and a new trust establishment.
 - Human identity is an enterprise subject mapped to a stable natural-person record. Git responsibility uses immutable provider user IDs; commit name/email alone is never evidence. Workloads are separate principals with one registered purpose.
 - Effective authorization is the intersection of active membership, immutable repository match, active role, allowed action, scope containment, valid delegation, separation of duties, current binding version, and required reauthentication.
@@ -280,7 +280,6 @@ import java.time.OffsetDateTime
 import java.util.UUID
 import org.junit.jupiter.api.Test
 
-import static com.inforvans.accord.identity.RepositoryBindingExceptions.ProjectAlreadyHasLiveRepository;
 import static com.inforvans.accord.identity.RepositoryBindingExceptions.RepositoryAlreadyBound;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -290,12 +289,17 @@ class RepositoryBindingRepositoryTest extends IdentityPostgreSqlTest {
     private final TenantId tenantB = new TenantId(UUID.fromString("10000000-0000-0000-0000-000000000002"));
     private final UUID projectA = UUID.fromString("20000000-0000-0000-0000-000000000001");
     private final UUID projectB = UUID.fromString("20000000-0000-0000-0000-000000000002");
+    private final String githubCloud = "sha256:" + "a".repeat(64);
+    private final String gitlabSaas = "sha256:" + "b".repeat(64);
+    private final String githubServer = "sha256:" + "c".repeat(64);
 
     @Test
     void repositoryRenamePreservesImmutableProviderIdentity() {
         seedTenantAndProject(tenantA.value(), projectA);
         var repository = new RepositoryBindingRepository();
-        var binding = repository.bind(dsl, tenantA, projectA, GitProvider.GITHUB, "77831", "acme/demo");
+        var binding = repository.bind(
+            dsl, tenantA, projectA, GitProvider.GITHUB, githubCloud,
+            "github-app-installation-42", "77831", "acme/demo");
         repository.rename(dsl, tenantA, binding.bindingId(), "acme/renamed", binding.version());
         var renamed = repository.get(dsl, tenantA, binding.bindingId());
         assertThat(renamed.immutableRepositoryId()).isEqualTo("77831");
@@ -308,22 +312,36 @@ class RepositoryBindingRepositoryTest extends IdentityPostgreSqlTest {
         seedTenantAndProject(tenantA.value(), projectA);
         seedTenantAndProject(tenantB.value(), projectB);
         var repository = new RepositoryBindingRepository();
-        repository.bind(dsl, tenantA, projectA, GitProvider.GITHUB, "77831", "acme/demo");
-        assertThatThrownBy(() -> repository.bind(dsl, tenantB, projectB, GitProvider.GITHUB, "77831", "acme/demo"))
+        repository.bind(
+            dsl, tenantA, projectA, GitProvider.GITHUB, githubCloud,
+            "github-app-installation-42", "77831", "acme/demo");
+        assertThatThrownBy(() -> repository.bind(
+            dsl, tenantB, projectB, GitProvider.GITHUB, githubCloud,
+            "github-app-installation-99", "77831", "acme/demo"))
             .isInstanceOf(RepositoryAlreadyBound.class);
     }
 
     @Test
-    void projectConflictIsDistinctAndUnboundRepositoryCanEstablishNewTrust() {
+    void oneProjectCanBindManyProvidersAndEndpointIdentityPreventsFalseCollision() {
         seedTenantAndProject(tenantA.value(), projectA);
         seedTenantAndProject(tenantB.value(), projectB);
         var repository = new RepositoryBindingRepository();
-        var old = repository.bind(dsl, tenantA, projectA, GitProvider.GITHUB, "77831", "acme/demo");
-        assertThatThrownBy(() -> repository.bind(dsl, tenantA, projectA, GitProvider.GITHUB, "99117", "acme/other"))
-            .isInstanceOf(ProjectAlreadyHasLiveRepository.class);
+        var old = repository.bind(
+            dsl, tenantA, projectA, GitProvider.GITHUB, githubCloud,
+            "github-app-installation-42", "77831", "acme/demo");
+        var gitlab = repository.bind(
+            dsl, tenantA, projectA, GitProvider.GITLAB, gitlabSaas,
+            "gitlab-oauth-installation-8", "99117", "acme/other");
+        var sameNumericIdOnAnotherEndpoint = repository.bind(
+            dsl, tenantA, projectA, GitProvider.GITHUB, githubServer,
+            "github-server-app-7", "77831", "internal/demo");
+        assertThat(gitlab.bindingId()).isNotEqualTo(old.bindingId());
+        assertThat(sameNumericIdOnAnotherEndpoint.bindingId()).isNotEqualTo(old.bindingId());
 
         repository.markUnbound(dsl, tenantA, old.bindingId(), old.version(), OffsetDateTime.parse("2026-07-24T10:00:00Z"));
-        var rebound = repository.bind(dsl, tenantB, projectB, GitProvider.GITHUB, "77831", "new-owner/demo");
+        var rebound = repository.bind(
+            dsl, tenantB, projectB, GitProvider.GITHUB, githubCloud,
+            "github-app-installation-100", "77831", "new-owner/demo");
         assertThat(rebound.immutableRepositoryId()).isEqualTo("77831");
         assertThat(rebound.version()).isEqualTo(1L);
     }
@@ -365,7 +383,12 @@ CREATE TABLE repository_binding (
     tenant_id uuid NOT NULL,
     repository_binding_id uuid NOT NULL,
     project_id uuid NOT NULL,
-    provider varchar(32) NOT NULL CHECK (provider IN ('GITHUB')),
+    provider varchar(32) NOT NULL CHECK (
+      provider IN ('GITHUB','GITLAB','GITEE','AZURE_DEVOPS','BITBUCKET')
+    ),
+    provider_endpoint_identity char(71) NOT NULL
+      CHECK (provider_endpoint_identity ~ '^sha256:[0-9a-f]{64}$'),
+    provider_installation_id varchar(255) NOT NULL,
     immutable_repository_id varchar(255) NOT NULL,
     display_name varchar(255) NOT NULL,
     state varchar(24) NOT NULL CHECK (state IN ('PENDING_TRUST', 'ACTIVE', 'RECONCILING', 'UNBOUND')),
@@ -375,17 +398,18 @@ CREATE TABLE repository_binding (
     unbound_at timestamptz,
     PRIMARY KEY (tenant_id, repository_binding_id),
     FOREIGN KEY (tenant_id, project_id) REFERENCES project(tenant_id, project_id),
+    UNIQUE (tenant_id, repository_binding_id, provider, provider_endpoint_identity,
+            provider_installation_id, immutable_repository_id),
     CHECK ((state='UNBOUND' AND unbound_at IS NOT NULL) OR (state<>'UNBOUND' AND unbound_at IS NULL))
 );
 
 CREATE UNIQUE INDEX uq_repository_binding_live_provider_repository
-    ON repository_binding (provider, immutable_repository_id)
-    WHERE state IN ('PENDING_TRUST', 'ACTIVE', 'RECONCILING');
-CREATE UNIQUE INDEX uq_repository_binding_live_project
-    ON repository_binding (tenant_id, project_id)
+    ON repository_binding (provider, provider_endpoint_identity, immutable_repository_id)
     WHERE state IN ('PENDING_TRUST', 'ACTIVE', 'RECONCILING');
 CREATE INDEX repository_binding_scope_idx
-    ON repository_binding (tenant_id, project_id, immutable_repository_id);
+    ON repository_binding (
+      tenant_id, project_id, provider, provider_endpoint_identity, immutable_repository_id
+    );
 
 SELECT accord_security.enforce_tenant_table('public.tenant'::regclass);
 SELECT accord_security.enforce_tenant_table('public.project'::regclass);
@@ -397,7 +421,7 @@ GRANT SELECT ON tenant, project, repository_binding TO accord_worker;
 GRANT UPDATE ON repository_binding TO accord_worker;
 ```
 
-The live-state global index intentionally forbids one provider repository from being trusted by two tenants at the same time, while retaining immutable `UNBOUND` history and permitting a separately authorized rebind. The project index likewise permits only one live repository per project. Only `repository_binding` contains `immutable_repository_id`; `tenant` and pre-binding identity-provider rows do not. V010 uses the helper already installed by Foundation V001; its three individual calls execute after every index and before the explicit least-privilege grants. Extend `RepositoryBindingRepositoryTest` to require exact forced policy catalogs and exact grants, including no `DELETE`, no worker write to `tenant`/`project`, and no privilege granted to `PUBLIC`.
+The live-state global index intentionally forbids one exact `{Provider family, normalized endpoint identity, immutable repository ID}` from being trusted by two tenants at the same time, while retaining immutable `UNBOUND` history and permitting a separately authorized rebind. There is deliberately no project-wide single-repository index: one project may bind many repositories and installations across all five Provider families. The endpoint identity is a platform-normalized digest, not a caller URL, so equal numeric IDs on two self-managed servers do not collide and alternate spellings of one server cannot bypass uniqueness. Provider family, endpoint identity, installation and immutable repository identity are update-forbidden; rename changes only `display_name`, while transfer or installation change requires unbind plus a new trust establishment. Only `repository_binding` contains the immutable external repository tuple; `tenant` and pre-binding identity-provider rows do not. V010 uses the helper already installed by Foundation V001; its three individual calls execute after every index and before the explicit least-privilege grants. Extend `RepositoryBindingRepositoryTest` to require exact forced policy catalogs and exact grants, including no `DELETE`, no worker write to `tenant`/`project`, and no privilege granted to `PUBLIC`.
 
 - [ ] **Step 4: Add scope types that cannot fabricate repository identity**
 
@@ -447,6 +471,8 @@ public sealed interface ScopeIdentity permits ScopeIdentity.Tenant, ScopeIdentit
         UUID projectId,
         UUID bindingId,
         GitProvider provider,
+        String providerEndpointIdentity,
+        String providerInstallationId,
         String immutableRepositoryId
     ) implements ScopeIdentity {
         public Repository {
@@ -454,12 +480,19 @@ public sealed interface ScopeIdentity permits ScopeIdentity.Tenant, ScopeIdentit
             Objects.requireNonNull(projectId, "projectId");
             Objects.requireNonNull(bindingId, "bindingId");
             Objects.requireNonNull(provider, "provider");
+            if (providerEndpointIdentity == null ||
+                !providerEndpointIdentity.matches("^sha256:[0-9a-f]{64}$")) {
+                throw new IllegalArgumentException("providerEndpointIdentity is invalid");
+            }
+            if (providerInstallationId == null || providerInstallationId.isBlank()) {
+                throw new IllegalArgumentException("providerInstallationId is required");
+            }
             if (immutableRepositoryId == null || immutableRepositoryId.isBlank()) {
                 throw new IllegalArgumentException("immutableRepositoryId is required");
             }
         }
         public String scopeType() { return "repository"; }
-        public String scopeId() { return immutableRepositoryId; }
+        public String scopeId() { return bindingId.toString(); }
     }
 }
 ```
@@ -471,15 +504,20 @@ package com.inforvans.accord.identity;
 
 import java.util.UUID;
 
-enum GitProvider { GITHUB }
+enum GitProvider { GITHUB, GITLAB, GITEE, AZURE_DEVOPS, BITBUCKET }
+enum RepositoryBindingState { PENDING_TRUST, ACTIVE, RECONCILING, UNBOUND }
 
 public record RepositoryBinding(
     TenantId tenantId,
     UUID bindingId,
     UUID projectId,
     GitProvider provider,
+    String providerEndpointIdentity,
+    String providerInstallationId,
     String immutableRepositoryId,
     String displayName,
+    RepositoryBindingState state,
+    UUID trustEstablishmentId,
     long version
 ) {}
 ```
@@ -489,20 +527,12 @@ Create `RepositoryBindingExceptions.java`:
 ```java
 package com.inforvans.accord.identity;
 
-import java.util.UUID;
-
 final class RepositoryBindingExceptions {
     private RepositoryBindingExceptions() {}
 
     static final class RepositoryAlreadyBound extends RuntimeException {
-        RepositoryAlreadyBound(GitProvider provider, String id) {
-            super(provider + " repository " + id + " is already bound");
-        }
-    }
-
-    static final class ProjectAlreadyHasLiveRepository extends RuntimeException {
-        ProjectAlreadyHasLiveRepository(UUID projectId) {
-            super("project " + projectId + " already has a live repository binding");
+        RepositoryAlreadyBound(GitProvider provider, String endpointIdentity, String id) {
+            super(provider + " repository " + endpointIdentity + "/" + id + " is already bound");
         }
     }
 }
@@ -521,27 +551,30 @@ import org.jooq.DSLContext
 import org.jooq.exception.DataAccessException
 import org.postgresql.util.PSQLException
 
-import static com.inforvans.accord.identity.RepositoryBindingExceptions.ProjectAlreadyHasLiveRepository;
 import static com.inforvans.accord.identity.RepositoryBindingExceptions.RepositoryAlreadyBound;
 
 final class RepositoryBindingRepository {
-    RepositoryBinding bind(DSLContext tx, TenantId tenantId, UUID projectId, GitProvider provider, String immutableId, String displayName) {
+    RepositoryBinding bind(
+        DSLContext tx, TenantId tenantId, UUID projectId, GitProvider provider,
+        String providerEndpointIdentity, String providerInstallationId,
+        String immutableId, String displayName
+    ) {
         var bindingId = UUID.randomUUID();
         try {
             tx.execute(
                 """INSERT INTO repository_binding
-                   (tenant_id, repository_binding_id, project_id, provider, immutable_repository_id, display_name, state)
-                   VALUES (?, ?, ?, ?, ?, ?, 'PENDING_TRUST')""",
-                tenantId.value(), bindingId, projectId, provider.name(), immutableId, displayName
+                   (tenant_id, repository_binding_id, project_id, provider,
+                    provider_endpoint_identity, provider_installation_id,
+                    immutable_repository_id, display_name, state)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_TRUST')""",
+                tenantId.value(), bindingId, projectId, provider.name(),
+                providerEndpointIdentity, providerInstallationId, immutableId, displayName
             );
         } catch (DataAccessException error) {
             if ("23505".equals(error.sqlState()) && postgresCause(error) != null) {
                 var constraint = postgresCause(error).getServerErrorMessage().getConstraint();
                 if ("uq_repository_binding_live_provider_repository".equals(constraint)) {
-                    throw new RepositoryAlreadyBound(provider, immutableId);
-                }
-                if ("uq_repository_binding_live_project".equals(constraint)) {
-                    throw new ProjectAlreadyHasLiveRepository(projectId);
+                    throw new RepositoryAlreadyBound(provider, providerEndpointIdentity, immutableId);
                 }
             }
             throw error;
@@ -571,7 +604,10 @@ final class RepositoryBindingRepository {
 
     RepositoryBinding get(DSLContext tx, TenantId tenantId, UUID bindingId) {
         var row = tx.fetchOne(
-            """SELECT tenant_id, repository_binding_id, project_id, provider, immutable_repository_id, display_name, version
+            """SELECT tenant_id, repository_binding_id, project_id, provider,
+                      provider_endpoint_identity, provider_installation_id,
+                      immutable_repository_id, display_name, state,
+                      trust_establishment_id, version
                FROM repository_binding WHERE tenant_id=? AND repository_binding_id=?""",
             tenantId.value(), bindingId
         );
@@ -579,7 +615,11 @@ final class RepositoryBindingRepository {
         return new RepositoryBinding(
                 new TenantId(row.get("tenant_id", UUID.class)), row.get("repository_binding_id", UUID.class),
                 row.get("project_id", UUID.class), GitProvider.valueOf(row.get("provider", String.class)),
+                row.get("provider_endpoint_identity", String.class),
+                row.get("provider_installation_id", String.class),
                 row.get("immutable_repository_id", String.class), row.get("display_name", String.class),
+                RepositoryBindingState.valueOf(row.get("state", String.class)),
+                row.get("trust_establishment_id", UUID.class),
                 row.get("version", Long.class)
         );
     }
@@ -705,7 +745,7 @@ Run:
 ./gradlew :apps:control-plane:modules:identity:test --tests '*RepositoryBindingRepositoryTest'
 ```
 
-Expected: PASS. A rename changes only display data and version; the immutable ID remains `77831`; the two named live-state indexes distinguish provider-global and per-project conflicts; an `UNBOUND` historical row no longer prevents a fresh trust establishment.
+Expected: PASS. A rename changes only display data and version; the immutable ID remains `77831`; the endpoint-aware global live-state index prevents cross-tenant duplicate trust while the absence of a project-wide unique index allows many repositories and installations in one project; equal Provider-native IDs on different endpoint identities do not collide; an `UNBOUND` historical row no longer prevents a fresh trust establishment.
 
 - [ ] **Step 7: Commit tenant and repository identity**
 
@@ -1378,13 +1418,18 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class EnterpriseIdentityTest extends IdentityPostgreSqlTest {
+    private static final String GITHUB_CLOUD = "sha256:" + "a".repeat(64);
+
     @Test
     void gitEmailCannotReplaceImmutableUserBinding() {
         var tenant = seedTenant();
         var person = seedPerson(tenant, "oidc-subject-7");
         var repository = new GitIdentityRepository();
-        transactions.write(tenant, tx -> repository.bind(tx, tenant, person.accountId(), GitProvider.GITHUB, "MDQ6VXNlcjE3", "dev@example.test"));
-        assertThat(transactions.read(tenant, tx -> repository.resolve(tx, tenant, GitProvider.GITHUB, "MDQ6VXNlcjE3").accountId()))
+        transactions.write(tenant, tx -> repository.bind(
+            tx, tenant, person.accountId(), GitProvider.GITHUB, GITHUB_CLOUD,
+            "MDQ6VXNlcjE3", "dev@example.test"));
+        assertThat(transactions.read(tenant, tx -> repository.resolve(
+            tx, tenant, GitProvider.GITHUB, GITHUB_CLOUD, "MDQ6VXNlcjE3").accountId()))
             .isEqualTo(person.accountId());
         assertThatThrownBy(() -> transactions.read(tenant, tx -> repository.resolveByCommitEmail(tx, tenant, "dev@example.test")))
             .isInstanceOf(NoSuchElementException.class);
@@ -1396,10 +1441,13 @@ class EnterpriseIdentityTest extends IdentityPostgreSqlTest {
         var original = seedPerson(tenant, "oidc-subject-7");
         var replacement = seedPerson(tenant, "oidc-subject-8");
         var repository = new GitIdentityRepository();
-        transactions.write(tenant, tx -> repository.bind(tx, tenant, original.accountId(), GitProvider.GITHUB, "MDQ6VXNlcjE3", "dev@example.test"));
+        transactions.write(tenant, tx -> repository.bind(
+            tx, tenant, original.accountId(), GitProvider.GITHUB, GITHUB_CLOUD,
+            "MDQ6VXNlcjE3", "dev@example.test"));
 
         var pending = transactions.write(tenant, tx -> repository.requestChange(
-            tx, tenant, GitProvider.GITHUB, "MDQ6VXNlcjE3", replacement.accountId(), 1,
+            tx, tenant, GitProvider.GITHUB, GITHUB_CLOUD, "MDQ6VXNlcjE3",
+            replacement.accountId(), 1,
             original.accountId(), UUID.fromString("70000000-0000-0000-0000-000000000001"),
             OffsetDateTime.parse("2026-07-24T10:00:00Z")
         ));
@@ -1408,7 +1456,8 @@ class EnterpriseIdentityTest extends IdentityPostgreSqlTest {
         assertThat(pending.bindingVersion()).isEqualTo(2L);
         assertThat(dsl.fetchCount(org.jooq.impl.DSL.table("outbox_event"))).isOne();
         assertThat(dsl.fetchCount(org.jooq.impl.DSL.table("git_identity_binding_change"))).isOne();
-        assertThatThrownBy(() -> transactions.read(tenant, tx -> repository.resolve(tx, tenant, GitProvider.GITHUB, "MDQ6VXNlcjE3")))
+        assertThatThrownBy(() -> transactions.read(tenant, tx -> repository.resolve(
+            tx, tenant, GitProvider.GITHUB, GITHUB_CLOUD, "MDQ6VXNlcjE3")))
             .isInstanceOf(NoSuchElementException.class);
     }
 
@@ -1440,7 +1489,7 @@ class EnterpriseIdentityTest extends IdentityPostgreSqlTest {
 }
 ```
 
-Add `seedGitAndWorkload` to `IdentityPostgreSqlTest` as migration-owner setup that inserts one valid Git binding and one workload row for the supplied tenant/account. It is setup only; all reads and cross-tenant delete/insert attempts above use the one-connection `accord_api` pool and `TenantTransactions`.
+Add `seedGitAndWorkload` to `IdentityPostgreSqlTest` as migration-owner setup that inserts one valid endpoint-aware Git binding and one workload row for the supplied tenant/account. The fixture takes an explicit normalized endpoint identity and never derives it from a display URL. It is setup only; all reads and cross-tenant delete/insert attempts above use the one-connection `accord_api` pool and `TenantTransactions`.
 
 - [ ] **Step 2: Run the test and verify the identity schema is absent**
 
@@ -1493,22 +1542,28 @@ CREATE TABLE human_account (
 
 CREATE TABLE git_identity_binding (
     tenant_id uuid NOT NULL,
-    provider varchar(32) NOT NULL CHECK (provider IN ('GITHUB')),
+    provider varchar(32) NOT NULL CHECK (
+      provider IN ('GITHUB','GITLAB','GITEE','AZURE_DEVOPS','BITBUCKET')
+    ),
+    provider_endpoint_identity char(71) NOT NULL
+      CHECK (provider_endpoint_identity ~ '^sha256:[0-9a-f]{64}$'),
     immutable_git_user_id varchar(255) NOT NULL,
     account_id uuid NOT NULL,
     display_email varchar(320),
     state varchar(16) NOT NULL CHECK (state IN ('ACTIVE', 'REVIEW_REQUIRED', 'REVOKED')),
     binding_version bigint NOT NULL DEFAULT 1,
     bound_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
-    PRIMARY KEY (tenant_id, provider, immutable_git_user_id),
+    PRIMARY KEY (tenant_id, provider, provider_endpoint_identity, immutable_git_user_id),
     FOREIGN KEY (tenant_id, account_id) REFERENCES human_account(tenant_id, account_id),
-    UNIQUE (tenant_id, provider, account_id)
+    UNIQUE (tenant_id, provider, provider_endpoint_identity, account_id)
 );
 
 CREATE TABLE git_identity_binding_change (
     tenant_id uuid NOT NULL,
     change_id uuid NOT NULL,
     provider varchar(32) NOT NULL,
+    provider_endpoint_identity char(71) NOT NULL
+      CHECK (provider_endpoint_identity ~ '^sha256:[0-9a-f]{64}$'),
     immutable_git_user_id varchar(255) NOT NULL,
     current_account_id uuid NOT NULL,
     replacement_account_id uuid NOT NULL,
@@ -1521,8 +1576,10 @@ CREATE TABLE git_identity_binding_change (
     decided_by_account_id uuid,
     decided_at timestamptz,
     PRIMARY KEY (tenant_id, change_id),
-    FOREIGN KEY (tenant_id, provider, immutable_git_user_id)
-      REFERENCES git_identity_binding(tenant_id, provider, immutable_git_user_id),
+    FOREIGN KEY (tenant_id, provider, provider_endpoint_identity, immutable_git_user_id)
+      REFERENCES git_identity_binding(
+        tenant_id, provider, provider_endpoint_identity, immutable_git_user_id
+      ),
     FOREIGN KEY (tenant_id, current_account_id) REFERENCES human_account(tenant_id, account_id),
     FOREIGN KEY (tenant_id, replacement_account_id) REFERENCES human_account(tenant_id, account_id),
     FOREIGN KEY (tenant_id, requested_by_account_id) REFERENCES human_account(tenant_id, account_id),
@@ -1534,7 +1591,11 @@ CREATE TABLE git_identity_binding_change (
 CREATE TABLE workload_identity (
     tenant_id uuid NOT NULL REFERENCES tenant(tenant_id),
     workload_identity_id uuid NOT NULL,
-    purpose varchar(32) NOT NULL CHECK (purpose IN ('REQUIREMENT_PUBLICATION', 'STRICT_MERGE', 'CI_ATTESTATION', 'ARTIFACT_PROVENANCE', 'NOTIFICATION', 'ATTACHMENT_SCANNING')),
+    purpose varchar(40) NOT NULL CHECK (purpose IN (
+      'DEVELOPMENT_PACKAGE_PUBLICATION', 'PROVIDER_CONNECTOR', 'CREDENTIAL_BROKER',
+      'STRICT_MERGE', 'CI_ATTESTATION', 'ARTIFACT_PROVENANCE',
+      'NOTIFICATION', 'ATTACHMENT_SCANNING'
+    )),
     oidc_issuer varchar(1024) NOT NULL,
     immutable_subject varchar(1024) NOT NULL,
     audience varchar(255) NOT NULL,
@@ -1603,7 +1664,16 @@ package com.inforvans.accord.identity;
 
 import java.util.UUID;
 
-enum WorkloadPurpose { REQUIREMENT_PUBLICATION, STRICT_MERGE, CI_ATTESTATION, ARTIFACT_PROVENANCE, NOTIFICATION, ATTACHMENT_SCANNING }
+enum WorkloadPurpose {
+    DEVELOPMENT_PACKAGE_PUBLICATION,
+    PROVIDER_CONNECTOR,
+    CREDENTIAL_BROKER,
+    STRICT_MERGE,
+    CI_ATTESTATION,
+    ARTIFACT_PROVENANCE,
+    NOTIFICATION,
+    ATTACHMENT_SCANNING
+}
 
 public sealed interface PrincipalIdentity permits PrincipalIdentity.Human, PrincipalIdentity.Workload {
     record Human(UUID accountId, UUID naturalPersonId, long identityVersion) implements PrincipalIdentity {}
@@ -1625,20 +1695,22 @@ final class HumanPrincipalRequired extends RuntimeException {
 Create `GitIdentityRepository.java`; it resolves only immutable active bindings and moves a requested account change into review in the same transaction as its outbox event:
 
 ```java
-package com.inforvans.accord.identity
+package com.inforvans.accord.identity;
 
-import com.inforvans.accord.reliability.DomainEvent
-import com.inforvans.accord.reliability.ReliableEventStore
-import java.nio.charset.StandardCharsets
-import java.time.OffsetDateTime
-import java.util.UUID
-import org.jooq.DSLContext
+import com.inforvans.accord.reliability.DomainEvent;
+import com.inforvans.accord.reliability.ReliableEventStore;
+import java.nio.charset.StandardCharsets;
+import java.time.OffsetDateTime;
+import java.util.NoSuchElementException;
+import java.util.UUID;
+import org.jooq.DSLContext;
 
 enum GitBindingState { ACTIVE, REVIEW_REQUIRED, REVOKED }
 
 record GitIdentityBinding(
     TenantId tenantId,
     GitProvider provider,
+    String providerEndpointIdentity,
     String immutableGitUserId,
     UUID accountId,
     String displayEmail,
@@ -1652,20 +1724,31 @@ final class GitIdentityRepository {
         TenantId tenantId,
         UUID accountId,
         GitProvider provider,
+        String providerEndpointIdentity,
         String immutableGitUserId,
         String displayEmail
     ) {
         tx.execute(
             """INSERT INTO git_identity_binding
-               (tenant_id, provider, immutable_git_user_id, account_id, display_email, state)
-               VALUES (?, ?, ?, ?, ?, 'ACTIVE')""",
-            tenantId.value(), provider.name(), immutableGitUserId, accountId, displayEmail
+               (tenant_id, provider, provider_endpoint_identity, immutable_git_user_id,
+                account_id, display_email, state)
+               VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE')""",
+            tenantId.value(), provider.name(), providerEndpointIdentity,
+            immutableGitUserId, accountId, displayEmail
         );
-        return resolve(tx, tenantId, provider, immutableGitUserId);
+        return resolve(tx, tenantId, provider, providerEndpointIdentity, immutableGitUserId);
     }
 
-    GitIdentityBinding resolve(DSLContext tx, TenantId tenantId, GitProvider provider, String immutableGitUserId) {
-        var binding = select(tx, tenantId, provider, immutableGitUserId, GitBindingState.ACTIVE);
+    GitIdentityBinding resolve(
+        DSLContext tx,
+        TenantId tenantId,
+        GitProvider provider,
+        String providerEndpointIdentity,
+        String immutableGitUserId
+    ) {
+        var binding = select(
+            tx, tenantId, provider, providerEndpointIdentity,
+            immutableGitUserId, GitBindingState.ACTIVE);
         if (binding == null) throw new NoSuchElementException("active Git identity binding not found");
         return binding;
     }
@@ -1678,6 +1761,7 @@ final class GitIdentityRepository {
         DSLContext tx,
         TenantId tenantId,
         GitProvider provider,
+        String providerEndpointIdentity,
         String immutableGitUserId,
         UUID replacementAccountId,
         long expectedVersion,
@@ -1691,9 +1775,11 @@ final class GitIdentityRepository {
             ) == null) throw new IllegalStateException("replacement human account is not active");
         var current = tx.fetchOne(
             """SELECT account_id,binding_version FROM git_identity_binding
-               WHERE tenant_id=? AND provider=? AND immutable_git_user_id=?
+               WHERE tenant_id=? AND provider=? AND provider_endpoint_identity=?
+                 AND immutable_git_user_id=?
                  AND state='ACTIVE' AND binding_version=? FOR UPDATE""",
-            tenantId.value(), provider.name(), immutableGitUserId, expectedVersion
+            tenantId.value(), provider.name(), providerEndpointIdentity,
+            immutableGitUserId, expectedVersion
         );
         if (current == null) throw new IllegalStateException("Git identity binding version conflict");
         var currentAccountId = current.get("account_id", UUID.class);
@@ -1704,35 +1790,43 @@ final class GitIdentityRepository {
         var changed = tx.execute(
             """UPDATE git_identity_binding
                SET state='REVIEW_REQUIRED', binding_version=binding_version+1
-               WHERE tenant_id=? AND provider=? AND immutable_git_user_id=?
+               WHERE tenant_id=? AND provider=? AND provider_endpoint_identity=?
+                 AND immutable_git_user_id=?
                  AND state='ACTIVE' AND binding_version=?""",
-            tenantId.value(), provider.name(), immutableGitUserId, expectedVersion
+            tenantId.value(), provider.name(), providerEndpointIdentity,
+            immutableGitUserId, expectedVersion
         );
         if (changed != 1) throw new IllegalStateException("Git identity binding version conflict");
 
-        var pending = select(tx, tenantId, provider, immutableGitUserId, GitBindingState.REVIEW_REQUIRED);
+        var pending = select(
+            tx, tenantId, provider, providerEndpointIdentity,
+            immutableGitUserId, GitBindingState.REVIEW_REQUIRED);
         if (pending == null) throw new IllegalStateException("review-required Git identity binding disappeared");
         tx.execute(
             """INSERT INTO git_identity_binding_change
-               (tenant_id,change_id,provider,immutable_git_user_id,current_account_id,replacement_account_id,
+               (tenant_id,change_id,provider,provider_endpoint_identity,immutable_git_user_id,
+                current_account_id,replacement_account_id,
                 requested_binding_version,resulting_binding_version,requested_by_account_id,action_request_id,state,requested_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,'REVIEW_REQUIRED',?)""",
-            tenantId.value(), changeId, provider.name(), immutableGitUserId, currentAccountId, replacementAccountId,
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,'REVIEW_REQUIRED',?)""",
+            tenantId.value(), changeId, provider.name(), providerEndpointIdentity,
+            immutableGitUserId, currentAccountId, replacementAccountId,
             expectedVersion, pending.bindingVersion(), actorId, actionRequestId, now
         );
         var payloadRow = tx.fetchOne(
             """SELECT jsonb_build_object(
-                 'change_id', ?, 'action_request_id', ?, 'provider', ?, 'immutable_git_user_id', ?,
+                 'change_id', ?, 'action_request_id', ?, 'provider', ?,
+                 'provider_endpoint_identity', ?, 'immutable_git_user_id', ?,
                  'current_account_id', ?, 'replacement_account_id', ?,
                  'binding_version', ?
                )::text""",
-            changeId, actionRequestId, provider.name(), immutableGitUserId,
+            changeId, actionRequestId, provider.name(), providerEndpointIdentity, immutableGitUserId,
             pending.accountId(), replacementAccountId, pending.bindingVersion()
         );
         if (payloadRow == null) throw new IllegalStateException("Git identity review payload was not created");
         var payload = payloadRow.get(0, String.class);
         var aggregateId = UUID.nameUUIDFromBytes(
-            (provider.name() + ":" + immutableGitUserId).getBytes(StandardCharsets.UTF_8)
+            (provider.name() + ":" + providerEndpointIdentity + ":" + immutableGitUserId)
+                .getBytes(StandardCharsets.UTF_8)
         );
         new ReliableEventStore(tx).append(new DomainEvent(
             UUID.randomUUID(), tenantId.value(), "tenant", tenantId.value().toString(),
@@ -1747,19 +1841,23 @@ final class GitIdentityRepository {
         DSLContext tx,
         TenantId tenantId,
         GitProvider provider,
+        String providerEndpointIdentity,
         String immutableGitUserId,
         GitBindingState state
     ) {
         var row = tx.fetchOne(
-        """SELECT tenant_id, provider, immutable_git_user_id, account_id, display_email, state, binding_version
+        """SELECT tenant_id, provider, provider_endpoint_identity, immutable_git_user_id,
+                  account_id, display_email, state, binding_version
            FROM git_identity_binding
-           WHERE tenant_id=? AND provider=? AND immutable_git_user_id=? AND state=?""",
-        tenantId.value(), provider.name(), immutableGitUserId, state.name()
+           WHERE tenant_id=? AND provider=? AND provider_endpoint_identity=?
+             AND immutable_git_user_id=? AND state=?""",
+        tenantId.value(), provider.name(), providerEndpointIdentity, immutableGitUserId, state.name()
         );
         if (row == null) return null;
         return new GitIdentityBinding(
             new TenantId(row.get("tenant_id", UUID.class)),
             GitProvider.valueOf(row.get("provider", String.class)),
+            row.get("provider_endpoint_identity", String.class),
             row.get("immutable_git_user_id", String.class),
             row.get("account_id", UUID.class),
             row.get("display_email", String.class),
@@ -1961,7 +2059,13 @@ abstract class AuthorizationPostgreSqlTest {
         var providerId = UUID.fromString("21000000-0000-0000-0000-000000000001");
         migratorDsl.execute("INSERT INTO tenant(tenant_id,slug,display_name,status) VALUES (?,?,?,'ACTIVE')", tenantId.value(), "tenant-auth", "Authorization Tenant");
         migratorDsl.execute("INSERT INTO project(tenant_id,project_id,name,delivery_mode,status) VALUES (?,?,?,?,'ACTIVE')", tenantId.value(), projectId, "Accord", mode.name());
-        migratorDsl.execute("INSERT INTO repository_binding(tenant_id,repository_binding_id,project_id,provider,immutable_repository_id,display_name,state) VALUES (?,?,?,'GITHUB','77831','accord','ACTIVE')", tenantId.value(), UUID.fromString("22000000-0000-0000-0000-000000000001"), projectId);
+        migratorDsl.execute(
+            """INSERT INTO repository_binding
+               (tenant_id,repository_binding_id,project_id,provider,provider_endpoint_identity,
+                provider_installation_id,immutable_repository_id,display_name,state)
+               VALUES (?,?,?,'GITHUB',?,'github-app-installation-42','77831','accord','ACTIVE')""",
+            tenantId.value(), UUID.fromString("22000000-0000-0000-0000-000000000001"),
+            projectId, "sha256:" + "a".repeat(64));
         migratorDsl.execute("INSERT INTO identity_provider(tenant_id,identity_provider_id,kind,issuer_or_entity_id,configuration_secret_ref,state) VALUES (?,?,'OIDC','https://idp.example.test','secret://test','ACTIVE')", tenantId.value(), providerId);
         migratorDsl.execute("INSERT INTO project_authorization_policy(tenant_id,project_id) VALUES (?,?)", tenantId.value(), projectId);
         java.util.function.IntFunction<PrincipalIdentity.Human> human = suffix -> {
@@ -2133,7 +2237,7 @@ sealed interface Scope permits Scope.Tenant, Scope.Project, Scope.Resource {
 }
 sealed interface ResourceTarget permits ResourceTarget.Project, ResourceTarget.Repository, ResourceTarget.Scoped {
     record Project(UUID projectId) implements ResourceTarget {}
-    record Repository(UUID projectId, String immutableRepositoryId) implements ResourceTarget {}
+    record Repository(UUID projectId, UUID repositoryBindingId) implements ResourceTarget {}
     record Scoped(UUID projectId, String type, String id) implements ResourceTarget {}
 }
 enum DenyReason {
@@ -2172,7 +2276,8 @@ AuthorizationDecision decide(DSLContext tx, AuthorizationRequest request) {
     if (snapshot.identityVersion() != human.identityVersion()) return denied(DenyReason.IDENTITY_VERSION_STALE);
     if (request.target() instanceof ResourceTarget.Repository target &&
         (snapshot.repositoryBinding() == null ||
-         !snapshot.repositoryBinding().matches(request.tenantId(), request.projectId(), target.immutableRepositoryId()))) {
+         !snapshot.repositoryBinding().matches(
+             request.tenantId(), request.projectId(), target.repositoryBindingId()))) {
         return denied(DenyReason.REPOSITORY_BINDING_MISMATCH)
     }
     var bindings = snapshot.roleBindings().stream()
@@ -2204,12 +2309,12 @@ AuthorizationDecision decide(DSLContext tx, AuthorizationRequest request) {
 }
 ```
 
-`loadSnapshot` executes the repository binding query below through the supplied transaction; neither `AuthorizationRequest` nor an HTTP DTO contains a `boundRepositoryId` field:
+`loadSnapshot` executes the exact repository-binding query below through the supplied transaction. The application layer constructs the internal `ResourceTarget.Repository` only after resolving the route resource beneath the verified tenant/project; no HTTP body can assert an immutable Provider repository tuple:
 
 ```sql
 SELECT repository_binding_id, immutable_repository_id, version, state
 FROM repository_binding
-WHERE tenant_id=? AND project_id=? AND state='ACTIVE'
+WHERE tenant_id=? AND project_id=? AND repository_binding_id=? AND state='ACTIVE'
 FOR SHARE;
 ```
 
@@ -3373,7 +3478,7 @@ service AuthorizationEvidenceService {
 
 This is the immutable strict-merge v1 baseline. Protobuf fields 1-10 of `ExactAuthorizationBinding`, every field number in `ConsumeAuthorizationToken*`, the v1 RPC wire name, `signing-claims.schema.json`, and `claims.{input,canonical,sha256}` are compatibility records and must never be renumbered, repurposed, or rewritten. Git Delivery Task 1 appends only new protobuf field numbers and creates a separate closed `signing-claims-v2.schema.json` plus `claims-v2.*` goldens; Git Delivery Task 9 makes v2 the only issuable/reservable strict protocol while retaining v1 verification for historical evidence. The package name remains `accord.signing.v1` because protobuf package version and signed claims schema version are independent compatibility axes.
 
-`VerifiedMergeSubject` and `ExactAuthorizationBinding` are exclusively the strict Merge Controller contract. Their closed subject types are `work_item_pr`, `requirement_metadata`, `accepted_delivery_candidate`, and `emergency_change`; no caller may smuggle a type through `subject_id`. Producers calculate `subject_digest` from the authoritative subject evidence using the JCS preimage `{"domain":"accord.verified-merge-subject.v1","subject_type":...,"subject_id":...,"evidence":...}`. The Signing Service signs type, ID, and digest separately, requires `object_id="<subject_type>:<subject_id>"`, and consumers compare all three before nonce consumption. Thus an identical digest byte string under another subject type is a different signed domain and cannot authorize it.
+The frozen v1 `VerifiedMergeSubject` and `ExactAuthorizationBinding` are exclusively the historical strict Merge Controller contract. Their closed v1 subject types are `work_item_pr`, `requirement_metadata`, `accepted_delivery_candidate`, and `emergency_change`; no caller may smuggle a type through `subject_id`. Producers calculate `subject_digest` from the authoritative subject evidence using the JCS preimage `{"domain":"accord.verified-merge-subject.v1","subject_type":...,"subject_id":...,"evidence":...}`. The Signing Service signs type, ID, and digest separately, requires `object_id="<subject_type>:<subject_id>"`, and consumers compare all three before nonce consumption. Thus an identical digest byte string under another subject type is a different signed domain and cannot authorize it. Once Git Delivery v2 activates, this set is verification-only and `requirement_metadata` cannot be newly issued or reserved.
 
 `BreakGlassAuthorizationBinding` is a distinct closed contract and never appears in `SignDsse`, `ConsumeAuthorizationToken`, `ExactAuthorizationBinding`, or `VerifiedMergeSubject`. Its three Provider actions are exhaustive: merge one already-authorized EmergencyChange, restore one certified protection-policy digest, or fence one Provider installation credential epoch. Arbitrary ref update, force push, delete, blob/commit/content mutation, and arbitrary Provider endpoint invocation have no enum or parameters branch. The Git Delivery plan owns the action-specific closed parameter `oneOf`; `provider_action_parameters_digest` is the RFC 8785 digest of that exact typed branch, and `grant_action_digest` is the digest of `{action,parameters}`. Before requesting a signature, the action-specific Broker profile must atomically reserve a positive generation, generate a 256-bit raw nonce inside that workload, and place only `nonce_hash = SHA-256(raw_nonce)` plus the reservation generation in the binding. The raw nonce is never a protobuf, JSON, persistence, audit, log, or browser field. The Signing Service exposes only the separate `IssueBreakGlassAuthorization` RPC under purpose `BREAK_GLASS`, domain `accord.break-glass.authorization.v1`, and DSSE payload type `application/vnd.accord.break-glass-authorization.v1+jcs`; strict and break-glass request types are rejected by each other's handlers.
 
@@ -3445,7 +3550,7 @@ Create `signing-claims.schema.json` as the permanently retained v1 schema (later
     "domain": { "type": "string", "pattern": "^accord\\.[a-z0-9.-]+\\.v1$" },
     "tenant_id": { "type": "string", "format": "uuid" },
     "scope_type": { "enum": ["tenant", "project", "repository"] },
-    "scope_id": { "type": "string", "minLength": 1 },
+    "scope_id": { "type": "string", "format": "uuid" },
     "immutable_repository_id": { "type": "string", "minLength": 1 },
     "object_id": { "type": "string", "minLength": 1 },
     "content_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
@@ -3567,7 +3672,7 @@ Create `claims.input.json` and its JCS-normalized `claims.canonical.json` with t
   "domain": "accord.audit-anchor.v1",
   "tenant_id": "10000000-0000-0000-0000-000000000001",
   "scope_type": "repository",
-  "scope_id": "77831",
+  "scope_id": "22000000-0000-0000-0000-000000000001",
   "immutable_repository_id": "77831",
   "object_id": "anchor-2026-07-24-0001",
   "content_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -3578,13 +3683,13 @@ Create `claims.input.json` and its JCS-normalized `claims.canonical.json` with t
 Use this exact content for `claims.canonical.json`:
 
 ```json
-{"algorithm":"ES256","content_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","domain":"accord.audit-anchor.v1","immutable_repository_id":"77831","issued_at":"2026-07-24T10:00:00Z","key_id":"kms://tenant-21/audit-anchor/1","object_id":"anchor-2026-07-24-0001","payload_type":"application/vnd.accord.audit-anchor+json","purpose":"audit-anchor","schema_version":"1.0.0","scope_id":"77831","scope_type":"repository","tenant_id":"10000000-0000-0000-0000-000000000001"}
+{"algorithm":"ES256","content_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","domain":"accord.audit-anchor.v1","immutable_repository_id":"77831","issued_at":"2026-07-24T10:00:00Z","key_id":"kms://tenant-21/audit-anchor/1","object_id":"anchor-2026-07-24-0001","payload_type":"application/vnd.accord.audit-anchor+json","purpose":"audit-anchor","schema_version":"1.0.0","scope_id":"22000000-0000-0000-0000-000000000001","scope_type":"repository","tenant_id":"10000000-0000-0000-0000-000000000001"}
 ```
 
 Use this exact content for `claims.sha256`:
 
 ```text
-sha256:54cdd46c02ccff798796063e5e9138d73032f7a65af512281852b4de85a88dd7
+sha256:bc9a70bf1332e986e8ed27ae29dbd1bb5aa7f955fa9905d37f89eaf9c6ca7312
 ```
 
 Generate `claims.sha256` from the canonical bytes with:
@@ -4342,7 +4447,7 @@ The Signing Service role receives only `kms:Sign` for the explicit purpose-key A
 
 Create `SigningModel.java` as a non-instantiable holder of Java records and closed enums. `Purpose` from Task 11 maps one-to-one to these domains: `REQUIREMENT_PUBLICATION -> accord.requirement-publication.v1`, `CONFIRMATION -> accord.confirmation.v1`, `ACCEPTANCE -> accord.acceptance.v1`, `STRICT_MERGE -> accord.strict-merge.v1`, `BREAK_GLASS -> accord.break-glass.authorization.v1`, and `AUDIT_ANCHOR -> accord.audit-anchor.v1`. Generic signing rejects `BREAK_GLASS`.
 
-The exact strict-merge authorization record contains `targetRef`, `expectedTargetHeadSha`, `sourceHeadSha`, `verifiedResultTreeSha`, `normalizedDiffDigest`, `requiredChecksDigest`, `ciAttestationDigest`, a closed subject (`work_item_pr`, `requirement_metadata`, `accepted_delivery_candidate`, or `emergency_change`), 32 random bytes encoded as 43 unpadded base64url characters, and `expiresAt`. SHA values and `sha256:` digests are lowercase and length checked. Repository scope requires `scopeId == immutableRepositoryId`.
+The frozen v1 strict-merge authorization record contains `targetRef`, `expectedTargetHeadSha`, `sourceHeadSha`, `verifiedResultTreeSha`, `normalizedDiffDigest`, `requiredChecksDigest`, `ciAttestationDigest`, a closed historical subject (`work_item_pr`, `requirement_metadata`, `accepted_delivery_candidate`, or `emergency_change`), 32 random bytes encoded as 43 unpadded base64url characters, and `expiresAt`. SHA values and `sha256:` digests are lowercase and length checked. Repository scope requires UUID `scopeId` to identify the platform RepositoryBinding and separately requires the Provider's immutable repository ID; the signing request's authorization evidence must prove their current mapping. Git Delivery Task 1 freezes this schema for verification and introduces v2 for all new issuance, where `requirement_metadata` is rejected.
 
 Create `SigningService.java`. Its operation order is normative:
 
@@ -4511,7 +4616,7 @@ CREATE TABLE authorization_nonce (
     nonce_hash char(71) NOT NULL CHECK (nonce_hash ~ '^sha256:[0-9a-f]{64}$'),
     purpose varchar(40) NOT NULL CHECK (purpose = 'STRICT_MERGE'),
     scope_type varchar(16) NOT NULL CHECK (scope_type = 'REPOSITORY'),
-    scope_id varchar(255) NOT NULL,
+    scope_id uuid NOT NULL,
     immutable_repository_id varchar(255) NOT NULL,
     target_ref varchar(1024) NOT NULL CHECK (target_ref LIKE 'refs/%'),
     expected_target_head_sha varchar(64) NOT NULL CHECK (expected_target_head_sha ~ '^[0-9a-f]{40,64}$'),
@@ -4530,7 +4635,6 @@ CREATE TABLE authorization_nonce (
     consumed_at timestamptz,
     consumed_by_workload_id uuid,
     PRIMARY KEY (tenant_id, nonce_hash),
-    CHECK (scope_id = immutable_repository_id),
     CHECK (expires_at > issued_at),
     CHECK ((consumed_at IS NULL) = (consumed_by_workload_id IS NULL))
 );
@@ -4702,7 +4806,7 @@ Expected: FAIL at test compilation because migration V017, `AuditAppender`, `Mer
 Create `V017__tamper_evident_audit.sql`. The migration creates:
 
 - `audit_stream_head(tenant_id, next_sequence, last_event_hash, version)` with one forced-RLS row per tenant stream;
-- partitioned `audit_event(tenant_id, sequence, event_id, occurred_at, actor_type, actor_id, action, object_type, object_id, project_id, immutable_repository_id, result, reason_code, correlation_id, canonical_payload bytea, previous_hash, event_hash, schema_version)` with primary key `(tenant_id, sequence)`, unique `(tenant_id, event_id)`, and composite tenant-aware foreign keys;
+- partitioned `audit_event(tenant_id, sequence, event_id, occurred_at, actor_type, actor_id, action, object_type, object_id, project_id, repository_binding_id, immutable_repository_id, result, reason_code, correlation_id, canonical_payload bytea, previous_hash, event_hash, schema_version)` with primary key `(tenant_id, sequence)`, unique `(tenant_id, event_id)`, and composite tenant-aware foreign keys;
 - `audit_anchor_batch(tenant_id, anchor_id, first_sequence, last_sequence, leaf_count, merkle_algorithm, merkle_root, state, lease_owner, lease_generation, lease_expires_at, signed_envelope, signed_envelope_digest, trust_record_id, object_key, object_version_id, object_sha256, retain_until, anchored_at, version)`;
 - `audit_anchor_outbox(tenant_id, anchor_id, outbox_id, state, available_at, attempts, claimed_by, claim_generation, claim_expires_at, last_error_code)`.
 
@@ -4725,7 +4829,7 @@ public final class AuditModel {
     public record Draft(
         UUID tenantId, UUID eventId, Instant occurredAt, String actorType, UUID actorId,
         String action, String objectType, String objectId, UUID projectId,
-        String immutableRepositoryId, String result, String reasonCode,
+        UUID repositoryBindingId, String immutableRepositoryId, String result, String reasonCode,
         UUID correlationId, JsonNode sourceFreeDetails
     ) {}
 
@@ -5140,6 +5244,7 @@ git commit -m "feat: package isolated signing service"
 - Create: `database/control-plane/migrations/V019__project_setup_and_browser_sessions.sql`
 - Create: `apps/control-plane/modules/identity/src/main/java/com/inforvans/accord/identity/application/ProjectSetupApplicationService.java`
 - Create: `apps/control-plane/modules/identity/src/main/java/com/inforvans/accord/identity/application/IdentityLifecycleApplicationService.java`
+- Create: `apps/control-plane/modules/identity/src/main/java/com/inforvans/accord/identity/application/RepositoryBindingLifecyclePort.java`
 - Create: `apps/control-plane/modules/identity/src/main/java/com/inforvans/accord/identity/application/BrowserSessionService.java`
 - Create: `apps/control-plane/modules/identity/src/main/java/com/inforvans/accord/identity/application/NotificationPreferenceService.java`
 - Create: `apps/control-plane/modules/audit/src/main/java/com/inforvans/accord/audit/AuditGovernanceApplicationService.java`
@@ -5158,6 +5263,7 @@ git commit -m "feat: package isolated signing service"
 - Create: `tests/integration/src/test/java/com/inforvans/accord/integration/IdentityPublicHttpIT.java`
 - Create: `tests/security-negative/src/test/java/com/inforvans/accord/security/IdentityPublicApiSecurityTest.java`
 - Create: `packages/api-client/src/identity-public.contract.test.ts`
+- Modify: `apps/control-plane/modules/authorization/src/test/java/com/inforvans/accord/authorization/AuthorizationPostgreSqlTest.java`
 - Modify: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/security/VerifiedRequestIdentity.java`
 - Modify: `apps/control-plane/api/src/main/java/com/inforvans/accord/controlplane/http/ContractValidationController.java`
 - Modify: `apps/control-plane/modules/authorization/src/main/java/com/inforvans/accord/authorization/FreshAuthService.java`
@@ -5181,7 +5287,7 @@ private static final java.util.Set<String> IDENTITY_PUBLIC_OPERATIONS = java.uti
     "updateProjectNotificationPolicy", "updateMyProjectNotificationPreferences",
     "createProjectSetup", "getProjectSetup", "resumeProjectSetup", "updateProjectSetupStep",
     "validateProjectSetup", "submitProjectSetup", "confirmProjectSetupDevelopment",
-    "confirmProjectSetupBusiness", "activateProjectSetup", "getProjectRepositoryBinding",
+    "confirmProjectSetupBusiness", "activateProjectSetup", "listProjectRepositoryBindings",
     "createRepositoryBindingChangeRequest", "getRepositoryBindingChangeRequest",
     "confirmRepositoryBindingChange", "listProjectRoleCatalog", "listProjectRoleBindings",
     "createProjectRoleBinding", "revokeProjectRoleBinding", "getProjectSidePrincipals",
@@ -5207,7 +5313,7 @@ private static final java.util.Set<String> IDENTITY_PUBLIC_OPERATIONS = java.uti
 
 The contract test also proves every mutation references the canonical required `IdempotencyKey`, `ExpectedVersion`, `BrowserCsrfToken`, `ETag`, and `ProblemResponse` components. Exactly these 30 operations additionally require UUID `FreshAuthProof` and `x-fresh-auth: single_action`: `consumeTenantSwitchIntent`, `submitProjectSetup`, both setup confirmations, setup activation, create/confirm repository binding change, revoke role binding, replace side principal, update separation policy, revoke supplier assignment, create supplier reassignment, both tenant audit-export mutations, both project audit-export mutations, create/activate retention policy, place/release tenant hold, place/release project hold, and create/cancel/approve/execute for tenant and project deletion. No other operation may accept that proof.
 
-Create `ProjectSetupMigrationIT.java` against PostgreSQL 17.5. Bootstrap database roles before Flyway, migrate the central directory to exact target 019, and assert every V019 table, composite key, composite foreign key, check constraint, append-only trigger, forced RLS policy, and least-privilege grant. Verify V019 follows V018 and is the only installed version before V020.
+Create `ProjectSetupMigrationIT.java` against PostgreSQL 17.5. Bootstrap database roles before Flyway, migrate the central directory to exact target 019, and assert every V019 table, composite key, composite foreign key, check constraint, append-only trigger, forced RLS policy, and least-privilege grant. Verify V019 follows V018 and is the only installed version before V020. A dedicated upgrade case migrates to V018, inserts an impossible legacy `ACTIVE` or `RECONCILING` Binding without a trust receipt, and proves the named V019 preflight fails instead of fabricating evidence; a database containing only `PENDING_TRUST` or `UNBOUND` Bindings upgrades successfully.
 
 Create `IdentityPublicHttpIT.java` and `IdentityPublicApiSecurityTest.java` as black-box `MockMvc` plus PostgreSQL tests. They use only JSON, cookies/tokens, documented headers, and public routes. Required hostile cases include cross-tenant IDs, missing tenant context, spoofed actor headers, mixed cookie/bearer credentials, unsafe cookie request without Origin/Fetch Metadata/CSRF, bearer request with forged tenant header, stale ETag, body/header version mismatch, reused idempotency key with changed digest, reused FreshAuth proof, invisible-resource enumeration, cursor replay under another identity/filter/scope, session rotation/revocation replay, switch-intent replay, strict same-person confirmation, machine confirmation, setup evidence becoming stale, supplier escape, hold bypass, and deletion execution before waiting/approval gates.
 
@@ -5233,14 +5339,17 @@ Create `V019__project_setup_and_browser_sessions.sql`. It creates these normaliz
 - `project_support_unit_selection_version` and `project_support_unit_selection_item`: immutable versioned support-unit choices;
 - `project_notification_policy_version`: four closed channels, urgent immediate policy, digest schedule/timezone, escalation delay/targets, immutable version state;
 - `user_project_notification_preference`: per-account/project channel and urgency overrides bounded by project policy;
-- `project_setup`, `project_setup_step`, `project_setup_role_selection`, `project_setup_validation_gate`, and append-only `project_setup_confirmation_link`;
-- `repository_binding_change_request`: old/new immutable identity, reconciliation evidence, state, exact confirmation link, version;
+- `project_setup`, `project_setup_step`, `project_setup_repository_selection`, `project_setup_role_selection`, `project_setup_validation_gate`, and append-only `project_setup_confirmation_link`;
+- `repository_trust_establishment`: append-only exact Binding tuple, signed installation/repository probe and CapabilitySnapshot evidence digests, credential epoch, observed/expiry time, verifier workload identity, result and creation time;
+- `repository_binding_change_request`: exact repository-binding ID, old/new immutable identity, reconciliation evidence, state, exact confirmation link, version;
 - `external_assignment_reassignment`: old assignment, impact digest, replacement assignments, state, version;
 - `audit_export_job`, append-only `audit_export_download_capability`, and append-only `audit_export_download_consumption`.
 
-All relationships start with `tenant_id`; project children use `(tenant_id, project_id, ...)`. Install forced RLS before runtime grants. Runtime cannot own tables, bypass RLS, truncate, disable triggers, or mutate append-only receipts/capabilities. Use partial unique indexes for one active setup, one active notification policy, one current side principal per side, and one current Business Acceptance Owner selection.
+All relationships start with `tenant_id`; project children use `(tenant_id, project_id, ...)`. `repository_trust_establishment` has a composite foreign key to the exact immutable V010 Binding tuple and a unique `(tenant_id, repository_binding_id, trust_establishment_id)` key. Before installing the reverse key and stronger invariant, V019 runs a named fail-closed preflight requiring every existing Binding to be either `PENDING_TRUST` with null trust/unbound time or `UNBOUND` with null trust and non-null unbound time; the pre-V019 implementation has no production activation path, so V019 never invents a receipt for a directly seeded legacy `ACTIVE` row. V019 then adds the reverse current-trust foreign key from `repository_binding`, replaces the earlier basic state/time check with the exact invariant `PENDING_TRUST => no trust/no unbound time`, `ACTIVE|RECONCILING => current trust/non-null and no unbound time`, and `UNBOUND => no current trust and non-null unbound time`, and installs a trigger that forbids changing tenant/project/binding/provider/endpoint/installation/immutable-repository/bound-at fields in place. Install forced RLS before runtime grants. Runtime cannot own tables, bypass RLS, truncate, disable triggers, mutate append-only receipts/capabilities, or update an immutable Binding column. Use partial unique indexes for one active setup, one active notification policy, one current side principal per side, and one current Business Acceptance Owner selection.
 
-Setup state is closed: `DRAFT -> VALIDATED -> SUBMITTED -> DEVELOPMENT_CONFIRMED -> BUSINESS_CONFIRMED -> ACTIVE`. Resume does not change state. Submit freezes repository, support-unit, delivery mode/separation, role preset/selections, assessment policy, Agent Pack/CI evidence, notification, retention, and guarantee-label inputs. Any frozen-input change creates a new setup version and invalidates validation/confirmation links.
+As part of this task, update every earlier test fixture that migrates the complete directory, including `AuthorizationPostgreSqlTest`, so it no longer inserts `state='ACTIVE'` directly. The production-target fixture sequence is exact: insert the Binding as `PENDING_TRUST`; insert one matching append-only trust-establishment row using deterministic signed probe/CapabilitySnapshot evidence from the test verifier; then set `state='ACTIVE'`, set `trust_establishment_id` to the UUID of that inserted receipt, and increment the Binding version in the same tenant transaction. Only a test whose Flyway target is explicitly at most V018 may retain the historical direct-ACTIVE fixture. `verify-control-plane-fixtures.ps1` rejects direct ACTIVE/RECONCILING inserts in any latest-schema fixture.
+
+Setup state is closed: `DRAFT -> VALIDATED -> SUBMITTED -> DEVELOPMENT_CONFIRMED -> BUSINESS_CONFIRMED -> ACTIVE`. Resume does not change state. Submit freezes the nonempty ordered RepositoryBinding selection set, support-unit, delivery mode/separation, role preset/selections, assessment policy, Agent Pack/CI evidence, notification, retention, and guarantee-label inputs. Any frozen-input change creates a new setup version and invalidates validation/confirmation links.
 
 A switch intent stores authenticated ciphertext plus digests of the server-minted opaque tenant reference and subject binding, never a client-selected tenant ID or plaintext target. Consumption decrypts and verifies it, rechecks target membership, revokes the source session, and inserts a new target-tenant session/cookie in one broker-controlled transition. No row ever changes its `tenant_id`.
 
@@ -5275,7 +5384,7 @@ Use the following normative method/path/profile mapping:
 | `POST /v1/projects/{projectId}/setup:confirm-development` | `confirmProjectSetupDevelopment` | MF |
 | `POST /v1/projects/{projectId}/setup:confirm-business` | `confirmProjectSetupBusiness` | MF |
 | `POST /v1/projects/{projectId}/setup:activate` | `activateProjectSetup` | MF |
-| `GET /v1/projects/{projectId}/repository-binding` | `getProjectRepositoryBinding` | Q |
+| `GET /v1/projects/{projectId}/repository-bindings` | `listProjectRepositoryBindings` | Q |
 | `POST /v1/projects/{projectId}/repository-binding-change-requests` | `createRepositoryBindingChangeRequest` | MF |
 | `GET /v1/projects/{projectId}/repository-binding-change-requests/{requestId}` | `getRepositoryBindingChangeRequest` | Q |
 | `POST /v1/projects/{projectId}/repository-binding-change-requests/{requestId}:confirm` | `confirmRepositoryBindingChange` | MF |
@@ -5332,7 +5441,7 @@ Use the following normative method/path/profile mapping:
 
 All schemas use `additionalProperties: false`; closed string enums reject unknown values. Request bodies never carry tenant ID, actor ID, natural-person ID, authorization digest, or a project ID already selected by the path. Every envelope contains `object_ref`, `display_state`, `allowed_actions`, and quoted version; pages additionally contain an opaque authenticated cursor. Stable Problem Details map validation 400, authentication 401, authorization 403, invisible resource 404, idempotency conflict 409, version mismatch 412, semantic state 422, rate limit 429, and dependency failure 503 without leaking row existence.
 
-Create `IdentityApiDtos.java` as a non-instantiable holder of nested public records and enums so one source file remains legal Java. Mirror each OpenAPI component one-for-one. Use `UUID`, `URI`, `Instant`, `LocalTime`, closed enums, immutable `List`/`Set`, and Bean Validation. The setup step value is a sealed interface with explicit records for project, repository, mode/separation, role preset, role assignments, assessment policy, Agent/CI, notification/retention, and review. No generic map or arbitrary JSON field is permitted.
+Create `IdentityApiDtos.java` as a non-instantiable holder of nested public records and enums so one source file remains legal Java. Mirror each OpenAPI component one-for-one. Use `UUID`, `URI`, `Instant`, `LocalTime`, closed enums, immutable `List`/`Set`, and Bean Validation. The setup step value is a sealed interface with explicit records for project, ordered repository selection, mode/separation, role preset, role assignments, assessment policy, Agent/CI, notification/retention, and review. No generic map or arbitrary JSON field is permitted.
 
 - [ ] **Step 5: Implement one operation registry, thin controllers, and transaction-safe application services**
 
@@ -5342,9 +5451,11 @@ Controllers accept `@AuthenticationPrincipal VerifiedRequestIdentity`, typed pat
 
 Implement a shared `JooqCommandGate` used inside application services. For each mutation, one transaction must: set tenant context; lock or load idempotency row; compare canonical request digest; require `If-Match` equals body `expected_version` and current row version; authorize the registry operation; conditionally consume the exact FreshAuth proof; execute the domain transition; append the Task 14 audit event; persist status/body/ETag headers for byte-identical replay; and commit. It receives the transaction-scoped `DSLContext` and never opens a nested connection.
 
-`ProjectSetupApplicationService` evaluates and persists these gates: immutable repository trust current; one current Business Principal and one current Development Principal in both modes; Business Acceptance Owner selected; mode/separation and guarantee label consistent; strict mode uses different natural people across sides; reduced Standard overlap is explicitly acknowledged; role preset selections valid; no chained delegation or supplier widening; assessment thresholds/policy linked; Agent Pack and CI evidence current; notification policy has all four channels and urgent/digest/escalation settings; retention policy active; all validation snapshots match the submitted setup digest. Development confirms first, Business confirms second, and activation re-evaluates every external evidence port inside the command before atomically marking setup/project active.
+`RepositoryBindingLifecyclePort` is an Identity-owned internal NamedInterface, not an HTTP controller and not a Provider Registry back door. Its closed commands are `createPendingBinding`, `activateAfterTrust`, `markReconciliationRequired`, and `markUnbound`; every command receives the server-derived tenant/project, exact expected Binding version, caller workload identity, idempotency key and a closed evidence record. `activateAfterTrust` verifies the signed installation/repository probe and CapabilitySnapshot trust evidence through the injected Provider-evidence port, inserts one append-only `repository_trust_establishment`, and CAS-updates the same Binding to `ACTIVE` in one tenant transaction. This trust verifier deliberately does not require `provider_repository_registration`, because V041 can create that technical association only after Identity activation; Project Setup's separate availability port requires registration before selection. A failed audit, receipt insert, state check or CAS rolls back both. Git Delivery Task 5 may invoke this port only under its provider-onboarding workload identity; no Connector, callback edge, browser or arbitrary worker receives direct table access.
 
-Repository binding change freezes old/new immutable IDs, requires provider reconciliation, invalidates stale trust/analysis evidence, obtains current Development Principal confirmation, and advances the binding version atomically. Supplier reassignment persists the open-work impact digest and replacement eligibility before superseding the old assignment.
+`ProjectSetupApplicationService` evaluates and persists these gates: every selected RepositoryBinding is `ACTIVE`, belongs to the project, has the exact current trust receipt, and is reported by the external Provider-availability port with a matching current registration, installation credential epoch and unexpired CapabilitySnapshot; the set is nonempty and duplicate free; one current Business Principal and one current Development Principal exist in both modes; Business Acceptance Owner is selected; mode/separation and guarantee label are consistent; strict mode uses different natural people across sides; reduced Standard overlap is explicitly acknowledged; role preset selections are valid; no chained delegation or supplier widening exists; assessment thresholds/policy are linked; Agent Pack and CI evidence are current; notification policy has all four channels and urgent/digest/escalation settings; retention policy is active; all validation snapshots match the submitted setup digest. Development confirms first, Business confirms second, and activation re-evaluates every external evidence port inside the command before atomically marking setup/project active. Before Git Delivery Task 5 installs the production Provider-availability adapter, that port returns `UNAVAILABLE`; only explicitly scoped deterministic integration fixtures may replace it.
+
+Repository binding change targets one explicit RepositoryBinding and uses a closed `change_kind` of `REBIND` or `UNBIND`. `REBIND` accepts only a current opaque Provider discovery ID, resolves and freezes the old/new endpoint/installation/repository tuple on the server, and requires the Provider-onboarding workflow to produce new reconciliation/trust evidence; `UNBIND` has no replacement tuple and requires current-work impact plus cleanup/transfer evidence. Both invalidate only affected trust/analysis evidence, obtain current Development Principal confirmation and any policy-required business confirmation, and advance the Binding version atomically through `RepositoryBindingLifecyclePort`; neither request accepts Provider IDs, endpoint URLs or credentials from the browser. Supplier reassignment persists the open-work impact digest and replacement eligibility before superseding the old assignment.
 
 - [ ] **Step 6: Unify bearer and browser authentication, conditional CSRF, tenant switching, and FreshAuth**
 
@@ -5421,7 +5532,7 @@ git commit -m "feat(api): publish identity setup and governance contracts"
 
 ## Completion Gate
 
-The Identity, Tenancy, and Audit plan is complete only after Tasks 1-17 run in order and all seventeen task-local commits exist. The completion evidence must prove immutable repository identity, forced tenant isolation, enterprise subject mapping, both current side principals in Standard and Strict modes, explicit reduced-Standard labeling, same-side administrator/principal role overlap, strict cross-side natural-person separation, non-transitive delegation, supplier assignment scope, server-bound FreshAuth, purpose-bound signing, append-only anchored audit, versioned retention/hold/deletion proof, resumable setup, dual authentication with conditional CSRF, and the exact cumulative public HTTP/generated-client contract. Passing domain tests without Task 17's black-box/security/generated-client gates is not completion.
+The Identity, Tenancy, and Audit plan is complete only after Tasks 1-17 run in order and all seventeen task-local commits exist. The completion evidence must prove endpoint-aware immutable repository identity, multiple repositories and Provider installations per project, forced tenant isolation, enterprise subject mapping, both current side principals in Standard and Strict modes, explicit reduced-Standard labeling, same-side administrator/principal role overlap, strict cross-side natural-person separation, non-transitive delegation, supplier assignment scope, server-bound FreshAuth, purpose-bound signing, append-only anchored audit, versioned retention/hold/deletion proof, resumable setup, dual authentication with conditional CSRF, and the exact cumulative public HTTP/generated-client contract. Passing domain tests without Task 17's black-box/security/generated-client gates is not completion.
 
 Before claiming this plan complete, run a document check that asserts exactly 17 `### Task` headings, 17 `**Files:**` blocks, and 17 task commit commands; balanced Markdown fences; no duplicate exact `Create:` path; one V019 declaration between V018 and V020; zero tenant-routed public operation signatures; zero client-authoritative tenant/actor request fields; and equality of the 72 OpenAPI/controller/application/generated-client operation IDs.
 
@@ -5430,7 +5541,7 @@ Before claiming this plan complete, run a document check that asserts exactly 17
 - [x] Coverage maps to executable tasks: immutable tenant/repository scope (Tasks 2-3), OIDC/SAML/SCIM and human/Git/workload identity (Task 4), RBAC and highest-principal behavior (Task 5), strict natural-person separation (Task 6), non-transitive delegation (Task 7), fresh-auth replay defense (Task 8), vendor visibility (Task 9), strict-merge plus separate break-glass DSSE/protobuf contracts (Task 10), separate trust/KMS/fenced signing store (Tasks 11-12), strict-only atomic nonces and mTLS (Task 13), hash-chain/Merkle/Object Lock audit (Task 14), retention/legal hold/deletion proof (Task 15), isolated production signing deployment and negative matrix (Task 16), and normalized setup/browser sessions plus the complete Identity/Tenancy/RBAC/FreshAuth/Audit/Retention HTTP surface (Task 17).
 - [x] Tenant and repository fields are consistent: every model carries `tenant_id`; only `ScopeIdentity.Repository`, repository bindings, repository audit events, and repository signing scopes carry immutable repository identity. Tenant/project/pre-binding objects do not invent one.
 - [x] Authorization types and signatures are consistent across tasks: human actions consume `PrincipalIdentity.Human`; strict comparison uses `naturalPersonId`; delegation is direct and cannot be chained; high-risk FreshAuth sessions and strict-merge authorization nonces consume atomically, while break-glass uses its separate broker reservation generation.
-- [x] Signing types are consistent across protobuf, Java, SQL, and JSON Schema: purpose/domain/payload type are paired, ES256 keys are tenant/purpose scoped, long-lived evidence has no expiry, strict merge has exactly four subjects plus an exact nonce, and break-glass has a mutually exclusive closed binding, signed evidence snapshot, fenced byte-replay store, and no entry into the strict nonce path.
+- [x] Signing types are consistent across protobuf, Java, SQL, and JSON Schema: purpose/domain/payload type are paired, ES256 keys are tenant/purpose scoped, long-lived evidence has no expiry, the frozen v1 verifier retains four historical subjects while all current v2 issuance accepts only `WORK_ITEM_PR`, `ACCEPTED_DELIVERY_CANDIDATE`, and `EMERGENCY_CHANGE`, and break-glass has a mutually exclusive closed binding, signed evidence snapshot, fenced byte-replay store, and no entry into the strict nonce path.
 - [x] Task 17 uses `VerifiedRequestIdentity` as the only tenant/actor authority, exposes every project resource below `/v1/projects/{projectId}/...`, keeps tenant administration in the current authenticated scope without tenant-routed endpoints, and gives all mutations one idempotency/CAS/CSRF/Problem profile with atomic FreshAuth for high risk.
 - [x] Project setup has explicit fields and normalized child tables rather than a generic JSON document; repository/support selections freeze at submit, Agent/Assessment references are verified through Task 13 ports, both modes require one current principal per side, and only explicit reduced Standard policy lowers the guarantee label.
 - [x] OpenAPI, controller annotations, application registry, and generated TypeScript exports share the exact same 72-operation owner set; browser code has no handwritten URL or server DTO escape hatch.

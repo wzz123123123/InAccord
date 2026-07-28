@@ -1,0 +1,17 @@
+{
+  "id": "343c53e4-acde-4d96-8fb0-e0f93cb1387d",
+  "name": "gitlab-19.1-get-project-77831",
+  "priority": 1,
+  "request": {
+    "method": "GET",
+    "urlPath": "/api/v4/projects/77831"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json",
+      "X-GitLab-Version": "19.1.0"
+    },
+    "body": "{\"id\":77831,\"path_with_namespace\":\"acme/demo\",\"default_branch\":\"main\",\"archived\":false,\"last_activity_at\":\"2026-07-01T09:30:00.000Z\",\"web_url\":\"https://gitlab.example.invalid/acme/demo\"}"
+  }
+}

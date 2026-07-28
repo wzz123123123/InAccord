@@ -1,0 +1,55 @@
+plugins {
+    alias(libs.plugins.spring.boot)
+    id 'java'
+}
+
+dependencies {
+    implementation project(':apps:control-plane:modules:platform-kernel')
+    implementation project(':apps:control-plane:modules:reliability')
+    implementation project(':libs:java:observability')
+    implementation enforcedPlatform(libs.spring.boot.bom)
+    implementation platform(libs.spring.modulith.bom)
+    implementation libs.spring.modulith.starter.core
+    implementation libs.spring.boot.web
+    implementation libs.spring.boot.actuator
+    implementation libs.spring.boot.jooq
+    implementation libs.spring.boot.security
+    implementation libs.micrometer.tracing.bridge.otel
+    implementation libs.json.schema.validator
+    runtimeOnly libs.postgresql
+    runtimeOnly libs.micrometer.registry.prometheus
+    testImplementation libs.spring.boot.test
+    testImplementation libs.spring.security.test
+    testImplementation libs.spring.modulith.test
+    testImplementation libs.archunit.junit
+    testImplementation testFixtures(project(':database:control-plane'))
+    testImplementation libs.flyway.core
+    testImplementation libs.flyway.postgresql
+    testImplementation libs.testcontainers.junit
+    testImplementation libs.testcontainers.postgresql
+}
+
+sourceSets {
+    test {
+        java.srcDir '../../../tests/architecture'
+    }
+}
+
+tasks.withType(Test).configureEach { useJUnitPlatform() }
+
+// Task 9 deliberately keeps its package-private auxiliary types in ProblemAdvice.java.
+tasks.named('compileJava') {
+    options.compilerArgs += ['-Xlint:-auxiliaryclass']
+}
+
+tasks.named('processResources') {
+    from(rootProject.file('contracts/json-schema/domain-event.schema.json')) {
+        into 'accord/contracts'
+    }
+}
+
+ext.controlPlaneBoundary = [
+    expectedStartClass: 'com.inforvans.accord.ControlApiApplication',
+    webRuntime: 'required'
+]
+apply from: rootProject.file('tests/architecture/control-plane-runtime-boundaries.gradle')

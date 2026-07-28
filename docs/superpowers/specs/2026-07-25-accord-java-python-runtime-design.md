@@ -21,13 +21,15 @@ Kotlin, Go, Redis, and DynamoDB are not V1 runtime or persistence dependencies. 
 
 ## Process And Trust Boundaries
 
-Language consolidation does not consolidate authority. `control-api`, `control-worker`, `webhook-edge`, `attachment-scanner`, `agent-pack-gateway`, `signing-service`, `requirement-publisher`, `merge-controller`, and any break-glass broker remain separate deployables where the product trust model requires separation. They may share generated contract artifacts and narrowly scoped Java libraries, but security services cannot import control-plane domain modules and no process can reuse another purpose's credential.
+Language consolidation does not consolidate authority. `control-api`, `control-worker`, the `webhook-edge` and `provider-auth-callback-edge` workload profiles, `attachment-scanner`, `agent-pack-gateway`, `signing-service`, `provider-connector`, `credential-broker`, `merge-controller`, and any break-glass broker remain separate deployables where the product trust model requires separation. The two edge profiles select the same signed `webhook-edge` image: `webhook-edge` verifies repository event deliveries, while `provider-auth-callback-edge` consumes one-time OAuth/App installation callbacks; they have distinct ServiceAccounts, database roles, encryption keys, mTLS audiences, queues, ingress paths and network policies, and neither can assume the other's identity. Components may share generated contract artifacts and narrowly scoped Java libraries, but security services cannot import control-plane domain modules and no process can reuse another purpose's credential. Requirement and Development Package publication are platform-domain operations backed by immutable object storage and purpose-bound Signing Service calls; they are not a Git-writing publisher workload.
 
 The control plane never reads or stores customer source, source archives, full diffs, or general Git content credentials. Customer Codex and customer CI generate Project Context and Context Patch documents. Platform Java and Python processes consume only schema-validated, signed, source-free structured facts.
 
 ## Storage Rules
 
 PostgreSQL owns every durable command result, idempotency key, compare-and-swap version, outbox/inbox record, approval, score, lease, fencing token, one-time capability state, and certification coordination fact. Separate schemas, roles, row-level security, partitioning, and, in production, separate high-availability clusters preserve workload isolation.
+
+The Delivery `V040` selector migration and Provider Registry `V041` evidence migration form one indivisible M3 production schema unit. `V040` may be exercised alone only as an implementation checkpoint with a deterministic capability-evidence port; no application deployment may run against a schema history ending at `V040`. The production migration job applies both under one Flyway lock before M3 pods start, and readiness fails closed unless both versions succeeded.
 
 Process-local caches may hold public or already-authorized immutable data for bounded periods. They are disposable and cannot decide authorization, replay protection, workflow state, or cross-replica coordination. There is no Redis failover, backup, source-canary, IaC, or acceptance gate in V1.
 

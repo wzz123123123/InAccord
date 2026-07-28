@@ -1,0 +1,273 @@
+import java.util.jar.JarFile
+import java.util.jar.JarInputStream
+import org.gradle.api.DefaultTask
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.artifacts.component.ProjectComponentIdentifier
+import org.gradle.api.file.ConfigurableFileCollection
+import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.provider.ListProperty
+import org.gradle.api.provider.Property
+import org.gradle.api.tasks.Classpath
+import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
+import org.gradle.api.tasks.TaskAction
+import org.gradle.work.DisableCachingByDefault
+
+@DisableCachingByDefault(because = 'This verification task has no outputs to cache.')
+abstract class VerifyControlPlaneRuntimeBoundary extends DefaultTask {
+    private static final List<String> FORBIDDEN_CLASS_PREFIXES = [
+        'BOOT-INF/classes/com/inforvans/accord/securityservices/',
+        'BOOT-INF/classes/com/inforvans/accord/signing/',
+        'BOOT-INF/classes/com/inforvans/accord/gitprovider/',
+        'BOOT-INF/classes/com/inforvans/accord/gitcontent/',
+        'BOOT-INF/classes/com/inforvans/accord/providerconnector/',
+        'BOOT-INF/classes/com/inforvans/accord/credentialbroker/',
+        'BOOT-INF/classes/com/inforvans/accord/mergecontroller/'
+    ]
+    private static final List<String> FORBIDDEN_LIBRARY_FRAGMENTS = [
+        'jgit',
+        'gitlab4j',
+        'github-api',
+        'git-content',
+        'signing-service',
+        'provider-connector',
+        'credential-broker',
+        'merge-controller'
+    ]
+    private static final List<String> WEB_LIBRARY_PREFIXES = [
+        'BOOT-INF/lib/spring-web-',
+        'BOOT-INF/lib/spring-webmvc-',
+        'BOOT-INF/lib/tomcat-',
+        'BOOT-INF/lib/jetty-',
+        'BOOT-INF/lib/undertow-'
+    ]
+    private static final List<String> EMBEDDED_SERVER_LIBRARY_PREFIXES = [
+        'BOOT-INF/lib/tomcat-embed-core-',
+        'BOOT-INF/lib/jetty-server-',
+        'BOOT-INF/lib/undertow-core-'
+    ]
+    private static final List<String> FORBIDDEN_NESTED_CLASS_PREFIXES = [
+        'com/inforvans/accord/securityservices/',
+        'com/inforvans/accord/signing/',
+        'com/inforvans/accord/gitprovider/',
+        'com/inforvans/accord/gitcontent/',
+        'com/inforvans/accord/providerconnector/',
+        'com/inforvans/accord/credentialbroker/',
+        'com/inforvans/accord/mergecontroller/',
+        'org/eclipse/jgit/',
+        'org/gitlab4j/',
+        'org/kohsuke/github/'
+    ]
+
+    @Classpath
+    abstract ConfigurableFileCollection getRuntimeClasspath()
+
+    @Input
+    abstract ListProperty<String> getRuntimeComponents()
+
+    @InputFile
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract RegularFileProperty getArchiveFile()
+
+    @Input
+    abstract Property<String> getExpectedStartClass()
+
+    @Input
+    abstract Property<String> getWebRuntimePolicy()
+
+    @TaskAction
+    void verifyBoundary() {
+        [
+            'project|:security-services:signing-service',
+            'module|org.eclipse.jgit|org.eclipse.jgit',
+            'module|org.gitlab4j|gitlab4j-api',
+            'module|org.kohsuke|github-api',
+            'module|com.example|git-content-client'
+        ].each { probe ->
+            if (!VerifyControlPlaneRuntimeBoundary.isForbiddenCoordinate(probe)) {
+                throw new GradleException("Forbidden component policy missed probe: ${probe}")
+            }
+        }
+        [
+            'BOOT-INF/classes/com/inforvans/accord/signing/service/Signer.class',
+            'BOOT-INF/classes/com/inforvans/accord/gitprovider/GitClient.class',
+            'BOOT-INF/lib/org.eclipse.jgit-7.0.0.jar',
+            'BOOT-INF/lib/gitlab4j-api-6.0.0.jar',
+            'BOOT-INF/lib/github-api-1.330.jar',
+            'BOOT-INF/lib/git-content-client-1.0.0.jar'
+        ].each { probe ->
+            if (!VerifyControlPlaneRuntimeBoundary.isForbiddenArchiveEntry(probe)) {
+                throw new GradleException("Forbidden archive policy missed probe: ${probe}")
+            }
+        }
+        if (VerifyControlPlaneRuntimeBoundary.hasEmbeddedServer([
+                'BOOT-INF/lib/spring-web-6.2.8.jar'
+            ]) || !VerifyControlPlaneRuntimeBoundary.hasEmbeddedServer([
+                'BOOT-INF/lib/tomcat-embed-core-10.1.42.jar'
+            ])) {
+            throw new GradleException('Embedded server policy failed its positive/negative probes')
+        }
+        [
+            'com/inforvans/accord/signing/Signer.class',
+            'org/eclipse/jgit/api/Git.class'
+        ].each { probe ->
+            if (!VerifyControlPlaneRuntimeBoundary.isForbiddenNestedClassEntry(probe)) {
+                throw new GradleException("Nested archive policy missed probe: ${probe}")
+            }
+        }
+
+        def forbiddenComponents = runtimeComponents.get().findAll {
+            VerifyControlPlaneRuntimeBoundary.isForbiddenCoordinate(it)
+        }
+        if (!forbiddenComponents.empty) {
+            throw new GradleException(
+                "Forbidden runtime components: ${forbiddenComponents.join(', ')}")
+        }
+
+        new JarFile(archiveFile.get().asFile).withCloseable { jar ->
+            def startClass = jar.manifest.mainAttributes.getValue('Start-Class')
+            if (startClass != expectedStartClass.get()) {
+                throw new GradleException(
+                    "Expected Start-Class ${expectedStartClass.get()}, found ${startClass}")
+            }
+
+            def entries = []
+            def enumeration = jar.entries()
+            while (enumeration.hasMoreElements()) {
+                entries.add(enumeration.nextElement().name)
+            }
+
+            def forbiddenEntries = entries.findAll {
+                VerifyControlPlaneRuntimeBoundary.isForbiddenArchiveEntry(it)
+            }
+            if (!forbiddenEntries.empty) {
+                throw new GradleException(
+                    "Forbidden executable archive entries: ${forbiddenEntries.join(', ')}")
+            }
+
+            def forbiddenNestedEntries = []
+            entries.findAll {
+                it.startsWith('BOOT-INF/lib/') && it.endsWith('.jar')
+            }.each { nestedArchive ->
+                new JarInputStream(jar.getInputStream(jar.getJarEntry(nestedArchive)))
+                    .withCloseable { nestedJar ->
+                        def nestedEntry = nestedJar.nextJarEntry
+                        while (nestedEntry != null) {
+                            if (VerifyControlPlaneRuntimeBoundary
+                                    .isForbiddenNestedClassEntry(nestedEntry.name)) {
+                                forbiddenNestedEntries.add(
+                                    "${nestedArchive}!/${nestedEntry.name}")
+                            }
+                            nestedEntry = nestedJar.nextJarEntry
+                        }
+                    }
+            }
+            if (!forbiddenNestedEntries.empty) {
+                throw new GradleException(
+                    "Forbidden nested archive entries: ${forbiddenNestedEntries.join(', ')}")
+            }
+
+            def webLibraries = entries.findAll { entry ->
+                VerifyControlPlaneRuntimeBoundary.WEB_LIBRARY_PREFIXES.any {
+                    entry.startsWith(it)
+                }
+            }
+            if (webRuntimePolicy.get() == 'required' &&
+                    !VerifyControlPlaneRuntimeBoundary.hasEmbeddedServer(entries)) {
+                throw new GradleException('The control API executable is missing its web runtime')
+            }
+            if (webRuntimePolicy.get() == 'forbidden' && !webLibraries.empty) {
+                throw new GradleException(
+                    "The control Worker executable contains web libraries: ${webLibraries.join(', ')}")
+            }
+        }
+    }
+
+    static boolean isForbiddenCoordinate(String coordinate) {
+        if (coordinate.startsWith('project|')) {
+            return coordinate.substring('project|'.length()).startsWith(':security-services:')
+        }
+        if (!coordinate.startsWith('module|')) {
+            return false
+        }
+
+        def parts = coordinate.split('\\|', -1)
+        if (parts.length != 3) {
+            return false
+        }
+        def group = parts[1]
+        def module = parts[2]
+        def normalizedModule = module.toLowerCase(Locale.ROOT).replaceAll('[^a-z0-9]', '')
+        group.startsWith('org.eclipse.jgit') ||
+            group.startsWith('org.gitlab4j') ||
+            (group == 'org.kohsuke' && module == 'github-api') ||
+            normalizedModule.contains('gitcontent')
+    }
+
+    static boolean isForbiddenArchiveEntry(String entry) {
+        def normalized = entry.toLowerCase(Locale.ROOT)
+        VerifyControlPlaneRuntimeBoundary.FORBIDDEN_CLASS_PREFIXES.any {
+            entry.startsWith(it)
+        } ||
+            (entry.startsWith('BOOT-INF/lib/') &&
+                (VerifyControlPlaneRuntimeBoundary.FORBIDDEN_LIBRARY_FRAGMENTS.any {
+                    normalized.contains(it)
+                } || normalized.replaceAll('[^a-z0-9]', '').contains('gitcontent')))
+    }
+
+    static boolean hasEmbeddedServer(Collection<String> entries) {
+        entries.any { entry ->
+            VerifyControlPlaneRuntimeBoundary.EMBEDDED_SERVER_LIBRARY_PREFIXES.any {
+                entry.startsWith(it)
+            }
+        }
+    }
+
+    static boolean isForbiddenNestedClassEntry(String entry) {
+        VerifyControlPlaneRuntimeBoundary.FORBIDDEN_NESTED_CLASS_PREFIXES.any {
+            entry.startsWith(it)
+        }
+    }
+}
+
+def boundary = project.extensions.extraProperties.get('controlPlaneBoundary')
+def configuredStartClass = boundary.expectedStartClass as String
+def configuredWebRuntimePolicy = boundary.webRuntime as String
+
+if (!(configuredWebRuntimePolicy in ['required', 'forbidden'])) {
+    throw new GradleException(
+        "Unsupported control-plane web runtime policy: ${configuredWebRuntimePolicy}")
+}
+
+def runtimeComponentCoordinates = configurations.runtimeClasspath.incoming.artifacts
+    .resolvedArtifacts.map { artifacts ->
+        artifacts.collect { artifact ->
+            def id = artifact.id.componentIdentifier
+            if (id instanceof ProjectComponentIdentifier) {
+                return "project|${id.projectPath}"
+            }
+            if (id instanceof ModuleComponentIdentifier) {
+                return "module|${id.group}|${id.module}"
+            }
+            "other|${id.displayName}"
+        }.unique().sort()
+    }
+
+def bootJarTask = tasks.named('bootJar')
+def boundaryTask = tasks.register(
+    'verifyControlPlaneRuntimeBoundary', VerifyControlPlaneRuntimeBoundary) {
+    group = 'verification'
+    description = 'Verifies control-plane process, dependency, and executable archive boundaries.'
+    dependsOn bootJarTask
+    runtimeClasspath.from(configurations.runtimeClasspath)
+    runtimeComponents.set(runtimeComponentCoordinates)
+    archiveFile.set(bootJarTask.flatMap { it.archiveFile })
+    expectedStartClass.set(configuredStartClass)
+    webRuntimePolicy.set(configuredWebRuntimePolicy)
+}
+
+tasks.named('check') {
+    dependsOn boundaryTask
+}

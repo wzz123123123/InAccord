@@ -1,0 +1,129 @@
+buildscript {
+    def dependencyMirror = System.getenv('ACCORD_MAVEN_MIRROR_URL')
+    if (System.getenv('CI') == 'true' && !dependencyMirror) {
+        throw new GradleException('ACCORD_MAVEN_MIRROR_URL is required in CI')
+    }
+    repositories {
+        if (dependencyMirror) { maven { url = uri(dependencyMirror) } }
+        else { mavenCentral() }
+    }
+    dependencies {
+        classpath "org.flywaydb:flyway-database-postgresql:${libs.versions.flyway.get()}"
+    }
+    configurations.classpath {
+        resolutionStrategy.activateDependencyLocking()
+    }
+}
+
+plugins {
+    alias(libs.plugins.flyway)
+    alias(libs.plugins.jooq.codegen)
+    id 'java-library'
+    id 'java-test-fixtures'
+}
+
+def databaseUrl = providers.environmentVariable('ACCORD_DB_URL')
+    .orElse('jdbc:postgresql://localhost:5432/accord').get()
+def separator = databaseUrl.contains('?') ? '&' : '?'
+def migratorSessionUrl = "${databaseUrl}${separator}options=-c%20role%3Daccord_migrator"
+
+dependencies {
+    api libs.jooq.runtime
+    runtimeOnly libs.postgresql
+    jooqCodegen libs.postgresql
+    testFixturesRuntimeOnly libs.postgresql
+    testImplementation enforcedPlatform(libs.junit.bom)
+    testImplementation enforcedPlatform(libs.jackson.bom)
+    testImplementation enforcedPlatform(libs.slf4j.bom)
+    testImplementation libs.junit.jupiter
+    testImplementation libs.assertj.core
+    testImplementation libs.flyway.core
+    testImplementation libs.flyway.postgresql
+    testImplementation libs.testcontainers.junit
+    testImplementation libs.testcontainers.postgresql
+    testRuntimeOnly libs.slf4j.simple
+}
+
+flyway {
+    url = databaseUrl
+    user = providers.environmentVariable('ACCORD_DB_MIGRATOR_USER')
+        .orElse('accord_migrator_login').get()
+    password = providers.environmentVariable('ACCORD_DB_MIGRATOR_PASSWORD')
+        .orElse('local-migrator-only').get()
+    initSql = 'SET ROLE accord_migrator'
+    locations = ["filesystem:${projectDir}/migrations"]
+    cleanDisabled = true
+}
+
+jooq {
+    configuration {
+        jdbc {
+            driver = 'org.postgresql.Driver'
+            url = migratorSessionUrl
+            user = providers.environmentVariable('ACCORD_DB_MIGRATOR_USER')
+                .orElse('accord_migrator_login').get()
+            password = providers.environmentVariable('ACCORD_DB_MIGRATOR_PASSWORD')
+                .orElse('local-migrator-only').get()
+        }
+        generator {
+            database {
+                name = 'org.jooq.meta.postgres.PostgresDatabase'
+                inputSchema = 'public'
+                includes = 'aggregate_head|idempotency_result|domain_event|outbox_event|inbox_message|external_call_intent'
+            }
+            target {
+                packageName = 'com.inforvans.accord.database.jooq'
+                directory = 'build/generated-src/jooq/main'
+            }
+        }
+    }
+}
+
+sourceSets.main.java.srcDir 'build/generated-src/jooq/main'
+
+tasks.named('processTestFixturesResources') {
+    from('bootstrap') { include '00-pre-flyway-roles.sql' }
+    from('migrations') {
+        include 'V*.sql'
+        into 'db/migration'
+    }
+}
+
+tasks.withType(Test).configureEach { useJUnitPlatform() }
+
+tasks.named('flywayMigrate') {
+    notCompatibleWithConfigurationCache('Flyway uses live database credentials.')
+}
+
+tasks.named('jooqCodegen') {
+    dependsOn tasks.named('flywayMigrate')
+    notCompatibleWithConfigurationCache('jOOQ introspects a live migrated database.')
+}
+
+tasks.register('verifyGeneratedJooq') {
+    dependsOn tasks.named('jooqCodegen')
+    notCompatibleWithConfigurationCache('Verifies live-database code generation output.')
+    doLast {
+        [
+            'tables/AggregateHead.java',
+            'tables/IdempotencyResult.java',
+            'tables/DomainEvent.java',
+            'tables/OutboxEvent.java',
+            'tables/InboxMessage.java',
+            'tables/ExternalCallIntent.java',
+            'tables/records/AggregateHeadRecord.java',
+            'tables/records/IdempotencyResultRecord.java',
+            'tables/records/DomainEventRecord.java',
+            'tables/records/OutboxEventRecord.java',
+            'tables/records/InboxMessageRecord.java',
+            'tables/records/ExternalCallIntentRecord.java'
+        ].each { relativePath ->
+            def generated = layout.buildDirectory.file(
+                "generated-src/jooq/main/com/inforvans/accord/database/jooq/${relativePath}"
+            ).get().asFile
+            if (!generated.isFile()) {
+                throw new GradleException("Missing generated jOOQ source: ${relativePath}")
+            }
+        }
+    }
+}

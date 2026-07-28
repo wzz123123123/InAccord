@@ -1,0 +1,19 @@
+[project]
+name = "accord-agent-runtime"
+version = "0.1.0"
+requires-python = "==3.12.11"
+dependencies = [
+  "nexus-rpc==1.1.0",
+  "pydantic==2.11.7",
+  "temporalio==1.14.1",
+]
+
+[dependency-groups]
+dev = ["pytest==8.4.1", "mypy==1.16.1", "ruff==0.12.1"]
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/accord_agent_runtime"]

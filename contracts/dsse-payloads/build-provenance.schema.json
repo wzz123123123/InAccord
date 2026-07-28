@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://accord.inforvans.com/contracts/dsse-payloads/build-provenance.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["_type", "subject", "predicateType", "predicate"],
+  "properties": {
+    "_type": { "const": "https://in-toto.io/Statement/v1" },
+    "subject": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "digest"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 4096 },
+          "digest": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sha256"],
+            "properties": { "sha256": { "$ref": "#/$defs/hexDigest" } }
+          }
+        }
+      }
+    },
+    "predicateType": { "const": "https://schemas.accord.inforvans.com/provenance/build/v1" },
+    "predicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["domain", "builder", "ci", "source", "materials", "parameters", "artifact", "sboms", "scan_sha256"],
+      "properties": {
+        "domain": { "const": "accord.build-provenance.v1" },
+        "builder": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["issuer", "subject", "audience"],
+          "properties": {
+            "issuer": { "type": "string", "format": "uri", "pattern": "^https://" },
+            "subject": { "type": "string", "minLength": 8, "maxLength": 512 },
+            "audience": { "type": "string", "minLength": 1, "maxLength": 128 }
+          }
+        },
+        "ci": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["system", "run_id", "workflow_id"],
+          "properties": {
+            "system": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{1,31}$" },
+            "run_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "workflow_id": { "type": "string", "minLength": 1, "maxLength": 256 }
+          }
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["remote_url", "remote_ref", "remote_sha", "base_sha", "tree_sha"],
+          "properties": {
+            "remote_url": { "type": "string", "format": "uri" },
+            "remote_ref": { "type": "string", "pattern": "^refs/" },
+            "remote_sha": { "$ref": "#/$defs/gitSha" },
+            "base_sha": { "$ref": "#/$defs/gitSha" },
+            "tree_sha": { "$ref": "#/$defs/gitSha" }
+          }
+        },
+        "materials": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["image_lock_sha256", "dependency_locks"],
+          "properties": {
+            "image_lock_sha256": { "$ref": "#/$defs/digest" },
+            "dependency_locks": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "sha256"],
+                "properties": {
+                  "path": { "type": "string", "pattern": "^(?!/)(?!.*(?:^|/)[.][.](?:/|$)).+$" },
+                  "sha256": { "$ref": "#/$defs/digest" }
+                }
+              }
+            }
+          }
+        },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["platform", "source_date_epoch", "network", "reproducible"],
+          "properties": {
+            "platform": { "enum": ["none", "linux/amd64", "linux/arm64", "windows/amd64", "darwin/amd64", "darwin/arm64"] },
+            "source_date_epoch": { "type": "integer", "minimum": 1 },
+            "network": { "const": "none" },
+            "reproducible": { "const": true }
+          }
+        },
+        "artifact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "platform", "digest", "immutable_locator"],
+          "properties": {
+            "kind": { "enum": ["source", "image", "archive"] },
+            "platform": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "digest": { "$ref": "#/$defs/digest" },
+            "immutable_locator": { "type": "string", "minLength": 8, "maxLength": 4096 }
+          }
+        },
+        "sboms": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cyclonedx_sha256", "spdx_sha256"],
+          "properties": {
+            "cyclonedx_sha256": { "$ref": "#/$defs/digest" },
+            "spdx_sha256": { "$ref": "#/$defs/digest" }
+          }
+        },
+        "scan_sha256": { "$ref": "#/$defs/digest" }
+      }
+    }
+  },
+  "$defs": {
+    "hexDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$", "not": { "const": "0000000000000000000000000000000000000000000000000000000000000000" } },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "not": { "const": "sha256:0000000000000000000000000000000000000000000000000000000000000000" } },
+    "gitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$", "not": { "const": "0000000000000000000000000000000000000000" } }
+  }
+}

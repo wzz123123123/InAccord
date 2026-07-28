@@ -1,0 +1,32 @@
+{{- $root := . -}}
+{{- range $name := (include "accord.componentNames" . | fromJsonArray) }}
+{{- $component := index $root.Values.components $name }}
+{{- range $destination, $route := $component.network.destinations }}
+{{- if eq $route.mode "CILIUM_FQDN" }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ printf "%s-fqdn-%s" $component.service_account ($destination | replace "_" "-") | quote }}
+  namespace: {{ $root.Release.Namespace | quote }}
+  labels:
+    {{- include "accord.componentLabels" (dict "root" $root "name" $name "component" $component) | nindent 4 }}
+  annotations:
+    accord.inforvans.com/route-mode: CILIUM_FQDN
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name | quote }}
+      app.kubernetes.io/instance: {{ printf "%s-%s" $root.Release.Name $name | quote }}
+  egress:
+    - toFQDNs:
+        - matchName: {{ $route.fqdn | quote }}
+      toPorts:
+        - ports:
+            {{- range $port := $route.ports }}
+            - port: {{ printf "%d" ($port.port | int) | quote }}
+              protocol: {{ $port.protocol }}
+            {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

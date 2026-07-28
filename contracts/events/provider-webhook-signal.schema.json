@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.accord.inforvans.com/events/provider-webhook-signal/1-0-0",
+  "title": "Provider Webhook Signal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "scope_type",
+    "scope_id",
+    "provider",
+    "immutable_repository_id",
+    "delivery_id",
+    "event_type",
+    "body_digest",
+    "observed_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "tenant_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "scope_type": {
+      "const": "repository"
+    },
+    "scope_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "provider": {
+      "const": "gitlab"
+    },
+    "immutable_repository_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "delivery_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "event_type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[\\x20-\\x7E]+$"
+    },
+    "body_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ref": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^[^\\u0000-\\u001F\\u007F]+$"
+    },
+    "before_sha": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{40,64}$"
+    },
+    "after_sha": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{40,64}$"
+    }
+  }
+}

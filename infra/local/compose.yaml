@@ -1,0 +1,226 @@
+name: accord-foundation-local
+
+services:
+  postgres:
+    image: ${ACCORD_IMAGE_POSTGRES:?run render-compose-images.mjs}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${ACCORD_POSTGRES_SUPERUSER_PASSWORD:?set ACCORD_POSTGRES_SUPERUSER_PASSWORD}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=scram-sha-256
+      PGOPTIONS: >-
+        -c accord.temporal_schema_password=${ACCORD_TEMPORAL_SCHEMA_PASSWORD:?set ACCORD_TEMPORAL_SCHEMA_PASSWORD}
+        -c accord.temporal_runtime_password=${ACCORD_TEMPORAL_RUNTIME_PASSWORD:?set ACCORD_TEMPORAL_RUNTIME_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/00-roles-and-databases.sql:/docker-entrypoint-initdb.d/00-roles-and-databases.sql:ro
+    ports: ["127.0.0.1:55432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    networks: [foundation]
+
+  temporal-schema:
+    image: ${ACCORD_IMAGE_TEMPORAL_SCHEMA_TOOL:?run render-compose-images.mjs}
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SQL_PASSWORD: ${ACCORD_TEMPORAL_SCHEMA_PASSWORD:?set ACCORD_TEMPORAL_SCHEMA_PASSWORD}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        test -x /usr/local/bin/temporal-sql-tool
+        test -d /etc/temporal/schema/postgresql/v12/temporal/versioned
+        test -d /etc/temporal/schema/postgresql/v12/visibility/versioned
+        /usr/local/bin/temporal-sql-tool --endpoint postgres --port 5432 --user accord_temporal_schema_login --database accord_temporal --plugin postgres12 setup-schema -v 0.0
+        /usr/local/bin/temporal-sql-tool --endpoint postgres --port 5432 --user accord_temporal_schema_login --database accord_temporal --plugin postgres12 update-schema -d /etc/temporal/schema/postgresql/v12/temporal/versioned
+        /usr/local/bin/temporal-sql-tool --endpoint postgres --port 5432 --user accord_temporal_schema_login --database accord_temporal_visibility --plugin postgres12 setup-schema -v 0.0
+        /usr/local/bin/temporal-sql-tool --endpoint postgres --port 5432 --user accord_temporal_schema_login --database accord_temporal_visibility --plugin postgres12 update-schema -d /etc/temporal/schema/postgresql/v12/visibility/versioned
+    networks: [foundation]
+
+  temporal-server:
+    image: ${ACCORD_IMAGE_TEMPORAL_SERVER:?run render-compose-images.mjs}
+    restart: unless-stopped
+    command: ["temporal-server", "start", "--env", "docker"]
+    depends_on:
+      temporal-schema:
+        condition: service_completed_successfully
+    environment:
+      TEMPORAL_DB_PASSWORD: ${ACCORD_TEMPORAL_RUNTIME_PASSWORD:?set ACCORD_TEMPORAL_RUNTIME_PASSWORD}
+      TEMPORAL_VISIBILITY_DB_PASSWORD: ${ACCORD_TEMPORAL_RUNTIME_PASSWORD:?set ACCORD_TEMPORAL_RUNTIME_PASSWORD}
+    volumes:
+      - ./temporal/server.yaml:/etc/temporal/config/docker.yaml:ro
+      - ./temporal/dynamicconfig/development-sql.yaml:/etc/temporal/config/dynamicconfig/development-sql.yaml:ro
+      - ./state/pki/server.pem:/run/accord/temporal/pki/server.pem:ro
+      - ./state/pki/server-key.pem:/run/accord/temporal/pki/server-key.pem:ro
+      - ./state/pki/server-ca.pem:/run/accord/temporal/pki/server-ca.pem:ro
+      - ./state/pki/client-ca.pem:/run/accord/temporal/pki/client-ca.pem:ro
+      - ./state/pki/server-internode.pem:/run/accord/temporal/pki/server-internode.pem:ro
+      - ./state/pki/server-internode-key.pem:/run/accord/temporal/pki/server-internode-key.pem:ro
+    ports: ["127.0.0.1:7233:7233"]
+    healthcheck:
+      test: ["CMD", "temporal-server", "--version"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 15s
+    networks:
+      foundation:
+        aliases: [temporal]
+
+  temporal-namespace:
+    image: ${ACCORD_IMAGE_TEMPORAL_SCHEMA_TOOL:?run render-compose-images.mjs}
+    restart: "no"
+    depends_on:
+      temporal-server:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        set -u
+        cli="/usr/local/bin/temporal --address temporal-server:7233 --tls-ca-path /run/accord/temporal/pki/server-ca.pem --tls-cert-path /run/accord/temporal/pki/admin.pem --tls-key-path /run/accord/temporal/pki/admin-key.pem --tls-server-name temporal --command-timeout 10s --output json"
+        description_file="$$(mktemp)"
+        error_file="$$(mktemp)"
+        trap 'rm -f "$$description_file" "$$error_file"' EXIT
+        if ! $$cli operator namespace describe --namespace accord-foundation-local-v1 >"$$description_file" 2>"$$error_file"; then
+          if ! grep -Eq '(^|[^A-Z_])NOT_FOUND([^A-Z_]|$$)' "$$error_file"; then
+            exit 1
+          fi
+          $$cli operator namespace create --namespace accord-foundation-local-v1 --retention 72h >/dev/null
+        fi
+        $$cli operator namespace describe --namespace accord-foundation-local-v1 >"$$description_file"
+        grep -Eq '"namespace"[[:space:]]*:[[:space:]]*"accord-foundation-local-v1"' "$$description_file"
+        grep -Eq '"status"[[:space:]]*:[[:space:]]*"Registered"' "$$description_file"
+        grep -Eq '"retention"[[:space:]]*:[[:space:]]*"72h0m0s"' "$$description_file"
+    volumes:
+      - ./state/pki/server-ca.pem:/run/accord/temporal/pki/server-ca.pem:ro
+      - ./state/pki/admin.pem:/run/accord/temporal/pki/admin.pem:ro
+      - ./state/pki/admin-key.pem:/run/accord/temporal/pki/admin-key.pem:ro
+    networks: [foundation]
+
+  temporal-ui:
+    image: ${ACCORD_IMAGE_TEMPORAL_UI:?run render-compose-images.mjs}
+    restart: unless-stopped
+    depends_on:
+      temporal-namespace:
+        condition: service_completed_successfully
+    environment:
+      TEMPORAL_ADDRESS: temporal-server:7233
+      TEMPORAL_TLS_CA: /run/accord/temporal/pki/server-ca.pem
+      TEMPORAL_TLS_CERT: /run/accord/temporal/pki/ui.pem
+      TEMPORAL_TLS_KEY: /run/accord/temporal/pki/ui-key.pem
+      TEMPORAL_TLS_ENABLE_HOST_VERIFICATION: "true"
+      TEMPORAL_TLS_SERVER_NAME: temporal
+    volumes:
+      - ./state/pki/server-ca.pem:/run/accord/temporal/pki/server-ca.pem:ro
+      - ./state/pki/ui.pem:/run/accord/temporal/pki/ui.pem:ro
+      - ./state/pki/ui-key.pem:/run/accord/temporal/pki/ui-key.pem:ro
+    ports: ["127.0.0.1:8080:8080"]
+    networks: [foundation]
+
+  minio:
+    image: ${ACCORD_IMAGE_MINIO:?run render-compose-images.mjs}
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${ACCORD_MINIO_ROOT_USER:?set ACCORD_MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${ACCORD_MINIO_ROOT_PASSWORD:?set ACCORD_MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:9000/minio/health/live"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    networks: [foundation]
+
+  minio-init:
+    image: ${ACCORD_IMAGE_MINIO_CLIENT:?run render-compose-images.mjs}
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${ACCORD_MINIO_ROOT_USER:?set ACCORD_MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${ACCORD_MINIO_ROOT_PASSWORD:?set ACCORD_MINIO_ROOT_PASSWORD}
+      MINIO_NORMAL_USER: ${ACCORD_MINIO_NORMAL_USER:?set ACCORD_MINIO_NORMAL_USER}
+      MINIO_NORMAL_PASSWORD: ${ACCORD_MINIO_NORMAL_PASSWORD:?set ACCORD_MINIO_NORMAL_PASSWORD}
+      MINIO_SCANNER_USER: ${ACCORD_MINIO_SCANNER_USER:?set ACCORD_MINIO_SCANNER_USER}
+      MINIO_SCANNER_PASSWORD: ${ACCORD_MINIO_SCANNER_PASSWORD:?set ACCORD_MINIO_SCANNER_PASSWORD}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing --with-lock local/accord-normal
+        mc mb --ignore-existing --with-lock local/accord-quarantine
+        mc version enable local/accord-normal
+        mc version enable local/accord-quarantine
+        mc retention set --default GOVERNANCE 30d local/accord-normal
+        mc admin policy create local accord-normal-runtime /policies/normal-runtime-policy.json
+        mc admin policy create local accord-quarantine-scanner /policies/quarantine-scanner-policy.json
+        mc admin user add local "$${MINIO_NORMAL_USER}" "$${MINIO_NORMAL_PASSWORD}"
+        mc admin user add local "$${MINIO_SCANNER_USER}" "$${MINIO_SCANNER_PASSWORD}"
+        mc admin policy attach local accord-normal-runtime --user "$${MINIO_NORMAL_USER}"
+        mc admin policy attach local accord-quarantine-scanner --user "$${MINIO_SCANNER_USER}"
+    volumes:
+      - ./minio/normal-runtime-policy.json:/policies/normal-runtime-policy.json:ro
+      - ./minio/quarantine-scanner-policy.json:/policies/quarantine-scanner-policy.json:ro
+    networks: [foundation]
+
+  mock-gitlab:
+    image: ${ACCORD_IMAGE_WIREMOCK:?run render-compose-images.mjs}
+    restart: unless-stopped
+    command: ["--disable-gzip", "--disable-request-logging", "--global-response-templating"]
+    volumes:
+      - ./wiremock/mappings:/home/wiremock/mappings:ro
+    ports: ["127.0.0.1:9080:8080"]
+    networks: [foundation]
+
+  mock-kms:
+    image: ${ACCORD_IMAGE_LOCALSTACK:?run render-compose-images.mjs}
+    restart: unless-stopped
+    environment:
+      SERVICES: kms
+      AWS_DEFAULT_REGION: ap-northeast-1
+      AWS_ACCESS_KEY_ID: local-foundation
+      AWS_SECRET_ACCESS_KEY: local-foundation-only
+      LS_LOG: warn
+    volumes:
+      - ./localstack/ready.d:/etc/localstack/init/ready.d:ro
+      - localstack-data:/var/lib/localstack
+    ports: ["127.0.0.1:4566:4566"]
+    networks: [foundation]
+
+  otel-collector:
+    image: ${ACCORD_IMAGE_OTEL_COLLECTOR:?run render-compose-images.mjs}
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - ./state/otel:/var/lib/otel
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:13133:13133"
+      - "127.0.0.1:9464:9464"
+    networks: [foundation]
+
+networks:
+  foundation:
+    name: accord-foundation-local
+    internal: true
+
+volumes:
+  postgres-data:
+  minio-data:
+  localstack-data:

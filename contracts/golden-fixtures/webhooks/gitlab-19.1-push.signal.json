@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0.0",
+  "tenant_id": "019adf8e-04e8-7000-8000-000000000022",
+  "scope_type": "repository",
+  "scope_id": "019adf8e-04e8-7000-8000-000000000011",
+  "provider": "gitlab",
+  "immutable_repository_id": 77831,
+  "delivery_id": "019adf8e-04e8-7000-8000-000000000033",
+  "event_type": "Push Hook",
+  "body_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "observed_at": "2026-07-26T01:02:03Z",
+  "ref": "refs/heads/main",
+  "before_sha": "1111111111111111111111111111111111111111",
+  "after_sha": "2222222222222222222222222222222222222222"
+}

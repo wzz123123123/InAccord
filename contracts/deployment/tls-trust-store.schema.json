@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://accord.inforvans.com/contracts/deployment/tls-trust-store.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "keys"],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "keys": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["authority", "key_id", "algorithm", "public_key_pem"],
+        "properties": {
+          "authority": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{1,127}$" },
+          "key_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$" },
+          "algorithm": { "const": "Ed25519" },
+          "public_key_pem": {
+            "type": "string",
+            "minLength": 100,
+            "maxLength": 2048,
+            "pattern": "^-----BEGIN PUBLIC KEY-----\\n(?:[A-Za-z0-9+/=]+\\n)+-----END PUBLIC KEY-----\\n?$"
+          }
+        }
+      }
+    }
+  }
+}

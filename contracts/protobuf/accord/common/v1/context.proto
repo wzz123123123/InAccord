@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package accord.common.v1;
+
+option java_multiple_files = true;
+option java_package = "com.inforvans.accord.contracts.common.v1";
+
+enum ScopeType {
+  SCOPE_TYPE_UNSPECIFIED = 0;
+  SCOPE_TYPE_TENANT = 1;
+  SCOPE_TYPE_PROJECT = 2;
+  SCOPE_TYPE_REPOSITORY = 3;
+}
+
+message RequestContext {
+  string tenant_id = 1;
+  ScopeType scope_type = 2;
+  string scope_id = 3;
+  string correlation_id = 4;
+  string actor_id = 5;
+}

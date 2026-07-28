@@ -1,0 +1,42 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "NormalBucketMetadata",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketLocation",
+        "s3:GetBucketObjectLockConfiguration",
+        "s3:GetBucketVersioning",
+        "s3:ListBucket",
+        "s3:ListBucketMultipartUploads"
+      ],
+      "Resource": ["arn:aws:s3:::accord-normal"]
+    },
+    {
+      "Sid": "NormalVersionedObjects",
+      "Effect": "Allow",
+      "Action": [
+        "s3:AbortMultipartUpload",
+        "s3:GetObject",
+        "s3:GetObjectLegalHold",
+        "s3:GetObjectRetention",
+        "s3:GetObjectVersion",
+        "s3:ListMultipartUploadParts",
+        "s3:PutObject",
+        "s3:PutObjectLegalHold",
+        "s3:PutObjectRetention"
+      ],
+      "Resource": ["arn:aws:s3:::accord-normal/*"]
+    },
+    {
+      "Sid": "DenyQuarantineInBothResourceForms",
+      "Effect": "Deny",
+      "Action": ["s3:*"],
+      "Resource": [
+        "arn:aws:s3:::accord-quarantine",
+        "arn:aws:s3:::accord-quarantine/*"
+      ]
+    }
+  ]
+}

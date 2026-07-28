@@ -152,7 +152,7 @@ tests/contracts/
 
 - [ ] **Step 1: Record the exact public contract that must be proven**
 
-The ADR must limit integration to documented filesystem behavior: repository `AGENTS.md`, installed Skill directories and `SKILL.md`, command-line installation, JSON files, and customer CI. It must explicitly forbid private Codex APIs, automated UI scraping, hidden prompt injection, and assumptions about undocumented precedence.
+The ADR must limit integration to documented filesystem behavior: installed Skill directories and `SKILL.md`, explicit Skill invocation, command-line installation, JSON files, customer CI, and an optional customer-controlled repository `AGENTS.md` template. The signed Skill pack is the primary supported path; Accord never automatically writes, patches, commits, or requires `AGENTS.md` inside a customer repository. The ADR must explicitly forbid private Codex APIs, automated UI scraping, hidden prompt injection, and assumptions about undocumented precedence.
 
 ```yaml
 schema_version: "1.0"
@@ -417,10 +417,10 @@ void contextValidatorRejectsSourceBodiesSecretsAndAbsolutePaths() {
 }
 
 @Test
-void diffGuardAllowsOnlyRegisteredAgentOutputPaths() {
+void diffGuardRejectsPlatformDocumentPathsInsideTheGitWorktree() {
     assertThatThrownBy(() -> guard.validateChangedPaths(
-        List.of("src/Payment.java"), List.of(".agent-context/patches/**")))
-        .hasMessageContaining("unregistered_output_path");
+        List.of(".agent-context/patches/patch-1.json"), List.of("src/**", "tests/**")))
+        .hasMessageContaining("platform_document_in_git_forbidden");
 }
 ```
 
@@ -440,6 +440,7 @@ oci_digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 files:
   - path: "AGENTS.md"
     sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    install_mode: "documentation_only"
 compatibility:
   codex: ">=verified-minimum <verified-breaking-release"
   requirement_schema: "1.0"
@@ -449,25 +450,25 @@ compatibility:
 
 `agent-pack.lock` records pack ID, version, OCI digest, manifest digest, signature envelope digest, trust root ID, schema versions, analyzer versions, and installation timestamp. The installer downloads into a temporary directory, verifies DSSE and every file digest, rejects links and escaping paths, fsyncs files, then atomically swaps the target. It never modifies source files.
 
-`release-metadata.schema.json` is the release-catalog contract consumed by the platform API. It is closed and requires `release_id`, semantic version, OCI repository and digest, manifest/SBOM/signature-envelope digests, signing identity and trust-root ID, release state, published time, compatibility rows, upgrade/rollback notes, the complete resource manifest, and the structured install profile. Each compatibility row binds Codex version range, OS/architecture, Requirement/Context schema versions, every analyzer/framework support unit and its certification-report digest. Each resource item binds relative path, media type, byte length, SHA-256, purpose, and whether it is installed or documentation-only. The install profile is the closed tuple `installer=codex_managed_pack`, `artifact_transport=one_time_https_capability`, and ordered steps `[verify_signature, verify_digest, install_resources, verify_lock]`; the schema rejects shell strings, executable/argument arrays, command templates, placeholders, credentials, and pre-minted capabilities.
+`release-metadata.schema.json` is the release-catalog contract consumed by the platform API. It is closed and requires `release_id`, semantic version, OCI repository and digest, manifest/SBOM/signature-envelope digests, signing identity and trust-root ID, release state, published time, compatibility rows, upgrade/rollback notes, the complete resource manifest, and the structured install profile. Each compatibility row binds Codex version range, OS/architecture, Requirement/Context schema versions, every analyzer/framework support unit and its certification-report digest. Each resource item binds relative path, media type, byte length, SHA-256, purpose, and whether it is installed or documentation-only. The install profile is the closed tuple `installer=accordctl_codex_skill_pack`, `artifact_transport=one_time_https_capability`, and ordered steps `[verify_signature, verify_digest, install_resources, verify_lock]`; the schema rejects shell strings, executable/argument arrays, command templates, placeholders, credentials, and pre-minted capabilities.
 
-Installation always produces a customer-reviewed Git change; it never pushes or edits a protected branch remotely. If the repository already has `AGENTS.md`, preserve every byte outside the single managed `<!-- accord-agent-pack:start digest=... -->` / `<!-- accord-agent-pack:end -->` block, generate a reviewable three-way patch, and fail when markers are nested/duplicated or existing instructions contradict the required path ownership and data boundary. If the compatibility gate shows that managed-block composition is not supported by the pinned Codex release, disable automatic `AGENTS.md` modification and require the documented manual composition procedure with the same compatibility test. Upgrade and rollback change the managed block, installed Pack directory, and lock in one PR.
+Installation writes only to an explicit Codex resource root controlled by the invoking developer or CI identity, never to the customer Git worktree. `accordctl` resolves and validates the resource root, rejects symlink/reparse-point escape, installs Skills plus `agent-pack.lock` atomically, and records no platform credential. `AGENTS.md` is shipped as a signed documentation-only template for customers that independently choose to compose repository instructions; neither the API, Gateway nor `accordctl` edits it. When a repository already has instructions, the compatibility report explains conflicts and points to the signed template, but installation still succeeds or fails without creating a Git diff. Upgrade and rollback atomically replace only the installed resource directory and lock after signature, compatibility and revocation checks.
 
 - [ ] **Step 4: Define each Pack instruction surface and its bounded output**
 
-`AGENTS.md` requires lock verification before every workflow, treats Requirement Contracts as read-only, forbids direct edits under `.requirements/**`, routes questions back as structured annotations, and requires Patch or signed no-change evidence for every protected-branch code PR. The five Skills have these exact responsibilities:
+The installed Skills require lock verification before every workflow, treat the signed Development Package and its Requirement/WorkItem projections as read-only, forbid persisting platform documents in the customer repository, route questions back as structured annotations, and require Patch or signed no-change evidence for every protected-branch code PR. The optional `AGENTS.md` template repeats those same rules but is not an authority separate from the signed pack. The five Skills have these exact responsibilities:
 
 | Skill | Reads locally | Writes locally | Required output |
 | --- | --- | --- | --- |
-| `initialize-project-context` | repository source/config/tests plus Pack schemas | `.agent-context/baselines/<version>.json` | schema-valid baseline, exclusions, coverage, unknown/conflict, evidence digests |
-| `prepare-context-patch` | actual staged/PR diff, active baseline/Patches, WorkItem Contract | `.agent-context/patches/<patch-id>.json` | schema-valid Patch or a request for customer-CI no-change analysis |
+| `initialize-project-context` | repository source/config/tests plus Pack schemas | `session://outputs/context-baseline.json` | schema-valid baseline, exclusions, coverage, unknown/conflict, evidence digests |
+| `prepare-context-patch` | actual staged/PR diff, active baseline/Patches, WorkItem Contract | `session://outputs/context-patch.json` | schema-valid Patch or a request for customer-CI no-change analysis |
 | `implement-requirement` | formal batch/Contract/WorkItem and customer source | customer-owned source/tests only | implementation plan, changed files, tests, risks, unresolved annotations |
-| `report-development-question` | exact Revision/WorkItem and local evidence | `.agent-context/annotations/<annotation-id>.json` | blocking/nonblocking DevelopmentAnnotation or DevelopmentProposal candidate |
-| `prepare-completion` | PR facts, test/provenance summaries, Patch/no-change reference | `.agent-context/completions/<run-id>.json` | completion candidate for customer CI signing; never claims a merge occurred |
+| `report-development-question` | exact Revision/WorkItem and local evidence | `session://outputs/development-annotation.json` | blocking/nonblocking DevelopmentAnnotation or DevelopmentProposal candidate |
+| `prepare-completion` | PR facts, test/provenance summaries, Patch/no-change reference | `session://outputs/completion-candidate.json` | completion candidate for customer CI signing; never claims a merge occurred |
 
-All output paths and schemas are listed in the signed manifest. The validator rejects source bodies, secrets, absolute local paths, and unregistered files before CI upload. Skill text never contains platform credentials or instructions to contact a private API.
+`accordctl session open` creates an owner-only, non-worktree directory, returns its opaque session ID and the four fixed logical `session://outputs/*` names, and binds it to tenant/project/repository/Pack digest and expiry. All logical outputs and schemas are listed in the signed manifest; upload commands resolve them only beneath that session root, reject symlink/reparse-point escape, validate before network I/O, and delete or retain local bytes according to explicit customer policy after a successful immutable platform receipt. The validator rejects source bodies, secrets, repository or absolute local paths in payloads, and unregistered output files before CI upload. `ChangedPathGuard` separately rejects `.requirements/**`, `.agent-context/**`, Accord package files, and other platform-document paths if they appear in the Git change; only customer-owned source/test/config paths allowed by the WorkItem may remain. Skill text never contains platform credentials or instructions to contact a private API.
 
-`ContextValidator.java` compiles the Pack-pinned schemas, applies size/depth/count limits before allocation, and walks every key/value to reject source-body fields, secret patterns, absolute paths, repository URLs, and non-digest evidence. `ChangedPathGuard.java` compares normalized Git paths against the signed manifest allowlist, rejects symlinks and case-folding collisions, and returns a deterministic sorted violation list. Register `agent-pack verify/install` and `context validate/diffguard` as bounded Picocli subcommands of the foundation-owned `AccordCtl.java`; the CLI registry test must fail on duplicate or undocumented command paths.
+`ContextValidator.java` compiles the Pack-pinned schemas, applies size/depth/count limits before allocation, and walks every key/value to reject source-body fields, secret patterns, absolute paths, repository URLs, and non-digest evidence. `ChangedPathGuard.java` compares normalized Git paths with the signed WorkItem path policy and the closed platform-document denylist, rejects symlinks and case-folding collisions, and returns a deterministic sorted violation list. Register `agent-pack verify/install`, `session open/close`, and `context validate/diffguard/upload` as bounded Picocli subcommands of the foundation-owned `AccordCtl.java`; the CLI registry test must fail on duplicate or undocumented command paths.
 
 - [ ] **Step 5: Implement three revocation modes**
 
@@ -845,7 +846,7 @@ public record ContextBasis(
 
 Verify schema, DSSE purpose/domain, tenant/repository, Pack/analyzer trust, exact basis SHA, evidence locator form, digest uniqueness, coverage totals, and maximum payload limits. A recursive sensitive-key detector rejects `source`, `source_text`, `file_content`, `diff`, access tokens, private keys, and high-entropy credential patterns before any durable write.
 
-The customer onboarding PR installs and pins the Pack and writes `.agent-context/baselines/<context-version>.json`. Its `code_fingerprint` excludes `AGENTS.md`, `agent-pack.lock`, `.requirements/**`, and `.agent-context/**` so metadata cannot create a self-referential code-image loop. Customer CI still signs a `no_context_change` attestation for that metadata PR, binding its real PR/head/tree/diff digest and proving that only excluded Accord metadata changed. A baseline whose exclusion set differs from the signed analyzer profile is rejected.
+Project initialization installs and pins the Pack outside the Git worktree, opens an `accordctl` session, analyzes the exact customer-selected base commit/tree, and uploads `context-baseline.json` into the platform's immutable Context/OSS boundary. No onboarding or metadata PR exists, and the platform does not create a commit. `code_fingerprint` is computed only over the analyzer profile's declared customer source/config/test inputs at that exact tree; external Pack, lock, Requirement and Context bytes are bound by their own digests and never enter or need exclusion from the repository fingerprint. Customer CI signs the baseline attestation over repository/commit/tree, analyzer/Pack/schema digests, declared inclusion/exclusion rules, coverage and uploaded payload digest. A baseline whose inclusion/exclusion set differs from the signed analyzer profile is rejected.
 
 `V030__project_context.sql` creates exactly these 21 tenant-owned fact tables: the original Context lineage tables `project_context_lineage`, `project_context_version`, `project_context_claim`, `project_context_upload`, `project_context_activation_receipt`, `context_patch`, `context_patch_link`, `context_merge_receipt`, `context_change_impact`, `context_basis_reuse`, and `context_rebuild`; review/correction tables `requirement_impact_draft`, `requirement_impact_draft_evidence`, `requirement_impact_draft_confirmation`, `development_annotation`, `development_annotation_resolution`, `context_correction_suggestion`, and `context_correction_resolution`; and signed distribution tables `project_agent_pack_release`, `project_agent_pack_release_validity_event`, and `agent_pack_download_capability`. Every table has a composite tenant key, immutable fact digest where applicable, and aggregate `version bigint NOT NULL`; before any runtime DML grant, execute the inherited tenant hardening function in the same migration:
 
@@ -908,7 +909,7 @@ CONSTRAINT ck_context_patch_link_work_item_version_positive CHECK (
 
 The exact revision hash/WorkItem contract digest columns and a unique canonical-link digest per Patch remain in V030. Zero rows is the valid representation of an unrelated protected-branch merge; a nonempty row must resolve under the same tenant/project and, when both refs exist, the authoritative port must prove the WorkItem belongs to that exact Requirement Revision.
 
-Delivery `V042` owns the additive handoff: it creates mutable current aggregate `work_item` plus append-only `work_item_version`, gives the snapshot table the tenant/project/batch/WorkItem/version/contract and Requirement-binding candidate keys, and then `ALTER TABLE context_patch_link` to add matching composite FKs to `work_item_version` before enabling Delivery writes. It must not rewrite V030, point a Context FK at mutable `work_item`, or leave an unvalidated constraint. The full-chain migration test from an empty database through `V042` must prove both Context FKs exist and target the snapshot table; reject an absent snapshot, wrong tenant/project/batch/version/contract digest, and a WorkItem/Revision mismatch; and prove a Patch linked to version 1 remains valid after the current WorkItem advances to version 2. The V030-targeted test above proves the earlier milestone remains independently migratable. Evidence, links, confirmations, resolutions, WorkItem snapshots, release snapshots, and validity events are append-only. `project_agent_pack_release` stores only independently verified signed release metadata projected for one project; a worker may insert it only from the allowlisted OCI registry and only after DSSE, release-metadata schema, digest, compatibility, certification, and revocation-feed verification. It never accepts a registry/repository URL from an HTTP request.
+Delivery `V042` owns the additive handoff: it creates mutable current aggregate `work_item` plus append-only `work_item_version`, gives the snapshot table candidate keys containing tenant/project/batch plus Provider installation, immutable repository, RepositoryWorkSet, WorkItem/version/contract and Requirement binding, and then expands `context_patch_link` with the same three repository-scope columns before adding matching composite FKs to `work_item_version`. Because the pre-Delivery application port rejects every WorkItem link, a legitimate V030 database has no non-null WorkItem tuple; V042 performs a named preflight and fails closed if one exists instead of guessing its repository binding, then atomically replaces V030's four-column tuple-completeness check with the seven-column check. It must not rewrite V030, point a Context FK at mutable `work_item`, or leave an unvalidated constraint. The full-chain migration test from an empty database through `V042` must prove both Context FKs exist and target the snapshot table; reject an absent snapshot, wrong tenant/project/batch/installation/repository/WorkSet/version/contract digest, every partial tuple, and a WorkItem/Revision mismatch; and prove a Patch linked to version 1 remains valid after the current WorkItem advances to version 2. The V030-targeted test above proves the earlier milestone remains independently migratable, while a separate fabricated legacy-tuple fixture proves V042 stops without a synthetic backfill. Evidence, links, confirmations, resolutions, WorkItem snapshots, release snapshots, and validity events are append-only. `project_agent_pack_release` stores only independently verified signed release metadata projected for one project; a worker may insert it only from the allowlisted OCI registry and only after DSSE, release-metadata schema, digest, compatibility, certification, and revocation-feed verification. It never accepts a registry/repository URL from an HTTP request.
 
 `agent_pack_download_capability` stores a random token hash, tenant/project/release, actor/session-or-workload audience, exact OCI and release-metadata digests, the signed release-index `distribution_epoch`, purpose, expiry of at most 60 seconds, consumption time, and version. V030 defines `distribution_epoch bigint NOT NULL CHECK (distribution_epoch >= 1)` and includes it in the release/epoch/unconsumed lookup used by the gateway. The epoch is a positive monotonic integer scoped to the configured distribution channel/trust root and participates in the capability binding/audit digest; it is never accepted from an API caller. The raw token is returned only in the successful command response and is excluded by recursive logging/tracing filters. One successful gateway claim atomically marks it consumed before OCI bytes are streamed; retry after a failed or partial stream requires a newly authorized capability.
 
@@ -1897,7 +1898,7 @@ class ContextAssessmentApiContractTest {
             .doesNotContain("install_command", "install_command_template", "verify_command");
         var profile = schema("AgentPackInstallProfile");
         assertThat(required(profile)).contains("installer", "artifact_transport", "required_steps");
-        assertThat(property(profile, "installer").getConst()).isEqualTo("codex_managed_pack");
+        assertThat(property(profile, "installer").getConst()).isEqualTo("accordctl_codex_skill_pack");
         assertThat(property(profile, "artifact_transport").getConst())
             .isEqualTo("one_time_https_capability");
         assertThat(property(profile, "required_steps").getPrefixItems())
@@ -2086,12 +2087,13 @@ const EXPECTED_OWNER_OPERATION_COUNTS = new Map([
   ['identity-public', 72],
   ['requirement-workflow', 47],
   ['agent-context-assessment', 53],
-  ['delivery-control', 22],
+  ['provider-onboarding', 12],
+  ['delivery-control', 24],
   ['candidate-acceptance', 26],
 ]);
 const OWNER_PRECEDENCE = [
   'platform-foundation', 'cumulative-pre-agent', 'identity-public', 'requirement-workflow',
-  'agent-context-assessment', 'delivery-control', 'candidate-acceptance',
+  'agent-context-assessment', 'provider-onboarding', 'delivery-control', 'candidate-acceptance',
 ];
 
 function assertUnique(values, label) {
@@ -2654,7 +2656,7 @@ components:
       additionalProperties: false
       required: [installer, artifact_transport, required_steps]
       properties:
-        installer: { const: codex_managed_pack }
+        installer: { const: accordctl_codex_skill_pack }
         artifact_transport: { const: one_time_https_capability }
         required_steps:
           type: array
@@ -2715,7 +2717,7 @@ components:
       additionalProperties: false
       required: [installer, artifact_file_name, expected_oci_digest, required_steps]
       properties:
-        installer: { const: codex_managed_pack }
+        installer: { const: accordctl_codex_skill_pack }
         artifact_file_name: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' }
         expected_oci_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
         required_steps:
@@ -3701,7 +3703,7 @@ void uploadActivateScoreOverrideRecalculateAndBriefAreVersionExact() {
 @Test
 void packImpactAnnotationCorrectionAndPatchProjectionsPreserveAuthorityBoundaries() {
     var release = api.listAgentPackReleases(developmentToken, project, true).items().getFirst();
-    assertThat(release.installProfile().installer()).isEqualTo("codex_managed_pack");
+    assertThat(release.installProfile().installer()).isEqualTo("accordctl_codex_skill_pack");
     assertThat(release.installProfile().artifactTransport())
         .isEqualTo("one_time_https_capability");
     assertThat(release.installProfile().requiredSteps()).containsExactly(

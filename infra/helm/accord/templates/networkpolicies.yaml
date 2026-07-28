@@ -1,0 +1,120 @@
+{{- $root := . -}}
+{{- range $name := (include "accord.componentNames" . | fromJsonArray) }}
+{{- $component := index $root.Values.components $name }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-default-deny" $component.service_account | quote }}
+  namespace: {{ $root.Release.Namespace | quote }}
+  labels:
+    {{- include "accord.componentLabels" (dict "root" $root "name" $name "component" $component) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name | quote }}
+      app.kubernetes.io/instance: {{ printf "%s-%s" $root.Release.Name $name | quote }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []
+{{- if hasKey $component.network "ingress_gateway" }}
+{{- $route := $component.network.ingress_gateway }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-ingress-gateway" $component.service_account | quote }}
+  namespace: {{ $root.Release.Namespace | quote }}
+  labels:
+    {{- include "accord.componentLabels" (dict "root" $root "name" $name "component" $component) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name | quote }}
+      app.kubernetes.io/instance: {{ printf "%s-%s" $root.Release.Name $name | quote }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- include "accord.selectorMatchLabels" $route.namespace_selector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- include "accord.selectorMatchLabels" $route.pod_selector | nindent 14 }}
+      ports:
+        {{- range $port := $route.ports }}
+        - protocol: {{ $port.protocol }}
+          port: {{ $port.port }}
+        {{- end }}
+{{- end }}
+{{- range $destination, $route := $component.network.destinations }}
+{{- if or (eq $route.mode "KUBERNETES_SERVICE") (eq $route.mode "EGRESS_GATEWAY") }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-egress-%s" $component.service_account ($destination | replace "_" "-") | quote }}
+  namespace: {{ $root.Release.Namespace | quote }}
+  labels:
+    {{- include "accord.componentLabels" (dict "root" $root "name" $name "component" $component) | nindent 4 }}
+  annotations:
+    accord.inforvans.com/route-mode: {{ $route.mode | quote }}
+    accord.inforvans.com/destination-service: {{ $route.service_name | quote }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name | quote }}
+      app.kubernetes.io/instance: {{ printf "%s-%s" $root.Release.Name $name | quote }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- include "accord.selectorMatchLabels" $route.namespace_selector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- include "accord.selectorMatchLabels" $route.pod_selector | nindent 14 }}
+      ports:
+        {{- range $port := $route.ports }}
+        - protocol: {{ $port.protocol }}
+          port: {{ $port.port }}
+        {{- end }}
+{{- else if eq $route.mode "AUDITED_CIDR" }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-egress-%s" $component.service_account ($destination | replace "_" "-") | quote }}
+  namespace: {{ $root.Release.Namespace | quote }}
+  labels:
+    {{- include "accord.componentLabels" (dict "root" $root "name" $name "component" $component) | nindent 4 }}
+  annotations:
+    accord.inforvans.com/route-mode: AUDITED_CIDR
+    accord.inforvans.com/cidr-evidence-digest: {{ $route.evidence_digest | quote }}
+    accord.inforvans.com/cidr-evidence-expires-at: {{ $route.evidence_expires_at | quote }}
+    accord.inforvans.com/cidr-owner: {{ $route.owner | quote }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name | quote }}
+      app.kubernetes.io/instance: {{ printf "%s-%s" $root.Release.Name $name | quote }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        {{- range $cidr := $route.cidrs }}
+        - ipBlock:
+            cidr: {{ $cidr | quote }}
+        {{- end }}
+      ports:
+        {{- range $port := $route.ports }}
+        - protocol: {{ $port.protocol }}
+          port: {{ $port.port }}
+        {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

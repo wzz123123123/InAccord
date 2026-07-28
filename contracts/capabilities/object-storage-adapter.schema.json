@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://accord.inforvans.com/contracts/capabilities/object-storage-adapter.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "adapter_id",
+    "adapter_version",
+    "adapter_digest",
+    "environment_class",
+    "tested_at",
+    "expires_at",
+    "evidence_digest",
+    "production_eligible",
+    "capabilities"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "adapter_id": { "const": "minio-s3-local" },
+    "adapter_version": { "type": "string", "pattern": "^[0-9]+[.][0-9]+[.][0-9]+$" },
+    "adapter_digest": { "$ref": "#/$defs/digest" },
+    "environment_class": { "const": "LOCAL_FOUNDATION" },
+    "tested_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "evidence_digest": { "$ref": "#/$defs/digest" },
+    "production_eligible": { "const": false },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "immutable_versions",
+        "sha256_checksums",
+        "worm",
+        "legal_hold",
+        "multipart",
+        "quarantine_isolation",
+        "replication_evidence",
+        "deletion_receipts"
+      ],
+      "properties": {
+        "immutable_versions": { "$ref": "#/$defs/capability" },
+        "sha256_checksums": { "$ref": "#/$defs/capability" },
+        "worm": { "$ref": "#/$defs/capability" },
+        "legal_hold": { "$ref": "#/$defs/capability" },
+        "multipart": { "$ref": "#/$defs/capability" },
+        "quarantine_isolation": { "$ref": "#/$defs/capability" },
+        "replication_evidence": { "$ref": "#/$defs/capability" },
+        "deletion_receipts": { "$ref": "#/$defs/capability" }
+      }
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "not": { "const": "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "evidence"],
+      "properties": {
+        "status": {
+          "enum": ["SUPPORTED_AND_TESTED", "EXTERNAL_EVIDENCE_REQUIRED", "UNSUPPORTED"]
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(?:sha256:[0-9a-f]{64}|(?:build/verification|infra/local)/[A-Za-z0-9._/-]{1,240})$"
+          }
+        }
+      }
+    }
+  }
+}

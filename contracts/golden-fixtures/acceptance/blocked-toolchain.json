@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0.0",
+  "check_id": "02.toolchain.syft",
+  "status": "BLOCKED",
+  "remote_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "tree_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "reason_code": "BLOCKED_TOOLCHAIN",
+  "attempted_argv": ["syft", "version"],
+  "attempt_exit_code": null,
+  "attempt_evidence": [],
+  "rerun_argv": ["node", "scripts/acceptance/run-foundation-acceptance.mjs"],
+  "occurred_at": "2026-07-26T00:00:00Z",
+  "owner": "platform-engineering",
+  "tool": {
+    "name": "syft",
+    "required_version": "1.27.1",
+    "observed_version": null
+  }
+}

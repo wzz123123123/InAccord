@@ -1,0 +1,13 @@
+plugins {
+    id 'java-library'
+}
+
+dependencies {
+    api platform(libs.spring.modulith.bom)
+    api libs.spring.modulith.api
+    implementation libs.jackson.core
+    implementation libs.jcs
+    testImplementation platform(libs.junit.bom)
+    testImplementation libs.junit.jupiter
+    testImplementation libs.assertj.core
+}

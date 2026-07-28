@@ -1,0 +1,108 @@
+name: release-images
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: accord-release
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@1e60f620b9541dca1515405becc46822e103e051
+        with:
+          node-version: 22.22.1
+      - uses: actions/setup-java@7a445ee88d4e23b52c33c877a7915e2354c30b0b
+        with:
+          distribution: temurin
+          java-version: '21.0.11+10'
+      - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bind protected semantic tag
+        run: |
+          node scripts/ci/adapters/github-actions-context.mjs --expected-repository inforvans/accord --registry-repository ghcr.io/inforvans/accord --protected-environment accord-release --environment-class production --output build/ci/adapter.json
+          node scripts/ci/create-ci-context.mjs --adapter-json build/ci/adapter.json --output build/ci/context.json
+      - name: Verify code and exact toolchain
+        run: node scripts/ci/verify.mjs --context build/ci/context.json
+      - name: Seed verified content-addressed Gradle cache
+        env:
+          ACCORD_GRADLE_PLUGIN_MIRROR_URL: ${{ vars.ACCORD_GRADLE_PLUGIN_MIRROR_URL }}
+          ACCORD_MAVEN_MIRROR_URL: ${{ vars.ACCORD_MAVEN_MIRROR_URL }}
+          ACCORD_APPROVED_MIRROR_HOSTS: ${{ vars.ACCORD_APPROVED_MIRROR_HOSTS }}
+        run: node scripts/ci/seed-gradle-cache.mjs > build/ci/cache-result.json
+      - name: Build and push one platform by digest
+        run: |
+          node scripts/ci/render-runtime-dockerfiles.mjs --mode verify
+          CACHE_SHA256=$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('build/ci/cache-result.json')).cache_sha256)")
+          node scripts/ci/build-images.mjs --context build/ci/context.json --cache-sha256 "$CACHE_SHA256" --platform "${{ matrix.platform }}" --output "build/ci/images-${{ matrix.platform == 'linux/amd64' && 'linux-amd64' || 'linux-arm64' }}.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: image-facts-${{ matrix.platform == 'linux/amd64' && 'linux-amd64' || 'linux-arm64' }}
+          path: build/ci/images-*.json
+          if-no-files-found: error
+          retention-days: 1
+
+  attest-and-promote:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: accord-release
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@1e60f620b9541dca1515405becc46822e103e051
+        with:
+          node-version: 22.22.1
+      - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: image-facts-*
+          path: build/ci
+          merge-multiple: true
+      - name: Rebind protected semantic tag
+        run: |
+          node scripts/ci/adapters/github-actions-context.mjs --expected-repository inforvans/accord --registry-repository ghcr.io/inforvans/accord --protected-environment accord-release --environment-class production --output build/ci/adapter.json
+          node scripts/ci/create-ci-context.mjs --adapter-json build/ci/adapter.json --output build/ci/context.json
+      - name: Generate and validate exact-subject SBOMs
+        run: node scripts/ci/generate-sboms.mjs --context build/ci/context.json --facts build/ci/images-linux-amd64.json --facts build/ci/images-linux-arm64.json --output build/ci/sboms/index.json
+      - name: Scan exact subjects
+        run: node scripts/ci/scan-artifacts.mjs --context build/ci/context.json --sboms build/ci/sboms/index.json --output build/ci/scans/index.json
+      - name: Sign, attest, and attach evidence
+        run: node scripts/ci/attest-artifacts.mjs --context build/ci/context.json --facts build/ci/images-linux-amd64.json --facts build/ci/images-linux-arm64.json --sboms build/ci/sboms/index.json --scans build/ci/scans/index.json --output build/ci/release-manifest.json --evidence-index build/ci/evidence-index.json
+      - name: Independently verify before promotion
+        run: node scripts/ci/verify-release-chain.mjs --context build/ci/context.json --manifest build/ci/release-manifest.json --evidence-index build/ci/evidence-index.json --evidence-root "$GITHUB_WORKSPACE" --output build/ci/promotion-input.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verified-image-promotion
+          path: build/ci/promotion-input.json
+          if-no-files-found: error
+          retention-days: 30

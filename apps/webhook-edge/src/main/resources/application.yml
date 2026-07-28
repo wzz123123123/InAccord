@@ -1,0 +1,99 @@
+spring:
+  application:
+    name: accord-webhook-edge
+  datasource:
+    url: ${ACCORD_WEBHOOK_EDGE_DB_URL:jdbc:postgresql://localhost:5432/accord_webhook_edge}
+    username: ${ACCORD_WEBHOOK_EDGE_DB_USER:accord_webhook_runtime_login}
+    password: ${ACCORD_WEBHOOK_EDGE_DB_PASSWORD:}
+    hikari:
+      auto-commit: false
+      connection-init-sql: SET ROLE accord_webhook_runtime
+      connection-timeout: 5000
+      validation-timeout: 1000
+      maximum-pool-size: 16
+      minimum-idle: 0
+      initialization-fail-timeout: -1
+      register-mbeans: false
+      data-source-properties:
+        connectTimeout: 5
+        socketTimeout: 10
+        cancelSignalTimeout: 5
+        tcpKeepAlive: true
+        options: "-c statement_timeout=5s -c lock_timeout=2s -c idle_in_transaction_session_timeout=10s"
+  jooq:
+    sql-dialect: POSTGRES
+  flyway:
+    enabled: false
+  mvc:
+    log-request-details: false
+  jackson:
+    deserialization:
+      fail-on-trailing-tokens: true
+
+server:
+  port: ${ACCORD_WEBHOOK_EDGE_PORT:8080}
+  error:
+    include-binding-errors: never
+    include-exception: false
+    include-message: never
+    include-stacktrace: never
+    whitelabel:
+      enabled: false
+  tomcat:
+    accesslog:
+      enabled: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState,db,bindingProjection
+      show-components: never
+      show-details: never
+    shutdown:
+      access: none
+  tracing:
+    baggage:
+      enabled: false
+    sampling:
+      probability: ${ACCORD_TRACE_SAMPLE_RATE:0.1}
+  metrics:
+    tags:
+      service: ${spring.application.name}
+
+accord:
+  webhook-edge:
+    bindings-file: ${ACCORD_WEBHOOK_EDGE_BINDINGS_FILE}
+  telemetry:
+    endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318}
+    trust-certificate: ${OTEL_EXPORTER_OTLP_CERTIFICATE:}
+    server-name: ${ACCORD_OTLP_SERVER_NAME:}
+    environment: ${ACCORD_DEPLOYMENT_ENVIRONMENT:local}
+    service-version: ${ACCORD_SERVICE_VERSION:0.1.0}
+    queue-capacity: 2048
+    batch-size: 256
+    export-timeout: PT2S
+    shutdown-timeout: PT5S
+    sentinels: ${ACCORD_TELEMETRY_SENTINELS:}
+
+otel:
+  instrumentation:
+    http:
+      client:
+        capture-request-headers: ""
+        capture-response-headers: ""
+      server:
+        capture-request-headers: ""
+        capture-response-headers: ""
+    logback-appender:
+      capture-mdc-attributes: ""
+      capture-experimental-attributes: false

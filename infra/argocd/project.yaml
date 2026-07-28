@@ -1,0 +1,52 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: accord
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: accord
+spec:
+  description: Namespace-scoped Accord workloads pinned to remote-authoritative commits
+  sourceRepos:
+    - https://github.com/inforvans/*.git
+  sourceNamespaces:
+    - argocd
+  destinations:
+    - namespace: accord-system
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist: []
+  namespaceResourceWhitelist:
+    - group: ""
+      kind: ServiceAccount
+    - group: ""
+      kind: Service
+    - group: apps
+      kind: Deployment
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+    - group: policy
+      kind: PodDisruptionBudget
+    - group: external-secrets.io
+      kind: ExternalSecret
+    - group: cilium.io
+      kind: CiliumNetworkPolicy
+  namespaceResourceBlacklist:
+    - group: ""
+      kind: Secret
+    - group: rbac.authorization.k8s.io
+      kind: Role
+    - group: rbac.authorization.k8s.io
+      kind: RoleBinding
+  syncWindows:
+    - kind: allow
+      schedule: "0 1 * * 1-5"
+      duration: 4h
+      applications:
+        - accord
+      namespaces:
+        - accord-system
+      clusters:
+        - https://kubernetes.default.svc
+      manualSync: false
+  orphanedResources:
+    warn: true

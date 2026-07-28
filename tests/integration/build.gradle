@@ -1,0 +1,235 @@
+import groovy.json.JsonSlurper
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.security.MessageDigest
+import java.time.Duration
+import java.util.Base64
+import java.util.HexFormat
+import java.util.UUID
+
+plugins { id 'java-library' }
+
+dependencies {
+    testImplementation project(':apps:control-plane:api')
+    testImplementation project(':apps:control-plane:modules:platform-kernel')
+    testImplementation project(':apps:control-plane:modules:reliability')
+    testImplementation project(':apps:control-plane:worker')
+    testImplementation project(':apps:webhook-edge')
+    testImplementation project(':libs:java:observability')
+    testImplementation testFixtures(project(':database:control-plane'))
+    testImplementation enforcedPlatform(libs.spring.boot.bom)
+    testImplementation enforcedPlatform(libs.junit.bom)
+    testImplementation enforcedPlatform(libs.jackson.bom)
+    testImplementation enforcedPlatform(libs.slf4j.bom)
+    testImplementation libs.spring.boot.jooq
+    testImplementation libs.spring.boot.web
+    testImplementation libs.spring.boot.actuator
+    testImplementation libs.spring.boot.security
+    testImplementation libs.spring.boot.test
+    testImplementation libs.micrometer.tracing.bridge.otel
+    testImplementation libs.flyway.core
+    testImplementation libs.flyway.postgresql
+    testImplementation libs.temporal.sdk
+    testImplementation libs.junit.jupiter
+    testImplementation libs.assertj.core
+    testImplementation libs.jqwik
+    testImplementation libs.json.schema.validator
+    testImplementation libs.testcontainers.junit
+    testImplementation libs.testcontainers.postgresql
+    testCompileOnly 'jakarta.xml.bind:jakarta.xml.bind-api:4.0.2'
+    testRuntimeOnly libs.postgresql
+}
+
+configurations.configureEach {
+    resolutionStrategy.force(
+        'com.fasterxml.jackson:jackson-bom:2.19.1',
+        'com.google.code.gson:gson:2.13.1',
+        'com.google.guava:guava:32.0.1-jre',
+        'org.checkerframework:checker-qual:3.49.3',
+        'com.google.errorprone:error_prone_annotations:2.38.0',
+        'com.google.protobuf:protobuf-java:3.25.5',
+        'com.google.protobuf:protobuf-java-util:3.25.5',
+        'net.bytebuddy:byte-buddy:1.17.6',
+        'org.flywaydb:flyway-core:11.8.2',
+        'org.flywaydb:flyway-database-postgresql:11.8.2',
+        'org.testcontainers:database-commons:1.21.3',
+        'org.testcontainers:jdbc:1.21.3',
+        'org.testcontainers:junit-jupiter:1.21.3',
+        'org.testcontainers:postgresql:1.21.3',
+        'org.testcontainers:testcontainers:1.21.3'
+    )
+}
+
+configurations.matching { it.name.startsWith('test') }.configureEach {
+    resolutionStrategy.force(
+        'io.micrometer:micrometer-core:1.15.1',
+        'io.micrometer:micrometer-observation:1.15.1',
+        'org.bouncycastle:bcprov-jdk18on:1.81',
+        'org.bouncycastle:bcutil-jdk18on:1.81',
+        'org.hamcrest:hamcrest-core:3.0',
+        'org.junit.jupiter:junit-jupiter:5.13.1',
+        'org.junit.platform:junit-platform-launcher:1.13.1',
+        'org.reactivestreams:reactive-streams:1.0.4'
+    )
+}
+
+tasks.named('test', Test) { defaultTest ->
+    exclude { candidate ->
+        defaultTest.filter.commandLineIncludePatterns.empty
+            && candidate.file.name ==~ /.+IT(?:\$.*)?\.class/
+    }
+}
+
+tasks.register('foundationProductLoopTest', Test) {
+    group = 'verification'
+    description = 'Runs only the authoritative FT17 foundation product-loop integration test.'
+    dependsOn tasks.named('testClasses')
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    filter.includeTestsMatching(
+        'com.inforvans.accord.integration.FoundationProductLoopIT')
+    maxParallelForks = 1
+    failFast = true
+}
+
+evaluationDependsOn(':apps:control-plane:worker')
+def workerProject = project(':apps:control-plane:worker')
+def temporalPkiOutput = rootProject.layout.projectDirectory.dir('infra/local/state/pki')
+def temporalRunState = rootProject.layout.projectDirectory.file(
+    'infra/local/state/run-state.json')
+def temporalReceipt = rootProject.layout.projectDirectory.file(
+    'build/verification/ft13-temporal-it.json')
+def temporalFinalResult = rootProject.layout.projectDirectory.file(
+    'build/verification/ft13-local.json')
+def temporalJunitResult = layout.buildDirectory.file(
+    'test-results/temporalLocalTopologyTest/'
+        + 'TEST-com.inforvans.accord.controlplane.worker.temporal.'
+        + 'TemporalLocalTopologyIT.xml')
+
+tasks.register('generateTemporalLocalPki', JavaExec) {
+    group = 'verification'
+    description = 'Generate the ignored FT13 Temporal test PKI.'
+    dependsOn(workerProject.tasks.named('testClasses'))
+    javaLauncher.set(javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(21)
+    })
+    classpath = workerProject.sourceSets.test.runtimeClasspath
+    mainClass.set(
+        'com.inforvans.accord.controlplane.worker.temporal.LocalTemporalPki')
+    args('--output-root', temporalPkiOutput.asFile.absolutePath)
+    workingDir = rootProject.layout.projectDirectory.asFile
+    outputs.dir(temporalPkiOutput)
+    timeout.set(Duration.ofSeconds(30))
+
+    doFirst {
+        def root = temporalPkiOutput.asFile.toPath().toAbsolutePath().normalize()
+        if (Files.exists(root, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                && !Files.isSymbolicLink(root)
+                && Files.isDirectory(root, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            def entries = Files.list(root)
+            try {
+                if (entries.findAny().isEmpty()) {
+                    Files.delete(root)
+                }
+            } finally {
+                entries.close()
+            }
+        }
+    }
+}
+
+tasks.register('temporalLocalTopologyTest', Test) {
+    group = 'verification'
+    description = 'Run only the authoritative FT13 Temporal topology IT.'
+    dependsOn(workerProject.tasks.named('testClasses'))
+    testClassesDirs = workerProject.sourceSets.test.output.classesDirs
+    classpath = workerProject.sourceSets.test.runtimeClasspath
+    useJUnitPlatform()
+    filter.includeTestsMatching(
+        'com.inforvans.accord.controlplane.worker.temporal.TemporalLocalTopologyIT')
+    maxParallelForks = 1
+    failFast = true
+    timeout.set(Duration.ofMinutes(3))
+    systemProperty('accord.ft13.run-state', temporalRunState.asFile.absolutePath)
+    reports.junitXml.required.set(true)
+    reports.junitXml.outputLocation.set(
+        layout.buildDirectory.dir('test-results/temporalLocalTopologyTest'))
+    reports.junitXml.includeSystemOutLog.set(false)
+    reports.junitXml.includeSystemErrLog.set(false)
+    reports.html.required.set(false)
+    testLogging {
+        events('failed')
+        showStandardStreams = false
+    }
+
+    doFirst {
+        [temporalReceipt.asFile, temporalFinalResult.asFile,
+         temporalJunitResult.get().asFile].each { file ->
+            if (file.exists() && !file.delete()) {
+                throw new GradleException('FT13 stale evidence cleanup failed')
+            }
+        }
+
+        try {
+            def attemptId = project.findProperty('accordFt13ItAttemptId')?.toString()
+            if (attemptId == null || UUID.fromString(attemptId).toString() != attemptId) {
+                throw new IllegalArgumentException('invalid attempt')
+            }
+            def rawNonce = System.getenv('ACCORD_FT13_SUPERVISOR_NONCE')
+            if (rawNonce == null || !(rawNonce ==~ /[A-Za-z0-9_-]{43}/)) {
+                throw new IllegalArgumentException('invalid nonce')
+            }
+            byte[] decodedNonce = Base64.getUrlDecoder().decode(rawNonce)
+            if (decodedNonce.length != 32) {
+                throw new IllegalArgumentException('invalid nonce')
+            }
+            java.util.Arrays.fill(decodedNonce, (byte) 0)
+
+            byte[] stateBytes = Files.readAllBytes(temporalRunState.asFile.toPath())
+            def state = new JsonSlurper().parse(stateBytes, 'UTF-8')
+            def requiredStateKeys = [
+                'schema_version', 'run_id', 'image_lock_sha256', 'compose_project',
+                'dependency_services', 'local_endpoints', 'ready', 'tool_observations',
+                'temporal_it_attempt'
+            ] as Set
+            if (!(state instanceof Map)
+                    || (state.keySet() as Set) != requiredStateKeys
+                    || state.schema_version != '1.0.0'
+                    || state.temporal_it_observation != null) {
+                throw new IllegalArgumentException('invalid run state')
+            }
+            if (UUID.fromString(state.run_id.toString()).toString()
+                    != state.run_id.toString()) {
+                throw new IllegalArgumentException('invalid run')
+            }
+            def attempt = state.temporal_it_attempt
+            def attemptKeys = [
+                'run_id', 'it_attempt_id', 'state', 'supervisor_nonce_sha256'
+            ] as Set
+            if (!(attempt instanceof Map)
+                    || (attempt.keySet() as Set) != attemptKeys
+                    || attempt.run_id != state.run_id
+                    || attempt.it_attempt_id != attemptId
+                    || attempt.state != 'PENDING') {
+                throw new IllegalArgumentException('invalid pending attempt')
+            }
+            String nonceDigest = 'sha256:' + HexFormat.of().formatHex(
+                MessageDigest.getInstance('SHA-256').digest(
+                    rawNonce.getBytes(StandardCharsets.UTF_8)))
+            if (attempt.supervisor_nonce_sha256 != nonceDigest) {
+                throw new IllegalArgumentException('invalid nonce binding')
+            }
+            String pendingStateDigest = 'sha256:' + HexFormat.of().formatHex(
+                MessageDigest.getInstance('SHA-256').digest(stateBytes))
+
+            systemProperty('accord.ft13.run-id', state.run_id.toString())
+            systemProperty('accord.ft13.it-attempt-id', attemptId)
+            systemProperty('accord.ft13.pending-state-sha256', pendingStateDigest)
+            environment('ACCORD_FT13_SUPERVISOR_NONCE', rawNonce)
+            rawNonce = null
+            java.util.Arrays.fill(stateBytes, (byte) 0)
+        } catch (Exception rejected) {
+            throw new GradleException('Unauthorized FT13 Temporal topology test invocation')
+        }
+    }
+}

@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://accord.inforvans.com/contracts/supply-chain/image-lock.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generated_at", "images"],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "postgres",
+        "temporal-schema-tool",
+        "temporal-server",
+        "temporal-ui",
+        "minio",
+        "minio-client",
+        "wiremock",
+        "localstack",
+        "otel-collector",
+        "java-build",
+        "java-runtime"
+      ],
+      "properties": {
+        "postgres": { "$ref": "#/$defs/image" },
+        "temporal-schema-tool": { "$ref": "#/$defs/image" },
+        "temporal-server": { "$ref": "#/$defs/image" },
+        "temporal-ui": { "$ref": "#/$defs/image" },
+        "minio": { "$ref": "#/$defs/locallyApprovedImage" },
+        "minio-client": { "$ref": "#/$defs/locallyApprovedImage" },
+        "wiremock": { "$ref": "#/$defs/image" },
+        "localstack": { "$ref": "#/$defs/image" },
+        "otel-collector": { "$ref": "#/$defs/image" },
+        "java-build": { "$ref": "#/$defs/javaImage" },
+        "java-runtime": { "$ref": "#/$defs/javaImage" }
+      }
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "not": { "const": "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest", "media_type"],
+      "properties": {
+        "digest": { "$ref": "#/$defs/digest" },
+        "media_type": {
+          "enum": [
+            "application/vnd.docker.distribution.manifest.v2+json",
+            "application/vnd.oci.image.manifest.v1+json"
+          ]
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resolver", "raw_manifest_sha256", "provenance"],
+      "properties": {
+        "resolver": { "const": "docker-buildx-imagetools" },
+        "raw_manifest_sha256": { "$ref": "#/$defs/digest" },
+        "source_approval_sha256": { "$ref": "#/$defs/digest" },
+        "approval_scope": { "const": "local-foundation-only" },
+        "production_authority": { "const": false },
+        "provenance": {
+          "enum": [
+            "registry-manifest-v2",
+            "approved-public-mirror-v1",
+            "task10-temporal-provenance"
+          ]
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_tag",
+        "canonical_repository",
+        "manifest_digest",
+        "platforms",
+        "retrieved_at",
+        "license_spdx",
+        "end_of_support",
+        "evidence"
+      ],
+      "properties": {
+        "source_tag": {
+          "type": "string",
+          "pattern": "^(?:(?:docker[.]io|ghcr[.]io|quay[.]io|public[.]ecr[.]aws)/)?[a-z0-9]+(?:[._/-][a-z0-9]+)*:[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "not": { "type": "string", "pattern": ":(?:latest|stable|edge)$" }
+        },
+        "canonical_repository": {
+          "type": "string",
+          "pattern": "^(?:docker[.]io|ghcr[.]io|quay[.]io|public[.]ecr[.]aws)/[a-z0-9]+(?:[._/-][a-z0-9]+)*$"
+        },
+        "manifest_digest": { "$ref": "#/$defs/digest" },
+        "platforms": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["linux/amd64"],
+          "properties": {
+            "linux/amd64": { "$ref": "#/$defs/platform" },
+            "linux/arm64": { "$ref": "#/$defs/platform" }
+          }
+        },
+        "retrieved_at": { "type": "string", "format": "date-time" },
+        "license_spdx": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$"
+        },
+        "end_of_support": { "type": "string", "format": "date" },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    },
+    "javaImage": {
+      "allOf": [
+        { "$ref": "#/$defs/image" },
+        {
+          "type": "object",
+          "properties": {
+            "platforms": {
+              "type": "object",
+              "required": ["linux/arm64"],
+              "properties": {
+                "linux/arm64": { "$ref": "#/$defs/platform" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "locallyApprovedImage": {
+      "allOf": [
+        { "$ref": "#/$defs/image" },
+        {
+          "type": "object",
+          "properties": {
+            "evidence": {
+              "type": "object",
+              "properties": {
+                "source_approval_sha256": {},
+                "approval_scope": {},
+                "production_authority": {}
+              },
+              "required": [
+                "source_approval_sha256",
+                "approval_scope",
+                "production_authority"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

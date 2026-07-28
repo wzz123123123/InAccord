@@ -1,0 +1,217 @@
+plugins {
+    alias(libs.plugins.spring.boot)
+    id 'java'
+}
+
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.artifacts.result.ResolvedComponentResult
+import org.gradle.api.artifacts.result.ResolvedDependencyResult
+
+final class TemporalGrpcGraphVerifier {
+    static List<String> violations(
+            ResolvedComponentResult root,
+            String temporalServiceClient) {
+        def violations = []
+        def pending = [[component: root, throughTemporal: false, path: [root.id.displayName]]]
+        def visited = new HashSet<String>()
+        while (!pending.empty) {
+            def cursor = pending.remove(pending.size() - 1)
+            def component = cursor.component as ResolvedComponentResult
+            def stateKey = "${component.id.displayName}|${cursor.throughTemporal}"
+            if (!visited.add(stateKey)) {
+                continue
+            }
+            component.dependencies.findAll {
+                it instanceof ResolvedDependencyResult
+                    && !(it as ResolvedDependencyResult).constraint
+            }.each { edge ->
+                def selected = (edge as ResolvedDependencyResult).selected
+                def id = selected.id
+                def coordinate = id instanceof ModuleComponentIdentifier
+                    ? "${id.group}:${id.module}:${id.version}"
+                    : id.displayName
+                def throughTemporal = cursor.throughTemporal || coordinate == temporalServiceClient
+                def path = cursor.path + coordinate
+                if (id instanceof ModuleComponentIdentifier
+                        && id.group == 'io.grpc'
+                        && id.module != 'grpc-bom'
+                        && !throughTemporal) {
+                    violations.add(path.join(' -> '))
+                }
+                pending.add([
+                    component: selected,
+                    throughTemporal: throughTemporal,
+                    path: path
+                ])
+            }
+        }
+        violations.unique().sort()
+    }
+}
+
+dependencies {
+    implementation project(':apps:control-plane:modules:platform-kernel')
+    implementation project(':apps:control-plane:modules:reliability')
+    implementation project(':libs:java:observability')
+    implementation enforcedPlatform(libs.spring.boot.bom)
+    implementation platform(libs.spring.modulith.bom)
+    implementation libs.spring.modulith.starter.core
+    implementation libs.spring.boot.actuator
+    implementation libs.spring.boot.jooq
+    implementation libs.temporal.sdk
+    implementation libs.jackson.databind
+    implementation libs.micrometer.tracing.bridge.otel
+    compileOnly 'jakarta.xml.bind:jakarta.xml.bind-api:4.0.2'
+    runtimeOnly libs.postgresql
+    runtimeOnly libs.micrometer.registry.prometheus
+    testImplementation libs.spring.boot.test
+    testImplementation libs.spring.modulith.test
+    testImplementation libs.archunit.junit
+    testImplementation libs.temporal.testing
+    testImplementation libs.bouncycastle.pkix
+    testImplementation testFixtures(project(':database:control-plane'))
+    testImplementation libs.flyway.core
+    testImplementation libs.flyway.postgresql
+    testImplementation libs.testcontainers.junit
+    testImplementation libs.testcontainers.postgresql
+}
+
+sourceSets {
+    probe {
+        java.srcDir 'src/probe/java'
+    }
+    test {
+        java.srcDir '../../../tests/architecture'
+        compileClasspath += sourceSets.probe.output
+        runtimeClasspath += sourceSets.probe.output
+    }
+}
+
+tasks.register('workerProbeJar', Jar) {
+    group = 'build'
+    description = 'Builds the JDK-only, shell-free worker liveness/readiness probe.'
+    dependsOn tasks.named('probeClasses')
+    from sourceSets.probe.output
+    archiveFileName = 'worker-probe.jar'
+    destinationDirectory = layout.buildDirectory.dir('probe')
+    manifest {
+        attributes('Main-Class': 'com.inforvans.accord.controlplane.worker.probe.WorkerProbe')
+    }
+}
+
+tasks.named('assemble') {
+    dependsOn tasks.named('workerProbeJar')
+}
+
+tasks.named('test', Test) { defaultTest ->
+    dependsOn tasks.named('workerProbeJar')
+    exclude { candidate ->
+        defaultTest.filter.commandLineIncludePatterns.empty
+            && candidate.file.name ==~ /.+IT(?:\$.*)?\.class/
+    }
+}
+
+tasks.register('temporalMtlsTest', Test) {
+    group = 'verification'
+    description = 'Runs only the self-contained Temporal mTLS integration test.'
+    dependsOn tasks.named('testClasses')
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    filter.includeTestsMatching(
+        'com.inforvans.accord.controlplane.worker.temporal.TemporalMtlsIT')
+    maxParallelForks = 1
+    failFast = true
+}
+
+tasks.register('reconciliationCrashRecoveryTest', Test) {
+    group = 'verification'
+    description = 'Runs only the multi-process reconciliation crash recovery integration test.'
+    dependsOn tasks.named('testClasses')
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    filter.includeTestsMatching(
+        'com.inforvans.accord.controlplane.worker.temporal.ReconciliationCrashRecoveryIT')
+    maxParallelForks = 1
+    failFast = true
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+    if (project.hasProperty('accordCaptureTemporalHistory')) {
+        systemProperty 'accordCaptureTemporalHistory',
+            project.property('accordCaptureTemporalHistory').toString()
+    }
+}
+
+configurations.configureEach {
+    resolutionStrategy.force(
+        'com.fasterxml.jackson:jackson-bom:2.19.1',
+        'com.google.guava:guava:32.0.1-jre',
+        'org.checkerframework:checker-qual:3.49.3',
+        'com.google.errorprone:error_prone_annotations:2.38.0',
+        'com.google.protobuf:protobuf-java:3.25.5',
+        'com.google.protobuf:protobuf-java-util:3.25.5'
+    )
+}
+
+configurations.matching { it.name.startsWith('test') }.configureEach {
+    resolutionStrategy.force(
+        'org.bouncycastle:bcprov-jdk18on:1.81',
+        'org.bouncycastle:bcutil-jdk18on:1.81'
+    )
+}
+
+def temporalServiceClient = 'io.temporal:temporal-serviceclient:1.28.1'
+def runtimeClasspath = configurations.runtimeClasspath
+def runtimeRootComponent = runtimeClasspath.incoming.resolutionResult.rootComponent
+def hostileGrpcVersion = '1.58.1'
+def hostileGrpcBom = "io.grpc:grpc-bom:${hostileGrpcVersion}"
+def hostileGrpcApi = "io.grpc:grpc-api:${hostileGrpcVersion}"
+def hostileGrpcClasspath = configurations.detachedConfiguration(
+    dependencies.platform(hostileGrpcBom),
+    dependencies.create('io.grpc:grpc-api'))
+def hostileRootComponent = hostileGrpcClasspath.incoming.resolutionResult.rootComponent
+
+tasks.register('verifyTemporalGrpcClosure') {
+    group = 'verification'
+    description = 'Requires every runtime gRPC path to pass through Temporal serviceclient 1.28.1.'
+    inputs.files(runtimeClasspath)
+        .withPropertyName('runtimeClasspath')
+        .withNormalizer(ClasspathNormalizer)
+    doLast {
+        def violations = TemporalGrpcGraphVerifier.violations(
+            runtimeRootComponent.get(), temporalServiceClient)
+        if (!violations.empty) {
+            throw new GradleException(
+                "Runtime gRPC dependencies bypass Temporal serviceclient: ${violations.join('; ')}")
+        }
+    }
+}
+
+tasks.register('verifyTemporalGrpcClosureHostileFixture') {
+    group = 'verification'
+    description = 'Proves the gRPC closure gate rejects a BOM-constrained direct dependency.'
+    inputs.files(hostileGrpcClasspath)
+        .withPropertyName('hostileGrpcClasspath')
+        .withNormalizer(ClasspathNormalizer)
+    doLast {
+        def root = hostileRootComponent.get()
+        def violations = TemporalGrpcGraphVerifier.violations(root, temporalServiceClient)
+        def directViolation = "${root.id.displayName} -> ${hostileGrpcApi}".toString()
+        if (!violations.contains(directViolation)) {
+            throw new GradleException(
+                "gRPC BOM constraint hostile fixture bypassed the closure gate; observed: ${violations.join('; ')}")
+        }
+    }
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('verifyTemporalGrpcClosure')
+    dependsOn tasks.named('verifyTemporalGrpcClosureHostileFixture')
+}
+
+ext.controlPlaneBoundary = [
+    expectedStartClass: 'com.inforvans.accord.ControlWorkerApplication',
+    webRuntime: 'forbidden'
+]
+apply from: rootProject.file('tests/architecture/control-plane-runtime-boundaries.gradle')

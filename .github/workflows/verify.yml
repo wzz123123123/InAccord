@@ -1,0 +1,41 @@
+name: verify
+
+on:
+  pull_request:
+  push:
+    branches: [foundation]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@1e60f620b9541dca1515405becc46822e103e051
+        with:
+          node-version: 22.22.1
+          cache: pnpm
+      - uses: actions/setup-java@7a445ee88d4e23b52c33c877a7915e2354c30b0b
+        with:
+          distribution: temurin
+          java-version: '21.0.11+10'
+      - name: Bind source event to canonical context
+        run: |
+          node scripts/ci/adapters/github-actions-context.mjs --expected-repository inforvans/accord --registry-repository ghcr.io/inforvans/accord --protected-environment source-verification --environment-class staging --output build/ci/adapter.json
+          node scripts/ci/create-ci-context.mjs --adapter-json build/ci/adapter.json --output build/ci/context.json
+      - name: Run the provider-neutral read-only gate
+        run: node scripts/ci/verify.mjs --context build/ci/context.json
+      - name: Retain failure evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verify-evidence
+          path: build/verification
+          if-no-files-found: warn
+          retention-days: 7

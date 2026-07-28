@@ -1,0 +1,14 @@
+{
+  "server": {
+    "source_tag": "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z",
+    "license_spdx": "AGPL-3.0-only",
+    "end_of_support": "2026-10-27",
+    "evidence_digest": "sha256:202d4eb272e97eaa637c7f05faac06821e806c6e0bd15ed9c8fab2298ae8604b"
+  },
+  "client": {
+    "source_tag": "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z",
+    "license_spdx": "AGPL-3.0-only",
+    "end_of_support": "2026-10-27",
+    "evidence_digest": "sha256:202d4eb272e97eaa637c7f05faac06821e806c6e0bd15ed9c8fab2298ae8604b"
+  }
+}

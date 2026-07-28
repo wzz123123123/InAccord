@@ -1,0 +1,70 @@
+[versions]
+spring-boot = "3.5.3"
+spring-modulith = "1.4.1"
+flyway = "11.8.2"
+jooq = "3.19.24"
+testcontainers = "1.21.3"
+archunit = "1.4.1"
+temporal = "1.28.1"
+bouncycastle = "1.81"
+jcs = "1.1"
+cyclonedx = "2.3.1"
+junit = "5.13.1"
+assertj = "3.27.3"
+jqwik = "1.9.2"
+json-schema-validator = "1.5.6"
+pitest-gradle = "1.15.0"
+picocli = "4.7.7"
+jlink = "3.2.1"
+jackson = "2.19.1"
+slf4j = "2.0.17"
+
+[libraries]
+spring-boot-bom = { module = "org.springframework.boot:spring-boot-dependencies", version.ref = "spring-boot" }
+spring-modulith-bom = { module = "org.springframework.modulith:spring-modulith-bom", version.ref = "spring-modulith" }
+spring-modulith-api = { module = "org.springframework.modulith:spring-modulith-api" }
+spring-modulith-starter-core = { module = "org.springframework.modulith:spring-modulith-starter-core" }
+spring-modulith-starter-jdbc = { module = "org.springframework.modulith:spring-modulith-starter-jdbc" }
+spring-modulith-test = { module = "org.springframework.modulith:spring-modulith-starter-test" }
+spring-boot-web = { module = "org.springframework.boot:spring-boot-starter-web" }
+spring-boot-actuator = { module = "org.springframework.boot:spring-boot-starter-actuator" }
+spring-boot-jooq = { module = "org.springframework.boot:spring-boot-starter-jooq" }
+spring-boot-security = { module = "org.springframework.boot:spring-boot-starter-security" }
+spring-boot-validation = { module = "org.springframework.boot:spring-boot-starter-validation" }
+spring-boot-test = { module = "org.springframework.boot:spring-boot-starter-test" }
+spring-security-test = { module = "org.springframework.security:spring-security-test" }
+flyway-core = { module = "org.flywaydb:flyway-core", version.ref = "flyway" }
+flyway-postgresql = { module = "org.flywaydb:flyway-database-postgresql", version.ref = "flyway" }
+postgresql = { module = "org.postgresql:postgresql", version = "42.7.7" }
+jooq-codegen = { module = "org.jooq:jooq-codegen", version.ref = "jooq" }
+jooq-runtime = { module = "org.jooq:jooq", version.ref = "jooq" }
+testcontainers-postgresql = { module = "org.testcontainers:postgresql", version.ref = "testcontainers" }
+testcontainers-junit = { module = "org.testcontainers:junit-jupiter", version.ref = "testcontainers" }
+archunit-junit = { module = "com.tngtech.archunit:archunit-junit5", version.ref = "archunit" }
+temporal-sdk = { module = "io.temporal:temporal-sdk", version.ref = "temporal" }
+temporal-testing = { module = "io.temporal:temporal-testing", version.ref = "temporal" }
+bouncycastle-pkix = { module = "org.bouncycastle:bcpkix-jdk18on", version.ref = "bouncycastle" }
+jcs = { module = "io.github.erdtman:java-json-canonicalization", version.ref = "jcs" }
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
+jqwik = { module = "net.jqwik:jqwik", version.ref = "jqwik" }
+json-schema-validator = { module = "com.networknt:json-schema-validator", version.ref = "json-schema-validator" }
+picocli = { module = "info.picocli:picocli", version.ref = "picocli" }
+picocli-codegen = { module = "info.picocli:picocli-codegen", version.ref = "picocli" }
+jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
+jackson-core = { module = "com.fasterxml.jackson.core:jackson-core", version.ref = "jackson" }
+jackson-bom = { module = "com.fasterxml.jackson:jackson-bom", version.ref = "jackson" }
+slf4j-bom = { module = "org.slf4j:slf4j-bom", version.ref = "slf4j" }
+slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j" }
+micrometer-tracing-bridge-otel = { module = "io.micrometer:micrometer-tracing-bridge-otel" }
+micrometer-registry-prometheus = { module = "io.micrometer:micrometer-registry-prometheus" }
+
+[plugins]
+spring-boot = { id = "org.springframework.boot", version.ref = "spring-boot" }
+flyway = { id = "org.flywaydb.flyway", version.ref = "flyway" }
+jooq-codegen = { id = "org.jooq.jooq-codegen-gradle", version.ref = "jooq" }
+cyclonedx = { id = "org.cyclonedx.bom", version.ref = "cyclonedx" }
+pitest = { id = "info.solidsoft.pitest", version.ref = "pitest-gradle" }
+jlink = { id = "org.beryx.jlink", version.ref = "jlink" }

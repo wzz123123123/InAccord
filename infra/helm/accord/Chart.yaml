@@ -1,0 +1,9 @@
+apiVersion: v2
+name: accord
+description: Closed deployment contract for isolated Accord foundation workloads
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+kubeVersion: ">=1.29.0-0"
+annotations:
+  accord.inforvans.com/contract-version: "1.0.0"

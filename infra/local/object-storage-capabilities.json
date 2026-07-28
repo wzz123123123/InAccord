@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0.0",
+  "adapter_id": "minio-s3-local",
+  "adapter_version": "1.0.0",
+  "adapter_digest": "sha256:9414540bb737fae7b4f68685246bba91c56772901b2732bd70770fd86f034b1f",
+  "environment_class": "LOCAL_FOUNDATION",
+  "tested_at": "2026-07-27T00:00:00.000Z",
+  "expires_at": "2026-08-26T00:00:00.000Z",
+  "evidence_digest": "sha256:dd06173dfe64a8f9436d0ba19226ca8acb14a87d0f131be7c5de48c622b28d38",
+  "production_eligible": false,
+  "capabilities": {
+    "immutable_versions": {
+      "status": "SUPPORTED_AND_TESTED",
+      "evidence": ["build/verification/ft13-local.json"]
+    },
+    "sha256_checksums": {
+      "status": "SUPPORTED_AND_TESTED",
+      "evidence": ["build/verification/ft13-local.json"]
+    },
+    "worm": {
+      "status": "SUPPORTED_AND_TESTED",
+      "evidence": ["build/verification/ft13-local.json"]
+    },
+    "legal_hold": {
+      "status": "SUPPORTED_AND_TESTED",
+      "evidence": ["build/verification/ft13-local.json"]
+    },
+    "multipart": {
+      "status": "SUPPORTED_AND_TESTED",
+      "evidence": ["build/verification/ft13-local.json"]
+    },
+    "quarantine_isolation": {
+      "status": "SUPPORTED_AND_TESTED",
+      "evidence": ["build/verification/ft13-local.json"]
+    },
+    "replication_evidence": {
+      "status": "EXTERNAL_EVIDENCE_REQUIRED",
+      "evidence": ["infra/local/object-storage-capabilities.json"]
+    },
+    "deletion_receipts": {
+      "status": "EXTERNAL_EVIDENCE_REQUIRED",
+      "evidence": ["infra/local/object-storage-capabilities.json"]
+    }
+  }
+}

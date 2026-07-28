@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.accord.inforvans.com/events/domain-event/1-0-0",
+  "title": "AccordDomainEvent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "tenant_id", "scope_type", "scope_id", "aggregate_type", "aggregate_id", "sequence", "event_type", "schema_version", "causation_id", "correlation_id", "actor_id", "occurred_at", "payload"],
+  "properties": {
+    "event_id": { "type": "string", "format": "uuid" },
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "scope_type": { "enum": ["tenant", "project", "repository"] },
+    "scope_id": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "aggregate_type": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{1,63}$" },
+    "aggregate_id": { "type": "string", "format": "uuid" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "event_type": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{1,127}$" },
+    "schema_version": { "type": "string", "pattern": "^[1-9][0-9]*\\.[0-9]+\\.[0-9]+$" },
+    "causation_id": { "type": "string", "format": "uuid" },
+    "correlation_id": { "type": "string", "format": "uuid" },
+    "actor_id": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "payload": { "type": "object" }
+  }
+}

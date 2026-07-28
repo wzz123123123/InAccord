@@ -1,0 +1,540 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://accord.inforvans.com/infra/helm/accord/values.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "environment_class", "namespace", "contract", "components"],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "environment_class": { "enum": ["test", "production"] },
+    "namespace": { "$ref": "#/$defs/name" },
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity_sha256",
+        "promotion_sha256",
+        "remote_url",
+        "remote_sha",
+        "remote_tree_sha",
+        "release_manifest_digest",
+        "dsse_envelope_digest",
+        "verification_receipt_digest",
+        "created_at"
+      ],
+      "properties": {
+        "identity_sha256": { "$ref": "#/$defs/digest" },
+        "promotion_sha256": { "$ref": "#/$defs/digest" },
+        "remote_url": { "type": "string", "pattern": "^https://github[.]com/[a-z0-9-]+/[A-Za-z0-9._-]+[.]git$" },
+        "remote_sha": { "$ref": "#/$defs/gitSha" },
+        "remote_tree_sha": { "$ref": "#/$defs/gitSha" },
+        "release_manifest_digest": { "$ref": "#/$defs/digest" },
+        "dsse_envelope_digest": { "$ref": "#/$defs/digest" },
+        "verification_receipt_digest": { "$ref": "#/$defs/digest" },
+        "created_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "components": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["control-api", "control-worker", "webhook-edge"],
+      "properties": {
+        "control-api": {
+          "type": "object",
+          "$ref": "#/$defs/component",
+          "properties": {
+            "service_account": { "const": "accord-control-api" },
+            "identity": {
+              "type": "object",
+              "properties": {
+                "provider_name": { "type": "string", "pattern": "control-api$" },
+                "subject": { "type": "string", "pattern": ":accord-control-api$" },
+                "audience": { "const": "accord-control-api" }
+              }
+            },
+            "external_secret": {
+              "type": "object",
+              "properties": {
+                "target_name": { "const": "accord-control-api-runtime" },
+                "temporal_client_certificate_ref": false
+              }
+            },
+            "database": {
+              "type": "object",
+              "properties": {
+                "secret_name": { "const": "accord-control-api-runtime" },
+                "login_role": { "const": "accord_api_login" },
+                "session_role": { "const": "accord_api" }
+              }
+            },
+            "image": { "type": "object", "properties": { "repository": { "type": "string", "pattern": "/accord-control-api$" }, "reference": { "type": "string", "pattern": "/accord-control-api@sha256:" } } },
+            "runtime": { "type": "object", "properties": { "uid": { "const": 10001 }, "gid": { "const": 10001 } } },
+            "probes": { "$ref": "#/$defs/httpProbes" },
+            "network": {
+              "type": "object",
+              "required": ["ingress_gateway"],
+              "properties": {
+                "profile": { "const": "CONTROL_API" },
+                "ingress_gateway": {},
+                "destinations": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["control_postgres", "otlp", "dns"],
+                  "properties": { "control_postgres": {}, "otlp": {}, "dns": {} }
+                }
+              }
+            },
+            "tls": { "type": "object", "properties": { "temporal": false } }
+          }
+        },
+        "control-worker": {
+          "type": "object",
+          "$ref": "#/$defs/component",
+          "properties": {
+            "service_account": { "const": "accord-control-worker" },
+            "identity": {
+              "type": "object",
+              "properties": {
+                "provider_name": { "type": "string", "pattern": "control-worker$" },
+                "subject": { "type": "string", "pattern": ":accord-control-worker$" },
+                "audience": { "const": "accord-control-worker" }
+              }
+            },
+            "database": {
+              "type": "object",
+              "properties": {
+                "secret_name": { "const": "accord-control-worker-runtime" },
+                "login_role": { "const": "accord_worker_login" },
+                "session_role": { "const": "accord_worker" }
+              }
+            },
+            "image": { "type": "object", "properties": { "repository": { "type": "string", "pattern": "/accord-control-worker$" }, "reference": { "type": "string", "pattern": "/accord-control-worker@sha256:" } } },
+            "runtime": { "type": "object", "properties": { "uid": { "const": 10002 }, "gid": { "const": 10002 } } },
+            "network": {
+              "type": "object",
+              "properties": {
+                "profile": { "const": "CONTROL_WORKER" },
+                "ingress_gateway": false,
+                "destinations": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["control_postgres", "temporal", "otlp", "dns"],
+                  "properties": { "control_postgres": {}, "temporal": {}, "otlp": {}, "dns": {} }
+                }
+              }
+            },
+            "probes": { "$ref": "#/$defs/workerProbes" },
+            "external_secret": {
+              "type": "object",
+              "required": ["temporal_client_certificate_ref"],
+              "properties": { "temporal_client_certificate_ref": {} }
+            },
+            "tls": {
+              "type": "object",
+              "required": ["temporal"],
+              "properties": { "temporal": {} }
+            }
+          }
+        },
+        "webhook-edge": {
+          "type": "object",
+          "$ref": "#/$defs/component",
+          "properties": {
+            "service_account": { "const": "accord-webhook-edge" },
+            "identity": {
+              "type": "object",
+              "properties": {
+                "provider_name": { "type": "string", "pattern": "webhook-edge$" },
+                "subject": { "type": "string", "pattern": ":accord-webhook-edge$" },
+                "audience": { "const": "accord-webhook-edge" }
+              }
+            },
+            "external_secret": {
+              "type": "object",
+              "properties": {
+                "target_name": { "const": "accord-webhook-edge-runtime" },
+                "target_keys": {
+                  "type": "object",
+                  "required": ["webhook_bindings"],
+                  "properties": {
+                    "webhook_bindings": { "const": "webhook-bindings.json" }
+                  }
+                },
+                "temporal_client_certificate_ref": false
+              }
+            },
+            "database": {
+              "type": "object",
+              "properties": {
+                "secret_name": { "const": "accord-webhook-edge-runtime" },
+                "login_role": { "const": "accord_webhook_runtime_login" },
+                "session_role": { "const": "accord_webhook_runtime" }
+              }
+            },
+            "image": { "type": "object", "properties": { "repository": { "type": "string", "pattern": "/accord-webhook-edge$" }, "reference": { "type": "string", "pattern": "/accord-webhook-edge@sha256:" } } },
+            "runtime": { "type": "object", "properties": { "uid": { "const": 10003 }, "gid": { "const": 10003 } } },
+            "probes": { "$ref": "#/$defs/httpProbes" },
+            "network": {
+              "type": "object",
+              "required": ["ingress_gateway"],
+              "properties": {
+                "profile": { "const": "WEBHOOK_EDGE" },
+                "ingress_gateway": {},
+                "destinations": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["webhook_postgres", "otlp", "dns"],
+                  "properties": { "webhook_postgres": {}, "otlp": {}, "dns": {} }
+                }
+              }
+            },
+            "tls": { "type": "object", "properties": { "temporal": false } }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "not": { "const": "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+    },
+    "gitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "name": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" },
+    "selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "value"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1, "maxLength": 253 },
+        "value": { "type": "string", "minLength": 1, "maxLength": 63 }
+      }
+    },
+    "ports": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["protocol", "port"],
+        "properties": {
+          "protocol": { "enum": ["TCP", "UDP"] },
+          "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+        }
+      }
+    },
+    "route": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "namespace_selector", "pod_selector", "service_name", "ports"],
+          "properties": {
+            "mode": { "const": "KUBERNETES_SERVICE" },
+            "namespace_selector": { "$ref": "#/$defs/selector" },
+            "pod_selector": { "$ref": "#/$defs/selector" },
+            "service_name": { "$ref": "#/$defs/name" },
+            "ports": { "$ref": "#/$defs/ports" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "namespace_selector", "pod_selector", "service_name", "ports"],
+          "properties": {
+            "mode": { "const": "EGRESS_GATEWAY" },
+            "namespace_selector": { "$ref": "#/$defs/selector" },
+            "pod_selector": { "$ref": "#/$defs/selector" },
+            "service_name": { "$ref": "#/$defs/name" },
+            "ports": { "$ref": "#/$defs/ports" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "fqdn", "ports"],
+          "properties": {
+            "mode": { "const": "CILIUM_FQDN" },
+            "fqdn": { "type": "string", "pattern": "^[a-z0-9-]+([.][a-z0-9-]+)+$" },
+            "ports": { "$ref": "#/$defs/ports" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "cidrs", "evidence_digest", "evidence_expires_at", "owner", "ports"],
+          "properties": {
+            "mode": { "const": "AUDITED_CIDR" },
+            "cidrs": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F:.]+/[0-9]{1,3}$",
+                "not": { "enum": ["0.0.0.0/0", "::/0"] }
+              }
+            },
+            "evidence_digest": { "$ref": "#/$defs/digest" },
+            "evidence_expires_at": { "type": "string", "format": "date-time" },
+            "owner": { "type": "string", "minLength": 3, "maxLength": 128 },
+            "ports": { "$ref": "#/$defs/ports" }
+          }
+        }
+      ]
+    },
+    "identity": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provider", "provider_name", "subject", "audience"],
+          "properties": {
+            "provider": { "const": "KUBERNETES" },
+            "provider_name": { "$ref": "#/$defs/name" },
+            "subject": { "type": "string", "pattern": "^system:serviceaccount:" },
+            "audience": { "$ref": "#/$defs/name" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provider", "provider_name", "subject", "audience", "token_expiration_seconds", "role_arn"],
+          "properties": {
+            "provider": { "const": "AWS" },
+            "provider_name": { "$ref": "#/$defs/name" },
+            "subject": { "type": "string", "pattern": "^system:serviceaccount:" },
+            "audience": { "$ref": "#/$defs/name" },
+            "token_expiration_seconds": { "type": "integer", "minimum": 600, "maximum": 3600 },
+            "role_arn": { "type": "string", "pattern": "^arn:aws:iam::[0-9]{12}:role/" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provider", "provider_name", "subject", "audience", "token_expiration_seconds", "service_account_email"],
+          "properties": {
+            "provider": { "const": "GCP" },
+            "provider_name": { "$ref": "#/$defs/name" },
+            "subject": { "type": "string", "pattern": "^system:serviceaccount:" },
+            "audience": { "$ref": "#/$defs/name" },
+            "token_expiration_seconds": { "type": "integer", "minimum": 600, "maximum": 3600 },
+            "service_account_email": { "type": "string", "format": "email", "pattern": "[.]iam[.]gserviceaccount[.]com$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provider", "provider_name", "subject", "audience", "token_expiration_seconds", "client_id", "tenant_id"],
+          "properties": {
+            "provider": { "const": "AZURE" },
+            "provider_name": { "$ref": "#/$defs/name" },
+            "subject": { "type": "string", "pattern": "^system:serviceaccount:" },
+            "audience": { "$ref": "#/$defs/name" },
+            "token_expiration_seconds": { "type": "integer", "minimum": 600, "maximum": 3600 },
+            "client_id": { "type": "string", "pattern": "^[0-9a-f-]{36}$" },
+            "tenant_id": { "type": "string", "pattern": "^[0-9a-f-]{36}$" }
+          }
+        }
+      ]
+    },
+    "externalSecret": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["store", "remote_ref", "target_name", "target_keys"],
+      "properties": {
+        "store": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "name"],
+          "properties": {
+            "kind": { "enum": ["SecretStore", "ClusterSecretStore"] },
+            "name": { "$ref": "#/$defs/name" }
+          }
+        },
+        "remote_ref": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "target_name": { "$ref": "#/$defs/name" },
+        "target_keys": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["database_password", "postgres_ca", "otlp_ca"],
+          "properties": {
+            "database_password": { "const": "database-password" },
+            "postgres_ca": { "const": "postgres-ca.crt" },
+            "otlp_ca": { "const": "otlp-ca.crt" },
+            "temporal_ca": { "const": "temporal-ca.crt" },
+            "temporal_client_certificate": { "const": "temporal-client.crt" },
+            "temporal_client_private_key": { "const": "temporal-client.key" },
+            "webhook_bindings": { "const": "webhook-bindings.json" }
+          }
+        },
+        "temporal_client_certificate_ref": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["remote_ref", "certificate_property", "private_key_property"],
+          "properties": {
+            "remote_ref": { "type": "string", "minLength": 1, "maxLength": 512 },
+            "certificate_property": { "const": "certificate" },
+            "private_key_property": { "const": "private-key" }
+          }
+        }
+      }
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["database_name", "secret_name", "password_key", "login_role", "session_role"],
+      "properties": {
+        "database_name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,62}$" },
+        "secret_name": { "$ref": "#/$defs/name" },
+        "password_key": { "const": "database-password" },
+        "login_role": { "type": "string", "pattern": "^accord_[a-z_]+_login$" },
+        "session_role": { "type": "string", "pattern": "^accord_[a-z_]+$" }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "digest", "reference"],
+      "properties": {
+        "repository": { "type": "string", "pattern": "^[a-z0-9.-]+(/[a-z0-9._-]+)+/accord-[a-z-]+$" },
+        "digest": { "$ref": "#/$defs/digest" },
+        "reference": { "type": "string", "pattern": "^[^:@]+(/[^:@]+)+@sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uid", "gid"],
+      "properties": {
+        "uid": { "type": "integer", "minimum": 10000, "maximum": 65535 },
+        "gid": { "type": "integer", "minimum": 10000, "maximum": 65535 }
+      }
+    },
+    "resourcePair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu", "memory"],
+      "properties": {
+        "cpu": { "type": "string", "pattern": "^([1-9][0-9]*m|[1-9][0-9]*)$" },
+        "memory": { "type": "string", "pattern": "^[1-9][0-9]*(Mi|Gi)$" }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requests", "limits"],
+      "properties": {
+        "requests": { "$ref": "#/$defs/resourcePair" },
+        "limits": { "$ref": "#/$defs/resourcePair" }
+      }
+    },
+    "httpProbes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "port_name", "liveness_path", "readiness_path"],
+      "properties": {
+        "type": { "const": "HTTP" },
+        "port_name": { "const": "http" },
+        "liveness_path": { "const": "/actuator/health/liveness" },
+        "readiness_path": { "const": "/actuator/health/readiness" }
+      }
+    },
+    "workerProbes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "java_path", "jar", "liveness_argument", "readiness_argument"],
+      "properties": {
+        "type": { "const": "EXEC_JAVA" },
+        "java_path": { "const": "/usr/bin/java" },
+        "jar": { "const": "/opt/accord/bin/worker-probe.jar" },
+        "liveness_argument": { "const": "live" },
+        "readiness_argument": { "const": "ready" }
+      }
+    },
+    "tls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["postgres", "otlp"],
+      "properties": {
+        "postgres": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "ca_secret_key", "server_name"],
+          "properties": {
+            "mode": { "const": "VERIFY_FULL" },
+            "ca_secret_key": { "const": "postgres-ca.crt" },
+            "server_name": { "type": "string", "minLength": 1 }
+          }
+        },
+        "otlp": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "protocol", "ca_secret_key", "server_name"],
+          "properties": {
+            "mode": { "const": "TLS" },
+            "protocol": { "const": "HTTPS" },
+            "ca_secret_key": { "const": "otlp-ca.crt" },
+            "server_name": { "type": "string", "minLength": 1 }
+          }
+        },
+        "temporal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "ca_secret_key", "client_certificate_secret_key", "client_private_key_secret_key", "server_name", "namespace", "task_queue"],
+          "properties": {
+            "mode": { "const": "MTLS" },
+            "ca_secret_key": { "const": "temporal-ca.crt" },
+            "client_certificate_secret_key": { "const": "temporal-client.crt" },
+            "client_private_key_secret_key": { "const": "temporal-client.key" },
+            "server_name": { "type": "string", "minLength": 1 },
+            "namespace": { "type": "string", "pattern": "^[a-z][a-z0-9-]{2,62}$" },
+            "task_queue": { "type": "string", "pattern": "^[a-z][a-z0-9-]{2,127}$" }
+          }
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "destinations"],
+      "properties": {
+        "profile": { "enum": ["CONTROL_API", "CONTROL_WORKER", "WEBHOOK_EDGE"] },
+        "ingress_gateway": { "$ref": "#/$defs/route" },
+        "destinations": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 3,
+          "properties": {
+            "control_postgres": { "$ref": "#/$defs/route" },
+            "webhook_postgres": { "$ref": "#/$defs/route" },
+            "temporal": { "$ref": "#/$defs/route" },
+            "otlp": { "$ref": "#/$defs/route" },
+            "dns": { "$ref": "#/$defs/route" }
+          }
+        }
+      }
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service_account", "identity", "external_secret", "database", "image", "runtime", "resources", "probes", "network", "tls"],
+      "properties": {
+        "service_account": { "$ref": "#/$defs/name" },
+        "identity": { "$ref": "#/$defs/identity" },
+        "external_secret": { "$ref": "#/$defs/externalSecret" },
+        "database": { "$ref": "#/$defs/database" },
+        "image": { "$ref": "#/$defs/image" },
+        "runtime": { "$ref": "#/$defs/runtime" },
+        "resources": { "$ref": "#/$defs/resources" },
+        "probes": { "oneOf": [{ "$ref": "#/$defs/httpProbes" }, { "$ref": "#/$defs/workerProbes" }] },
+        "network": { "$ref": "#/$defs/network" },
+        "tls": { "$ref": "#/$defs/tls" }
+      }
+    }
+  }
+}

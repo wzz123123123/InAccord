@@ -1,0 +1,24 @@
+plugins {
+    id 'java-library'
+}
+
+dependencies {
+    implementation project(':apps:control-plane:modules:platform-kernel')
+    api platform(libs.spring.modulith.bom)
+    api libs.spring.modulith.api
+    api libs.jooq.runtime
+    implementation libs.jackson.databind
+    testImplementation enforcedPlatform(libs.junit.bom)
+    testImplementation enforcedPlatform(libs.jackson.bom)
+    testImplementation enforcedPlatform(libs.slf4j.bom)
+    testImplementation libs.junit.jupiter
+    testImplementation libs.assertj.core
+    testImplementation libs.jqwik
+    testImplementation testFixtures(project(':database:control-plane'))
+    testImplementation libs.flyway.core
+    testImplementation libs.flyway.postgresql
+    testImplementation libs.testcontainers.junit
+    testImplementation libs.testcontainers.postgresql
+    testCompileOnly 'jakarta.xml.bind:jakarta.xml.bind-api:4.0.2'
+    testRuntimeOnly libs.slf4j.simple
+}

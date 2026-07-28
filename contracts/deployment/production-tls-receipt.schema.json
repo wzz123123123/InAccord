@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://accord.inforvans.com/contracts/deployment/production-tls-receipt.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "receipt_kind",
+    "status",
+    "authority",
+    "environment_class",
+    "remote_sha",
+    "remote_tree_sha",
+    "release_manifest_digest",
+    "promotion_sha256",
+    "targets",
+    "issued_at",
+    "expires_at",
+    "evidence_digest",
+    "signing"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "receipt_kind": { "enum": ["POSTGRES_VERIFY_FULL", "TEMPORAL_MTLS", "OTLP_TLS"] },
+    "status": { "const": "PASS" },
+    "authority": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{1,127}$" },
+    "environment_class": { "const": "production" },
+    "remote_sha": { "$ref": "#/$defs/gitSha" },
+    "remote_tree_sha": { "$ref": "#/$defs/gitSha" },
+    "release_manifest_digest": { "$ref": "#/$defs/digest" },
+    "promotion_sha256": { "$ref": "#/$defs/digest" },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "items": { "$ref": "#/$defs/target" }
+    },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "evidence_digest": { "$ref": "#/$defs/digest" },
+    "signing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "key_id", "signature"],
+      "properties": {
+        "algorithm": { "const": "Ed25519" },
+        "key_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$" },
+        "signature": { "type": "string", "minLength": 80, "maxLength": 128, "pattern": "^[A-Za-z0-9+/]+={0,2}$" }
+      }
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "not": { "const": "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+    },
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "not": { "const": "0000000000000000000000000000000000000000" }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "server_name",
+        "tls_mode",
+        "protocol",
+        "status",
+        "peer_certificate_sha256",
+        "client_certificate_sha256",
+        "handshake_evidence_digest"
+      ],
+      "properties": {
+        "component": { "enum": ["control-api", "control-worker", "webhook-edge"] },
+        "server_name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?(?:[.][a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)+$"
+        },
+        "tls_mode": { "enum": ["VERIFY_FULL", "MTLS", "TLS"] },
+        "protocol": { "enum": ["TLSv1.2", "TLSv1.3"] },
+        "status": { "const": "PASS" },
+        "peer_certificate_sha256": { "$ref": "#/$defs/digest" },
+        "client_certificate_sha256": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/digest" }
+          ]
+        },
+        "handshake_evidence_digest": { "$ref": "#/$defs/digest" }
+      }
+    }
+  }
+}

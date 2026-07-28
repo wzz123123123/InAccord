@@ -4,8 +4,8 @@
 - 英文名称：Inforvans Accord
 - 产品简称：合契 / Accord
 - 品牌主张：让预期与交付，合于一契。 / From intent to delivery, in accord.
-- 日期：2026-07-24
-- 文档状态：已完成最终书面确认，进入实施计划阶段
+- 日期：2026-07-25
+- 文档状态：已完成最终书面确认；多 Git Provider、跨仓库控制平面和平台外源码边界补充设计已确认，对应实施计划已完成修订并进入书面复核
 - 产品级别：生产级 V1 / GA 目标设计，不以功能原型或不完整试用版作为正式交付口径
 - 主要场景：企业内部业务团队与研发团队协作，兼容外部供应商参与的甲乙方交付
 - 核心价值：减少需求遗漏、歧义和业务到技术误译造成的返工
@@ -13,7 +13,7 @@
 
 ## 1. 产品定义
 
-合契是一套结构化需求理解与研发交付控制平台。它连接业务需求方、内部研发团队和受邀的外部供应商，通过统一需求知识图谱、由客户侧生成、CI 证明分析来源并由开发侧确认且由平台保存的项目代码画像、双侧评分和确认、Git 正式契约以及可追溯验收闭环，把“业务想要什么”稳定地转换成“开发应当实现什么”。
+合契是一套结构化需求理解与研发交付控制平台。它连接业务需求方、内部研发团队和受邀的外部供应商，通过统一需求知识图谱、由客户侧生成、CI 证明分析来源并由开发侧确认且由平台保存的项目代码画像、双侧评分和确认、平台签名的正式需求基线、Git 控制元数据以及可追溯验收闭环，把“业务想要什么”稳定地转换成“开发应当实现什么”。
 
 合契首先解决需求误解造成的返工，同时完整覆盖四类相关问题：
 
@@ -35,16 +35,17 @@
 - 需求提取、业务澄清、开发影响初稿和双视图转译；
 - 双侧评分、准入门禁、Revision、建议、确认和例外；
 - 交付批次、WorkItem、ActionRequest、通知、验收和审计；
-- 正式 Requirement Contract 的 Git 发布；
+- 正式 Requirement Baseline、开发任务包及 Agent Pack 的签名发布、版本化下载和审计；
+- 多 Git Provider 的安装实例、仓库绑定、能力准入、分支/PR/check、Webhook、对账和受控合并；
 - 严格交付模式下仅对已经存在且验证通过的准确候选调用 Git Provider 合并 API，更新受保护分支引用；平台不生成或编辑代码内容。
 
 开发侧负责：
 
-- 安装平台提供的签名 Agent Pack；
+- 通过平台或 `accordctl` 安装并验证平台提供的签名 Agent Pack；
 - 首次分析源码并生成结构化 Project Context 基线；
 - 审阅平台生成的需求影响分析并提出修改建议；
-- 使用本地 Codex 依据正式 Requirement Contract 开发；
-- 在所有代码 PR 中提交 Context Patch 或经 CI 证明的 `no_context_change`；
+- 使用本地 Codex 依据正式开发任务包开发；
+- 将绑定准确 commit 的 Context Patch、结构化开发说明或经 CI 证明的 `no_context_change` 提交给平台；
 - 运行测试、生成制品和签发客户 CI 证明。
 
 ### 1.2 产品价值闭环
@@ -55,8 +56,8 @@
 → 平台基于 Project Context 生成开发影响初稿
 → 开发方审阅、评分并提出结构化建议
 → 双方确认同一 Requirement Revision
-→ 平台发布正式契约到交付分支
-→ 开发者 Codex 直接依据契约开发
+→ 平台冻结正式需求基线、拆分仓库级 WorkItem 并创建交付分支引用
+→ 开发者通过 accordctl 获取签名开发任务包，使用原生 Git 和本地 Codex 开发
 → 客户 CI 验证代码、测试和 Context Patch
 → 需求方对准确候选验收
 → 失败按实现错误、需求变化或环境问题分别处理
@@ -73,7 +74,7 @@
 | 业务侧最高负责人 | 确认本侧授权、评分策略、高风险需求和业务侧例外 |
 | 开发负责人 | 审阅影响分析、组织技术评估、拆分 WorkItem、分配开发并处理冲突 |
 | 开发评估人员 | 对技术可行性、范围、成本、风险和测试进行人工评分与说明 |
-| WorkItem 开发人员 | 拉取正式契约，使用本地 Codex 开发、测试并提交 Context Patch |
+| WorkItem 开发人员 | 获取签名开发任务包，使用原生 Git 和本地 Codex 开发、测试并提交 Context Patch |
 | 业务侧验收负责人 | 以业务侧身份对绑定准确 Revision、提交和制品的候选执行最终验收 |
 | 项目负责人 | 配置项目、成员、交付模式、评分策略、通知和外部协作 |
 | 外部供应商成员 | 以开发侧受限成员身份参与指定 Requirement、WorkItem 和交付批次 |
@@ -84,22 +85,24 @@
 
 | 能力 | 标准协作模式 | 严格交付模式 |
 | --- | --- | --- |
-| 正式需求发布 | 仅平台 Requirement Publisher | 仅平台 Requirement Publisher |
+| 正式需求发布 | 平台签名并发布 Requirement Baseline 与开发任务包 | 相同，且任务包绑定严格模式能力快照 |
 | 工作 PR 最终合并 | 企业现有负责人或 Git 合并队列 | 合契受控 Merge Controller |
 | 合并前检查 | 需求版本、人员、范围、测试、Context Patch 和 hold | 相同检查，并在最终合并瞬间重新验证 |
 | 管理员绕过风险 | 可能存在，平台负责发现、冻结和恢复 | 常规路径不可绕过 |
 | 适用场景 | 内部可信研发团队 | 外包、核心业务和强审计项目 |
 | 对外保证 | 强检查、完整审计和异常恢复 | 不可绕过的合并执行门禁 |
 
-需求发布路径始终采用强管控，不随代码合并模式变化。任何人员和本地 Codex 均不得直接修改 `.requirements/**`。
+需求发布路径始终采用强管控，不随代码合并模式变化。正式 Requirement Baseline、开发任务包和历史 Revision 只在平台事实库与受控对象存储中版本化；Git 仓库不作为需求文档事实库。
 
 ### 2.3 V1 支持边界
 
 生产级 V1 支持：
 
-- 单仓库项目；
-- 每个仓库一个正常执行中的 DeliveryBatch，同时允许未来需求持续准备；
-- 一个部署接入一个 Git Provider；
+- 一个业务项目关联一个或多个仓库，仓库可以跨 Git Provider；
+- 一个 Requirement 拆分为一个或多个仓库级 WorkItem，并由 CompletionSet 汇总交付；
+- 每个仓库最多参与一个正常执行中的 DeliveryBatch，同时允许未来需求持续准备；
+- 同一部署可同时接入 GitHub Cloud / Enterprise Server、GitLab SaaS / Self-Managed、Gitee / Gitee Enterprise、Azure DevOps Services / Server 和 Bitbucket Cloud / Data Center；
+- 其他 Git 服务可通过版本化 Provider SPI 接入，未经 Accord 认证时只允许普通模式；
 - 支持矩阵中明确验证过的语言、框架和主版本；
 - 企业内部业务与研发协作，以及受邀供应商参与；
 - 标准协作与严格交付两种模式。
@@ -108,7 +111,8 @@ V1 不承诺：
 
 - 平台服务端直接理解源码；
 - 任意语言、框架、反射、动态生成或运行时行为的完整理解；
-- 大型 monorepo 和跨仓库统一交付批次；
+- 大型 monorepo 的无边界分析与任意规模承诺；
+- 跨 Provider 原子合并、自动回滚已经合并的仓库或伪造分布式事务；
 - 自动替代业务、开发和验收责任人作出确认；
 - 自动解决业务语义冲突、代码冲突或无法证明的影响范围；
 - 无审计的管理员绕过；
@@ -137,11 +141,11 @@ Agent 可以提取、补全、转译、评分、建议关系和生成报告，�
 
 ### 3.5 持续需求流与交付冻结分离
 
-上一批代码仍在开发时，未来需求可以继续提出、澄清、评分和确认。只有需求进入具体 DeliveryBatch 时，准确 Revision 才被冻结并发布到对应交付分支。
+上一批代码仍在开发时，未来需求可以继续提出、澄清、评分和确认。只有需求进入具体 DeliveryBatch 时，准确 Revision 才被冻结，并与仓库级 WorkItem、开发分支引用和签名任务包绑定。
 
 ### 3.6 正式语义只由平台发布
 
-草稿、对话、建议和处理过程留在平台。双方确认后的 Requirement Contract 由平台 Requirement Publisher 发布到 Git。开发人员只读取正式契约，不直接维护正式需求文件。
+草稿、对话、建议和处理过程留在平台。双方确认后的 Requirement Baseline 由平台签名后通过平台 API、界面和 `accordctl` 发布；开发者可下载、验证并供本地 Codex 使用，但不能直接改写平台中的正式需求版本。Git 只保存代码与 Provider 原生元数据，不保存平台生成的需求正文。
 
 ### 3.7 不确定性显式化
 
@@ -173,7 +177,11 @@ flowchart LR
         RA["需求理解与影响分析 Agent"]
         AS["评分与准入"]
         WF["Revision / ActionRequest / 审计"]
-        RP["Requirement Publisher"]
+        PG["Provider Capability Gateway"]
+        CR["独立 Connector Runtime"]
+        CB["Credential Broker"]
+        WH["Webhook Edge"]
+        CA["Provider Auth Callback Edge"]
         MC["Strict Merge Controller"]
         AT["附件与权限"]
     end
@@ -190,8 +198,14 @@ flowchart LR
     RA --> RG
     RG --> AS
     AS --> WF
-    WF --> RP
-    RP --> REPO
+    WF --> PG
+    WF --> CA
+    PG --> CR
+    CB --> CR
+    CR --> REPO
+    REPO --> WH
+    WH --> WF
+    CA --> WF
     REPO --> CODEX
     CODEX --> REPO
     REPO --> CI
@@ -214,7 +228,14 @@ flowchart LR
 | Translation Agent | 在不改变事实来源的前提下进行业务与技术视图转译 |
 | Assessment Service | 管理 AssessmentPolicy、评分、门禁、异常检测和例外 |
 | Workflow Service | 管理 Revision、建议、确认、WorkItem、验收、CorrectionRun 和 ActionRequest |
-| Requirement Publisher | 只向 Git 发布已确认正式契约和交付元数据 |
+| Development Package Service | 对 Requirement Baseline、WorkItem、验收条件、附件引用和 Agent Pack 清单生成签名开发任务包，并通过平台 API 与 `accordctl` 发布 |
+| Identity / Tenancy | 创建并维护唯一权威 RepositoryBinding，绑定 tenant、project、Provider family、规范化 endpoint identity、installation identity 和 Provider immutable repository ID |
+| Provider Registry | 保存安装实例、适配器版本、Binding 的技术注册关联和能力快照；只能引用 Identity 中已激活的 RepositoryBinding，不能创建第二套仓库归属事实 |
+| Provider Capability Gateway | 只暴露分支、ChangeRequest、check、保护策略、Webhook、对账和受控合并等类型化能力，不暴露源码能力 |
+| Connector Runtime | 以独立 Java 进程运行内置或外部 Provider 适配器，实施 mTLS、端点允许清单、限流、幂等和凭据隔离 |
+| Credential Broker | 根据安装实例和工作负载身份向 Connector 提供短期 Provider 凭据；业务库只保存外部密钥引用 |
+| Webhook Edge | 在规范化前完成 Provider 专用验签、大小限制、去重和短期加密留存 |
+| Provider Auth Callback Edge | 使用与 Webhook Edge 相同的签名镜像但独立身份，单次消费 OAuth/App 回调并只向控制面转发 opaque receipt |
 | Merge Controller | 仅在严格模式对准确候选执行最终合并，不生成代码内容 |
 | Attachment Service | 使用私有 OSS 保存附件、权限、版本、内容哈希和审计 |
 | Event and Notification Service | 保存追加式事件，可靠投递用户动作请求和外部提醒 |
@@ -224,14 +245,14 @@ flowchart LR
 | 内容 | 权威来源 | 其他位置的角色 |
 | --- | --- | --- |
 | 需求草稿、业务问题、建议、评分和确认 | 平台 | Git 不保存协商正文 |
-| 统一 Requirement Graph | 平台 | Git 保存已确认 Revision 的执行快照 |
-| 正式 Requirement Contract | 平台生成，Git 保存 | 平台索引其 blob、commit 和签名 |
+| 统一 Requirement Graph | 平台 | Git 不保存需求正文副本 |
+| 正式 Requirement Baseline / 开发任务包 | 平台 PostgreSQL 与受控 OSS | 开发者通过 API/`accordctl` 获取带版本、摘要和签名的只读副本 |
 | 初始 Project Context 基线 | 开发侧生成并经 CI 证明 | 平台保存 active 物化视图 |
-| Context Patch / no-context-change | 开发侧 Git PR 与客户 CI | 平台在真实合并后应用 |
+| Context Patch / no-context-change | 开发者 Codex 与客户 CI 生成，平台接收待生效包 | 平台在 Provider 证明真实合并后激活对应版本；Git 中无需保存平台文档 |
 | 源码 | 客户仓库 | 平台不可访问 |
 | 构建制品 | 客户制品库 | 平台只保存 digest、链接和证明 |
 | 图片和材料附件 | 平台私有 OSS | Requirement Graph 保存附件 ID 与版本 |
-| ActionRequest、通知、审计事件 | 平台 | Git 只保存必要的签名引用 |
+| ActionRequest、通知、审计事件 | 平台 | Git 只提供分支、PR、check、commit 和 actor 等 Provider 事实 |
 
 ### 4.3 生产实现技术基线
 
@@ -245,7 +266,7 @@ V1 平台实现统一采用以下受控技术基线，实施计划和代码不�
 - Temporal：只负责跨天、多轮人工确认、重试、超时和失败恢复的持久编排，不作为审批、评分、确认或交付状态的唯一事实来源。
 - 私有 OSS/S3 兼容对象存储：保存附件、音频、渲染文档、证据包和其他大型不可变对象。PostgreSQL 只保存对象标识、版本、摘要、权限、保留策略和审计引用。生产适配器必须通过能力矩阵验证版本化、WORM/Object Lock、校验和、多段上传、跨区复制和删除证明；能力不足时相关 GA 能力失败关闭。
 
-首版不依赖 Redis、DynamoDB、Kafka 或另一套业务数据库。允许进程内有界缓存，但缓存必须可丢弃、不得参与授权或状态机判断，也不得成为跨副本协调手段。Webhook Edge、Attachment Scanner、Signing Service、Requirement Publisher、Merge Controller 等安全组件仍是独立进程，使用独立工作负载身份、数据库角色、网络策略、密钥用途和最小权限；统一使用 Java 不代表合并信任边界或共享高权限凭据。
+首版不依赖 Redis、DynamoDB、Kafka 或另一套业务数据库。允许进程内有界缓存，但缓存必须可丢弃、不得参与授权或状态机判断，也不得成为跨副本协调手段。Webhook Edge、Provider Auth Callback Edge、Attachment Scanner、Signing Service、Credential Broker、Connector Runtime、Merge Controller 等安全组件仍是独立进程，使用独立工作负载身份、数据库角色、网络策略、密钥用途和最小权限；统一使用 Java 不代表合并信任边界或共享高权限凭据。两个 Edge 运行身份使用同一签名镜像，但不得共享 ServiceAccount、数据库角色、加密密钥、入口路径、mTLS audience、队列或 NetworkPolicy。
 
 ## 5. 统一需求知识图谱
 
@@ -410,20 +431,20 @@ accord-agent-pack/
 └─ accord-manifest.yaml
 ```
 
-平台提供安装命令、下载资源、兼容矩阵、文件哈希、签名和升级说明。开发人员负责执行安装。项目在 `agent-pack.lock` 中固定版本；升级通过开发侧 PR 完成，平台不能在线改变已固定的 Skill、Schema 或 `AGENTS.md`。
+平台提供安装命令、下载资源、兼容矩阵、文件哈希、签名和升级说明。开发人员负责在本地 Codex 工作区执行安装；客户可以选择把 `AGENTS.md` 或 lock 文件纳入自己的仓库，但平台不要求也不代为提交。每个 RepositoryBinding 在平台中固定 `agent_pack_lock_digest`，`accordctl` 在执行前验证本地资源与该摘要一致；升级由开发侧发起并确认，平台不能在线改变已经绑定到 Requirement Baseline 的 Skill、Schema 或 `AGENTS.md`。
 
 ### 7.2 首次 Project Context
 
 首次接入流程：
 
-1. 开发侧通过客户 PR 安装 Agent Pack 并固定 `agent-pack.lock`。
-2. 开发者 Codex 在客户环境读取源码并生成结构化基线，提交到 `.agent-context/baselines/<context-version>.json`；Accord 元数据目录不参与 `code_fingerprint`。
-3. 客户 CI 校验 Schema、被分析的代码基线 SHA、证据引用、Pack 版本和签名；该元数据 PR 使用签名 `no_context_change`，避免为自身制造代码画像循环。
-4. 基线合并后，CI 将结构化基线和证明上传平台；源码正文默认不上传。
+1. 开发侧使用 `accordctl` 安装并验证 Agent Pack，平台固定对应 `agent_pack_lock_digest`。
+2. 开发者 Codex 在客户环境读取源码并生成结构化基线，通过 `accordctl` 上传候选；载荷绑定不可变 Provider、仓库 ID、代码基线 SHA 和 tree hash，不上传源码正文。
+3. 客户 CI 校验 Schema、被分析的代码基线 SHA、证据引用、Pack 版本和签名，并通过 OIDC 工作负载身份向平台提交独立 DSSE 证明。
+4. 平台只有在 Provider 元数据证明该 SHA 是目标分支当前或明确选择的历史基线，且结构化基线与 CI 证明摘要一致后，才允许进入开发侧确认。
 5. 开发侧最高负责人或授权技术负责人查看模块摘要、覆盖率、unknown/conflict 和上传数据清单后确认；不要求逐条 claim 点击确认，详细证据可抽查。
 6. 平台激活新的 Project Context Version。
 
-确认前的基线只能预览，不能用于正式需求评分、双边确认和 Git 发布。
+确认前的基线只能预览，不能用于正式需求评分、双边确认和开发任务发布。
 
 Project Context 至少包含：
 
@@ -462,7 +483,7 @@ Impact Agent 输出至少包括：
 
 正常情况下 Context Patch 由 Agent Pack 根据实际 diff 生成并由客户 CI 校验，开发者只审阅摘要和处理冲突、未知或越界差异，不要求手工重复维护一份代码说明文档。
 
-Context Patch payload 与实际代码位于同一 PR，至少包含：
+Context Patch payload 通过 `accordctl` 或平台 API 提交，并与实际代码 PR、source head 和目标仓库绑定；它至少包含：
 
 - 起始 Project Context Version 和 lineage；
 - Requirement Revision 和 WorkItem（如适用）；
@@ -470,18 +491,18 @@ Context Patch payload 与实际代码位于同一 PR，至少包含：
 - 新增、更新或失效的证据；
 - Agent Pack 和分析器版本。
 
-payload 不保存包含自身的 source head、result tree 或全 PR diff digest，避免 Git 哈希自引用。客户 CI 的外部 DSSE attestation 单向绑定 `patch_payload_digest + repository/PR/source head/verified target head/result tree/normalized code diff`；预计合并基线位于该外部证明中。
+payload 可以直接绑定 source head，因为它不写回 Git、不会形成 Git 哈希自引用；未知的实际 merge SHA 与 result tree 仍由客户 CI 和 Provider 合并后的外部证明补齐。客户 CI 的 DSSE attestation 单向绑定 `patch_payload_digest + repository/PR/source head/verified target head/result tree/normalized code diff digest`，不向平台发送 diff 正文。
 
 PR CI 在合并前模拟应用并校验 Patch。Patch 在真实 PR 合并前只属于 `pending` 候选。Webhook 确认准确 merge SHA 后，平台按合并顺序应用 Patch，生成新的 active Project Context Version。
 
-平台不在每次更新后把完整 Project Context 写回开发分支。Git 保存初始基线、增量 Patch、声明和 CI 证明；平台保存当前物化视图，避免写回提交再次改变分支头部形成循环。
+平台不把 Project Context、增量 Patch、声明或 CI 证明写回开发分支。平台保存候选、证明和当前物化视图；只有 Provider 证明对应代码真正合并后，待生效 Patch 才成为新的 active Project Context Version。
 
 ### 7.5 新鲜度与重建
 
 - 代码合并但缺少有效 Patch：Project Context 立即进入 `stale`。
 - Patch 序号缺失：暂停应用后续 Patch 并对账。
 - Patch 冲突或无法应用：进入 `rebuild_required`。
-- `stale` 或 `rebuild_required` 时仍可录入、澄清并形成业务侧 `B` 评分；暂停开发侧 AI 分 `A`、开发侧综合分 `D` 的定稿、开发确认、双方最终确认和 Git 发布，直到画像恢复或证明该需求不受影响。
+- `stale` 或 `rebuild_required` 时仍可录入、澄清并形成业务侧 `B` 评分；暂停开发侧 AI 分 `A`、开发侧综合分 `D` 的定稿、开发确认、双方最终确认和开发任务发布，直到画像恢复或证明该需求不受影响。
 - 全量重建必须重新经过开发侧负责人确认。
 - 开发中发现画像错误时，提交 DevelopmentAnnotation；平台先标记受影响范围，再进入画像修正或需求 Revision 流程。
 
@@ -581,7 +602,7 @@ AssessmentPolicy 可以为必需维度设置高于或低于 `T` 的最低分。�
 1. 平台保留原始异常结果，不允许人工偷偷改成正常分数。
 2. 申请人创建 `AssessmentOverride`，绑定 Requirement Revision、AssessmentPolicy、异常运行、受影响分数或维度、理由、补偿控制、到期时间和风险说明。
 3. `B` 异常由业务侧最高负责人或有效代理批准；`A` 异常由开发侧最高负责人或有效代理批准。
-4. 申请人不能批准自己的例外；严格模式仍要求跨侧最终确认来自不同账号。
+4. 申请人不能批准自己的例外；严格模式默认要求跨侧最终确认来自不同账号，预先授权的 `DualRole Principal Admin` 按 9.4 的双回执和强化审计规则处理，但仍不能批准自己发起的 AssessmentOverride。
 5. 例外只豁免明确列出的 AI 运行及其无法计算的总分或 AI 维度最低分，不豁免硬阻塞、身份、证据或开发人工 `H` 的维度最低分。`B` 异常时，业务侧批准人必须按量表逐维确认达到最低要求；`A` 异常时，`H` 必须完整且逐维过线。被豁免的 AI 维度显示 `overridden`，不能伪造数值。
 
 批准后内部状态记录 `score_exception_accepted`；业务页面显示“AI 评分异常已批准继续（不等于评分达标）”，而不是暴露内部码或伪造替代分数。异常恢复后可重新评分；若新结果未达门禁，未发布需求返回对齐，已冻结需求按 BatchAmendment 和风险规则处理。
@@ -683,7 +704,7 @@ AcceptedUnknown、正式 Decision、附件类型和普通关系默认包含在�
 
 ConfirmationReceipt 是不可改写记录，绑定租户、项目、Requirement、Revision hash、确认侧、账号、角色绑定版本、AssessmentPolicy、Project Context basis、确认时间、认证强度和签名。人员更换不重算业务语义哈希，但未完成动作立即转给新绑定；已确认但未入批次的需求在准入时重新校验签署人授权。授权已撤销且策略不允许历史授权继续生效时，需要重新确认。
 
-严格模式的业务侧最终确认和开发侧最终确认必须来自不同自然人账号。同一自然人在同一侧兼任多个角色不需要重复点击同一确认。
+严格模式默认要求业务侧最终确认和开发侧最终确认来自不同自然人账号。租户可以显式启用受审计的 `DualRole Principal Admin` 例外：只有预先绑定该高级角色的自然人可以同时代表两侧，必须分别查看并确认两侧内容、分别重新认证、填写兼任原因并生成两张 ConfirmationReceipt；系统不得把一次点击复制成双侧确认。该例外只改变人员职责分离，不豁免评分、证据、Revision、Provider 能力或合并门禁。
 
 ### 9.5 已确认需求的重验
 
@@ -702,7 +723,7 @@ Requirement 进入 Ready Pool 后仍可能等待当前批次结束。加入新�
 
 业务侧可以在任何时候新增需求。当前 DeliveryBatch 开发或验收期间，未来需求仍可完成录入、澄清、影响分析、评分、建议和双方确认，并进入 Ready Pool。
 
-V1 对每个仓库只允许一个正常执行中的 DeliveryBatch。该限制只约束代码交付和共享开发分支，不阻止未来需求准备。Ready Pool 中的需求不会被写入当前交付分支，也不会改变当前批次契约。
+V1 允许一个业务项目关联多个仓库并形成同一 DeliveryBatch，但每个仓库同一时间最多参与一个正常执行中的 DeliveryBatch。该限制只约束代码交付和共享开发分支，不阻止未来需求准备。Ready Pool 中的需求不会进入当前批次，也不会改变已经冻结的 Requirement Baseline。
 
 ### 10.2 批次准入与 DeliveryCommitment
 
@@ -712,109 +733,113 @@ V1 对每个仓库只允许一个正常执行中的 DeliveryBatch。该限制只
 - Project Context basis、相关 claim digest 和 ContextBasisReuse；
 - AssessmentPolicy、评分运行和 AssessmentOverride；
 - Agent Pack、Schema 和支持矩阵单元；
-- WorkItem、依赖、责任人绑定和业务侧验收负责人；
-- 目标默认分支、基线 SHA、交付模式和计划验收环境。
+- 按不可变仓库 ID 拆分的 WorkItem、跨仓库依赖、责任人绑定和业务侧验收负责人；
+- 每个仓库的租户、Provider 安装实例、目标默认分支、基线 SHA 和 active Project Context Version；
+- 期望交付模式、适配器与能力快照、认证等级和计划验收环境。
 
-每个需求生成不可改写的 `DeliveryCommitment`。人员、分支或运行状态变化不修改 Requirement Revision，而是使旧 Commitment 失效并产生替代 Commitment。批次初始清单计算独立 `batch_manifest_hash`，避免把签名和派生状态放进 `revision_hash` 形成自引用。
+每个需求生成不可改写的 `DeliveryCommitment`，每个目标仓库生成 `RepositoryWorkSet`，每个 WorkItem 必须且只能属于一个 RepositoryWorkSet。人员、分支、仓库或运行状态变化不修改 Requirement Revision，而是使旧 Commitment 失效并产生替代 Commitment。批次初始清单以规范化 JSON 保存在平台事实库和受控 OSS，并计算独立 `batch_manifest_hash`，避免把签名和派生状态放进 `revision_hash` 形成自引用。
 
 后续 amendment 必须引用前一个 effective digest。平台按序折叠 `batch.json + amendments[]` 计算 `effective_batch_manifest_digest`，并为每个 Requirement 解析出唯一 active Commitment；序列缺口、分叉或同一 Requirement 多个 active Commitment 都失败关闭。Candidate 绑定 effective digest，而不是只绑定最初 batch 文件。
 
+严格模式使用版本化策略标识，例如 `STRICT_V1`。只有本批全部 RepositoryWorkSet 的当前 CapabilitySnapshot 都满足同一严格策略时才能冻结；任一仓库不满足时必须修复配置，或创建新的普通模式基线，禁止把已确认的严格模式基线自动降级。
+
 ### 10.3 冻结、发布与开工
 
-批次完成双侧负责人确认后进入 `frozen`。Requirement Publisher 从准确默认分支基线创建受保护的 `delivery/<batch-id>/develop`，只提交批次清单和已确认 Requirement Contract，并推送远程分支。
+批次完成双侧负责人确认后进入 `frozen`。Development Package Service 为每个 RepositoryWorkSet 生成签名开发任务包；Branch Release Coordinator 通过 Provider Capability Gateway 从准确默认分支 SHA 创建受保护的 `delivery/<batch-id>/develop` 引用。该操作只创建 ref，不创建 commit、blob 或仓库文件。
 
-开发者拉取该分支后，本地 Codex 能直接读取固定 Agent Pack、批次清单、Requirement Contract、开发视图、WorkItem、验收条件和上下文引用开始工作；不要求针对每个需求重新执行全仓源码分析。
+开发者使用原生 Git 拉取该分支，并通过 `accordctl` 或平台 API 获取固定 Agent Pack、批次清单、Requirement Baseline、开发视图、WorkItem、验收条件和上下文引用。本地工具先验证包签名、摘要、租户、仓库、分支和基线 SHA，再交给 Codex 开始工作；不要求针对每个需求重新执行全仓源码分析。
 
-发布 Webhook 必须证明远程分支、commit、tree、contract blob 和签名与 DeliveryCommitment 一致。只有证明完成后批次进入 `ready`，WorkItem 才能接受和开工。平台发布失败保持 `publishing` 并幂等重试，不允许开发者手工补写 `.requirements/**`。
+每个分支发布回执必须证明 Provider 安装实例、不可变仓库 ID、远程 ref、基线 commit/tree、能力快照和任务包摘要与 DeliveryCommitment 一致。只有全部必需 RepositoryWorkSet 都获得完整回执后批次才进入 `ready`，WorkItem 才能接受和开工。部分分支已经创建而其他 Provider 失败时保持 `publishing` 并显示“部分发布”，保留已创建分支并幂等修复，不自动删除或伪造整体成功。
 
 ### 10.4 冻结后的变化
 
-- 尚无 WorkItem 开工：双方负责人可以撤销冻结，生成新 Batch Manifest，重新确认后发布；旧清单保留为 superseded。
+- 尚无 WorkItem 开工：双方负责人可以撤销冻结，生成新 Batch Manifest，重新确认后发布；旧清单和已创建分支的处置记录保留为 superseded，不自动执行破坏性删除。
 - 已经开工：语义变化先使受影响 WorkItem 和候选进入 hold。双方选择把新 Revision 放入下一批，或创建 `BatchAmendment`；后者必须重新分析影响、替换 Commitment、重新确认并使相关旧完成和验收失效。
 - 人员替换：创建新角色绑定、Assignment 和 Commitment，不改变 Requirement Revision；新人员从允许的最新批次基线继续。
 - Requirement 取消：需要双方签名的 CancellationDecision；已合并代码还必须有 cleanup/revert WorkItem 和缺失范围证明，不能只把页面状态改为取消。
 
 ### 10.5 批次完成原则
 
-DeliveryBatch 只有在全部 Commitment 已完成或合法取消、全部未取消的必需 WorkItem 有真实合并证明、Context Patch 水位连续、候选和制品已通过验收、所有阻塞动作关闭，并且最终目标分支结果与已接受候选一致时才可完成。取消 Commitment 若已有代码，必须具有 cleanup/revert WorkItem Completion 和最终树缺失证明；未产生任何代码时必须具有客户 CI 签发的 no-code proof。
+DeliveryBatch 只有在全部 Commitment 已完成或合法取消、全部未取消的必需 WorkItem 有真实合并证明、各仓库 Context Patch 水位连续、候选和制品已通过验收、所有阻塞动作关闭，并且 `CompletionSet` 已固定每个 RepositoryWorkSet 的精确 Provider、仓库、commit、tree、artifact、Context Version 和证明摘要时才可完成。取消 Commitment 若已有代码，必须具有 cleanup/revert WorkItem Completion 和对应仓库最终树缺失证明；未产生任何代码时必须具有客户 CI 签发的 no-code proof。
+
+跨仓库不伪造原子事务。部分仓库已经合并而其他仓库失败时，DeliveryBatch 进入“部分交付”并冻结整体完成；已合并仓库不会被自动回滚，后续只能通过明确的修复、回退或取消 WorkItem 收敛。
 
 `suspended` 表示可恢复的临时冻结；`aborted` 表示该批次不再继续。两者都必须保留已发布契约、代码提交、原因和恢复或清理证据。紧急线上修复不创建第二个正常 DeliveryBatch，而走 18.4 的受控 hotfix 通道，并在恢复当前批次前完成基线对账。
 
-## 11. Git 仓库契约、分支与双模式合并
+## 11. 多 Git Provider 控制平面、分支与双模式合并
 
-### 11.1 固定目录和写入所有权
+### 11.1 控制平面和源码边界
 
-```text
-AGENTS.md
-agent-pack.lock
+Git 仓库保存客户源码、测试、构建配置以及客户自行决定维护的文件。Requirement Baseline、开发任务包、Project Context、Context Patch、评分、确认和验收记录的权威版本保存在平台，不要求也不允许平台为这些文档创建仓库 commit。
 
-.requirements/
-  schemas/
-  batches/<batch-id>/
-    batch.json
-    contracts/<requirement-id>/<revision-hash>.json
-    attestations/<attestation-id>.dsse.json
-    amendments/<sequence>.json
+Provider SPI 只允许以下类型化事实和动作：
 
-.agent-context/
-  schemas/
-  baselines/<context-version>.json
-  patches/<patch-id>.json
-  no-context-change/<assertion-id>.json
-```
+- 安装实例、不可变仓库 ID、ref、commit/tree hash、PR/MR、check、review、actor、保护策略和 merge result 等元数据查询；
+- 从准确 commit 创建新 ref、创建或更新受控 ChangeRequest、登记 check、读取保护策略以及对准确候选执行条件合并；
+- Webhook 验签、主动对账、限流状态和 Provider 请求回执。
 
-| 路径或对象 | 内容写入方 | 关键规则 |
-| --- | --- | --- |
-| `.requirements/**` | Requirement Publisher | 只写平台生成的正式契约、批次清单、追加式修订和签名；开发者及其 Codex 不得修改 |
-| `.agent-context/baselines/**` | 开发侧负责人通过客户 PR | 只在首次接入或全量重建时提交，经客户 CI 证明和开发负责人确认 |
-| `.agent-context/patches/**` | WorkItem 开发者或其 Codex | 必须和真实代码变更位于同一 PR，内容由客户 CI 校验 |
-| `.agent-context/no-context-change/**` | 客户 CI 生成声明，开发侧提交引用 | 只有客户 CI 签名证明才有效，开发者文字说明不能替代 |
-| Git Provider Check / DSSE 证明 | 客户 CI 或对应专用签名服务 | 不通过“CI 再提交一个证明 commit”写回仓库 |
-| 源码、测试和构建配置 | 客户开发者 | 平台服务和 Requirement Publisher 无写权限 |
+Provider SPI 明确不提供 clone、fetch、push、blob、文件树内容、diff、patch、archive、代码搜索、任意 URL 或通用 Provider HTTP 代理。开发者继续使用原生 Git 完成 clone、编辑、commit 和 push；Accord 不成为 Git 数据传输链路。
 
-Requirement Contract 使用规范化 JSON，只包含 Schema、Requirement/Revision identity、`revision_hash` 和 semantic payload。人员、确认回执、Batch、Commitment 与 publication attestation 位于独立 DSSE envelope。Contract 文件路径包含 `revision_hash`，发布后不得原位覆盖；新 Revision 使用新路径。`batch.json` 固定初始集合，后续变化使用包含前序 digest 的 `amendments/<sequence>.json`，禁止重写历史。
+部分 Provider 会把创建 ref 所需权限与仓库内容权限捆绑。此时平台不得宣称凭据在权限层面绝对无法读源码，而必须执行补偿控制：Connector 使用签名适配器、固定 API 方法和路径允许清单、关闭响应正文日志、拒绝重定向与任意查询，并在发布门禁中扫描请求记录、数据库、消息、Trace、日志和对象存储，证明没有源码或 diff 正文进入平台。
 
-平台不会在每次合并后提交新的完整 Project Context。Git 保存基线与增量 Patch，平台按真实合并顺序生成物化视图。WorkItemCompletion、ActionRequest、评分运行和 AcceptanceRun 保存在平台及外部签名证明中，不制造仅为回写状态而改变分支头部的提交。
+#### 11.1.1 Provider 安装与仓库绑定
+
+项目管理员在平台内完成 Provider 接入，首版同时支持 GitHub、GitLab、Gitee、Azure DevOps 和 Bitbucket 的云端与企业部署。接入从一次短时 `ProviderConnectionIntent` 开始，固定 tenant、Provider family、部署类型、规范化 endpoint identity、认证方式、发起人、浏览器会话、回调地址、随机 state/PKCE 摘要、到期时间和单次消费状态。OAuth、App installation 或同类回调进入独立的 callback-edge 身份；自建部署的长期凭据只能通过一次性 Credential Broker 上传能力或客户密钥系统引用交付。浏览器、控制面业务库、Temporal 参数、日志和审计都不得出现 access token、refresh token、PAT、私钥或 OAuth code 明文。
+
+自建端点只允许 HTTPS，并经过规范化、DNS 重绑定防护、解析地址与证书校验、租户批准的网络出口策略和重定向禁止检查。私网端点必须使用显式企业 egress profile；任意 URL、回环、链路本地、元数据服务地址或调用过程中改变解析结果都会失败关闭。安装探测成功后生成租户级 `ProviderInstallation`；凭据轮换、权限变化、撤销或 endpoint/服务器版本变化都会增加 credential epoch、使相关 CapabilitySnapshot 失效并触发对账。
+
+仓库发现只读取允许的身份和配置元数据，向浏览器返回短时、签名、一次性的 opaque discovery ID、显示名称、部署标签和默认分支摘要，不返回可被当作权限主键的 Provider 数字 ID。管理员用 discovery ID 为明确项目发起 `RepositoryBindingOnboarding`。编排顺序固定为：校验 installation/discovery 当前性；由 Identity 创建 `PENDING_TRUST` RepositoryBinding；通过 Connector 执行 RepositoryProbe；生成签名 trust establishment 与 CapabilitySnapshot；由 Identity 原子保存不可变 trust receipt 并把该 Binding 转为 `ACTIVE`；Provider Registry 再建立只读技术 registration。最后一步失败时 Binding 立即进入 `RECONCILING`，不能被项目设置或交付流程选用，直到幂等恢复完成。
+
+只有同时满足 `Identity state=ACTIVE`、当前 trust receipt、当前 Provider registration、未过期 CapabilitySnapshot、该快照 credential epoch 与 installation 当前 epoch 完全一致且 installation 未撤销的 Binding 才是可选仓库。Identity 始终是 Binding 的唯一归属与生命周期权威；Provider Registry 不能自行创建、转移、激活、解绑或复活 Binding。改名只更新显示字段；转移、endpoint/installation/immutable repository 变化以及解绑复绑都必须走版本化 change request、重新认证、影响分析、双侧要求的确认、重新探测和新的 trust establishment。安装撤销会使其全部 Binding 进入 `RECONCILING` 或 `UNBOUND`，绝不能把失效安装静默替换为另一组凭据。
 
 ### 11.2 分支拓扑和上下文谱系
 
 ```mermaid
 flowchart LR
-    M["默认分支"] --> D["delivery/<batch-id>/develop"]
-    D --> W1["客户 work/<batch-id>/<work-item-id>/..."]
-    D --> W2["客户 work/<batch-id>/<work-item-id>/..."]
-    W1 -->|"代码 PR + Context Patch"| D
-    W2 -->|"代码 PR + Context Patch"| D
-    D -->|"已验收的最终候选"| M
+    B["Requirement Baseline"] --> R1["RepositoryWorkSet A"]
+    B --> R2["RepositoryWorkSet B"]
+    R1 --> D1["Provider A: delivery/<batch-id>/develop"]
+    R2 --> D2["Provider B: delivery/<batch-id>/develop"]
+    D1 --> W1["客户 WorkItem 分支 A"]
+    D2 --> W2["客户 WorkItem 分支 B"]
+    W1 -->|"代码 PR + 平台外 Context 证明"| D1
+    W2 -->|"代码 PR + 平台外 Context 证明"| D2
+    D1 --> C["CompletionSet"]
+    D2 --> C
 ```
 
-- `delivery/<batch-id>/develop` 是当前批次唯一共享开发分支，禁止直接推送和强推；
-- Requirement Publisher 从准入时固定的默认分支 SHA 创建初始提交，并发布准确批次清单和契约；
+- 每个 RepositoryWorkSet 在自己的仓库中拥有一个 `delivery/<batch-id>/develop` 共享开发分支，禁止直接推送和强推；
+- Branch Release Coordinator 从准入时固定的默认分支 SHA 创建零内容差异的 ref，不创建初始提交或修改仓库文件；
 - 客户团队按自己的命名规范创建 WorkItem 分支，但每个分支和 PR 必须声明 Batch、Requirement Revision、WorkItem 和责任人绑定；
-- 工作 PR 只合入当前共享开发分支；最终候选验证通过后，共享开发分支才合入默认分支；
+- 工作 PR 只合入所属仓库的当前共享开发分支；该仓库最终候选验证通过后，共享开发分支才合入本仓库默认分支；
 - 默认分支若因受控 hotfix 前进，必须先基于新头部重建最终候选，不能直接复用旧验收；
 - 候选冻结后不得再向候选树写入 Requirement、Patch 或其他元数据。任何 tree 变化都创建新的 Candidate ID。
 
 Project Context 具有分支谱系。每个 `(tenant_id, repository_id, lineage_id)` 最多一个 active Context Version；default lineage 与当前 delivery lineage 可以同时存在。每个 Version 固定 `basis_commit_sha + basis_tree_sha + code_fingerprint`，不能只绑定可移动 ref。
 
-批次创建时从默认分支 active Context 派生 batch lineage；每个工作 PR 真正合入共享开发分支后，Context Patch 才更新该 lineage。当前批次执行期间，平台可以用最新 batch lineage 为未来需求生成影响初稿，但必须显示准确 commit/tree 和 `basis_ref` 为交付分支而非已上线默认分支。
+批次创建时为每个 RepositoryWorkSet 从对应默认分支 active Context 派生 batch lineage；每个工作 PR 真正合入共享开发分支后，预先提交并绑定该 head commit 的 Context Patch 才更新该 lineage。当前批次执行期间，平台可以用每个仓库最新 batch lineage 为未来需求生成影响初稿，但必须显示准确 Provider、仓库、commit/tree 和 `basis_ref`，不能把多个仓库的上下文混成一个无来源画像。
 
 基于 delivery lineage 准备的 Requirement，只有在上一 Batch 已完成 lineage promotion，且新 Batch 从该晋级结果派生时才能复用；上一 lineage aborted、diverged 或未晋级时，必须对当前 default lineage 重新分析。最终合并时只执行 lineage promotion，不重复应用已经消费过的 Patch。
 
-### 11.3 Requirement Publisher
+### 11.3 Provider SPI、Connector 和能力门控
 
-Requirement Publisher 只能构造由平台批准的 `.requirements/**` blob、commit 和发布 PR，不能生成或修改源码、Context Patch、测试和构建文件，也不能签署任何人的确认。
+核心业务模块只依赖按能力拆分的 Provider SPI，不出现按 Provider 名称分支的业务规则。SPI 至少分为 Repository Identity、Refs、Change Requests、Checks、Protection、Merge、Webhooks、Reconciliation 和 Authentication；每个命令携带 tenant、Provider installation、不可变 repository ID、幂等键、预期版本或 head SHA，并返回规范化 OperationReceipt 与 Provider 原始对象 ID。
 
-严格模式创建初始交付分支前必须消除“先创建、后保护”的写入窗口：
+内置 Provider 适配器与外部适配器都运行在独立 Connector Runtime 中，通过 mTLS 与控制面通信。Connector 使用独立工作负载身份、数据库角色和网络出口；凭据由 Credential Broker 按安装实例提供，业务数据库只保存外部密钥引用。外部适配器不得作为第三方 JAR 动态加载进控制面 JVM。
 
-- Provider 支持保护未来 ref pattern 时，先安装并证明 `delivery/**` 保护规则，再允许 Publisher 使用 `expected_default_head_sha`、create-ref CAS 和一次性 bootstrap commit 创建分支；该 commit 相对 default 的唯一 diff 必须是 `.requirements/**`；
-- Provider 不支持保护未存在 ref 时，先从 default 创建无内容差异的 delivery ref，启用并证明保护，再由 Publisher 发起 metadata-only PR，并由 Merge Controller 合并；该 Provider 不允许使用直接 bootstrap 路径。
+能力准入由三层证据组成：
 
-已存在同名 ref 时创建失败。后续 BatchAmendment 由 Publisher 创建只修改允许路径的 PR；内容检查通过后按项目交付模式进入对应合并路径。路径所有权、actor、Schema、哈希、签名和 expected head 任一不一致时拒绝发布。
+1. `AdapterManifest` 声明适配器、SPI 和 Provider 版本范围及静态能力；
+2. `InstallationProbe` 实测服务器版本、认证方式、权限、API 和 Webhook；
+3. `RepositoryProbe` 实测具体仓库的保护分支、必需 check、审批和条件合并语义。
+
+三层结果生成带证据、有效期和版本的不可变 `CapabilitySnapshot`。`STRICT_V1` 至少要求不可变仓库身份、准确 create-ref、准确 ChangeRequest head、验签 Webhook 与主动对账、必需 check/approval、expected-head 条件合并、最终 merge commit、保护策略漂移检测和合格的非个人执行身份。凭据、权限、保护策略、Provider 或适配器版本变化会立即使快照失效并冻结严格操作，禁止静默降级。
+
+严格模式创建交付分支前必须消除“先创建、后保护”的窗口：Provider 支持未来 ref pattern 时先证明 `delivery/**` 保护规则，再使用 `expected_default_head_sha` 与 create-ref CAS；不支持未来 ref pattern 时先创建零内容差异 ref，立即安装并证明保护，在此期间 WorkItem 不可见且不可开工。无法证明窗口受控的 Provider/版本不能取得严格模式认证。
 
 ### 11.4 标准协作模式
 
-标准模式使用企业已有 Git 合并队列、代码负责人和管理员体系。平台在合并前提供必需检查，在合并后通过 Webhook 与主动对账验证实际结果。
+标准模式使用企业已有 Git 合并队列、代码负责人和管理员体系。分支和 ChangeRequest 由平台登记并持续管理，开发者仍直接向 Provider push 代码。平台在合并前提供必需检查，在合并后通过 Webhook 与主动对账验证实际结果；Provider UI 或 API 中发生的平台外变更必须作为偏差事件导入，而不是被忽略。
 
 平台可以承诺：正常路径会检查 Revision、角色、hold、测试、Context Patch 和候选；旁路会被检测、审计并触发恢复。平台不能承诺：拥有仓库超级权限的管理员永远无法绕过原生保护。
 
@@ -840,7 +865,29 @@ Requirement Publisher 只能构造由平台批准的 `.requirements/**` blob、c
 
 平台保存 `branch_policy_digest`，至少覆盖允许 push/merge 的主体、必需 checks、管理员绕过设置、强推与删除、合并队列规则和目标 refs。接入、批次冻结、每次严格合并前以及周期对账时都要重取 Provider 配置并签发 attestation。
 
-Git 路径所有权只是控制措施，不等同于不可变证明。正式历史的完整性由受保护 ref、外部签名、平台追加式审计和对账共同保证。
+正式历史的完整性由受保护 ref、外部签名、平台追加式审计和对账共同保证。一个跨仓库 Requirement 只有在全部相关仓库的保护与 CapabilitySnapshot 同时有效时才能继续严格流程；单仓库恢复不能误报整个 Requirement 已恢复。
+
+### 11.7 Provider 认证与身份隔离
+
+用户通过企业 OIDC/SAML 登录；Connector 工作负载身份、Provider 执行身份和 Webhook 验签身份相互独立。Provider 写操作使用每个安装实例专属的非个人身份，平台审计同时保存发起操作的自然人身份和执行操作的机器身份。
+
+| Provider | 首选生产认证 | 严格模式认证要求 |
+| --- | --- | --- |
+| GitHub Cloud / Enterprise Server | GitHub App installation token | 短期令牌、仓库级授权及所需规则/Webhook 能力完整 |
+| GitLab SaaS / Self-Managed | OAuth 应用或项目/组服务身份短期令牌 | 可过期轮换，保护分支、审批与条件合并满足策略 |
+| Gitee / Gitee Enterprise | OAuth 应用与专用服务账号 | 对应版本通过审计、Webhook 和保护能力认证 |
+| Azure DevOps Services / Server | Entra 服务主体、托管身份或 Server 支持的服务身份 | 非个人、可轮换、可限定范围并通过版本认证 |
+| Bitbucket Cloud / Data Center | OAuth 应用或工作区服务身份 | 短期令牌、审批、检查与受控合并能力通过认证 |
+
+长期刷新凭据只存外部密钥系统，短期访问令牌只存在 Connector 内存。个人 PAT、SSH 私钥和 App Password 只允许迁移或普通模式，不能进入严格模式。安装实例、租户、仓库和凭据缓存键必须同时参与隔离，禁止跨租户复用。
+
+### 11.8 Git 操作一致性
+
+所有 Provider 写操作先在 PostgreSQL 事务中保存外部 intent、规范化请求摘要和全局幂等键，再由 Temporal 编排 Connector 调用。超时后不知道动作是否成功时，不得直接重放写请求；必须先按 Provider 对象 ID、关联标记、ref 和 expected head 查询外部事实，证明未发生后才能重试。
+
+Webhook 按 Provider 事件 ID 去重，但不假设有序或完整。旧事件不能覆盖更新的对象版本；后台主动对账负责发现缺口、保护漂移和平台外写入。限流按 Provider 安装实例独立预算并遵守 `Retry-After`，一个安装实例熔断不能阻塞其他租户或 Provider。
+
+分支发布、PR 或跨仓库合并部分成功时不自动执行破坏性补偿。已经合并的仓库保留精确结果，整体进入部分发布或部分交付；修复操作必须创建新的受审计 intent、WorkItem 或回退决策。
 
 ## 12. 开发执行、WorkItem 与 Context Patch
 
@@ -854,13 +901,13 @@ WorkItem 是开发侧对已确认 Requirement 的可执行拆分，至少包含�
 
 ### 12.2 本地 Codex 开发流程
 
-开发者拉取 `delivery/<batch-id>/develop` 和本人 WorkItem 分支后，由本地 Codex：
+开发者先通过 `accordctl` 获取本人 RepositoryWorkSet 的签名开发任务包，再使用原生 Git 拉取 `delivery/<batch-id>/develop` 和本人 WorkItem 分支，由本地 Codex：
 
-1. 验证 `agent-pack.lock`、Batch Manifest、Requirement Contract、Revision、Assignment 和分支基线；
+1. 验证任务包中的 Agent Pack lock、Batch Manifest、Requirement Baseline、Revision、Assignment、Provider、不可变仓库 ID 和分支基线；
 2. 读取正式业务目标、开发转译、影响初稿、证据引用、WorkItem 和验收映射；
 3. 在客户环境读取源码，制定实现和测试计划并修改代码；
 4. 运行必要检查，生成 Context Patch 或请求客户 CI 签发 `no_context_change`；
-5. 生成结构化开发说明、风险、测试结果和未决问题，随 PR 提交。
+5. 生成结构化开发说明、风险、测试结果和未决问题，通过 `accordctl` 或平台 API 提交，并绑定准确 PR 与 head commit。
 
 平台已基于 Project Context 生成需求影响初稿，因此开发者不需要对每条新需求先进行一次全仓本地复核才能开始讨论。开发阶段的本地 Codex仍须针对实际代码变更验证实现范围和生成 Patch，因为此时它读取的是即将提交的真实 diff。
 
@@ -871,10 +918,10 @@ WorkItem 是开发侧对已确认 Requirement 的可执行拆分，至少包含�
 每个进入共享开发分支的 PR 至少校验：
 
 1. tenant、repository、Batch、Requirement Revision、WorkItem、Assignment、源分支、目标分支和实际 Git 身份映射一致；commit author 不能单独证明人员身份。
-2. `.requirements/**` 未被开发者修改，`.agent-context/**` 修改只属于本 PR 的 Patch 或声明。
+2. 当前任务包摘要、Agent Pack 版本和平台中的 Context Patch/`no_context_change` 候选绑定本 Provider、仓库、PR 和 head commit；仓库内不存在由平台写入需求正文或 Context 文档的前提。
 3. PR 基于允许的批次基线；合并队列针对最新 target head 重建候选，旧绿灯不能复用。
 4. 所有相关 ConfirmationReceipt、DeliveryCommitment 和角色绑定有效，无相交 blocking hold。
-5. Context Patch payload 的 Schema、起始 Context Version 和证据有效，且外部 CI attestation 绑定准确 PR、head/tree、normalized code diff 与 payload digest；或存在同等绑定的客户 CI `no_context_change`。
+5. Context Patch payload 的 Schema、起始 Context Version 和证据有效，且外部 CI attestation 绑定准确 PR、head/tree、normalized code diff digest 与 payload digest；或存在同等绑定的客户 CI `no_context_change`。
 6. 自动测试、静态检查、迁移检查和验收映射达到项目策略要求。
 7. 代码路径 allowlist、CODEOWNERS 和人工范围审核通过；符号、接口和依赖分析作为风险信号，无法静态证明完整范围时不得伪装成绝对保证。
 8. 高风险变更的安全、数据、兼容和回滚检查满足支持矩阵规则。
@@ -904,7 +951,8 @@ Patch 只有在以下条件同时成立时应用一次：
 
 ```text
 provider_merge_fact_matches_the_attested_pr_and_target
-&& actual_result_tree_and_normalized_code_diff_match_ci_attestation
+&& provider_merge_metadata_and_actual_result_tree_match_ci_attestation
+&& signed_normalized_code_diff_digest_is_bound_to_the_same_ci_attestation
 && work_item_completion_binds_the_actual_merge_sha_and_result_tree
 && (source_context_version_matches_current_context
     || valid_patch_rebase_record_targets_current_context)
@@ -913,15 +961,15 @@ provider_merge_fact_matches_the_attested_pr_and_target
 && actual_merge_is_after_previous_watermark_in_git_order
 ```
 
-合并前 CI 不签署尚未知晓的 actual merge SHA。它签署不可变 repository ID、PR ID、source head SHA、verified target head SHA、merge-group/result tree SHA、normalized code diff、`patch_payload_digest`、测试和工具版本；真实合并后由 WorkItemCompletion 绑定 actual merge SHA 与 result tree。平台验证 Provider PR merge 事实、实际 result tree 和 normalized code diff，再消费 Patch；除非合并策略保证 ancestry，不要求 squash/rebase 后的实际 merge commit 包含 source head。
+合并前 CI 不签署尚未知晓的 actual merge SHA。它签署不可变 repository ID、PR ID、source head SHA、verified target head SHA、merge-group/result tree SHA、normalized code diff digest、`patch_payload_digest`、测试和工具版本；真实合并后由 WorkItemCompletion 绑定 actual merge SHA 与 result tree。平台核对 Provider PR merge 事实和实际 result tree 与客户 CI 证明中相应 Provider 元数据的一致性，并校验已签名 normalized code diff digest 的格式和绑定关系后再消费 Patch；平台不读取或重算 diff 正文。除非合并策略保证 ancestry，不要求 squash/rebase 后的实际 merge commit 包含 source head。
 
 Webhook 到达顺序不代表 Git 合并顺序。平台按受保护 ref 的提交祖先关系和 Provider 记录确定顺序；存在缺口时暂停后续 Receipt 和 Patch，进入对账。并行 PR 的 source Context 已落后时，合并队列必须在最新 Context 上重跑客户 CI，或由客户 CI 签发绑定最新 Context 与相同 Patch payload 的 PatchRebaseRecord；否则标记 `conflict`。平台不能自行静默重放并宣称已验证。
 
-`no_context_change` 也必须绑定准确 PR、diff、verified target head、result tree、分析器和签名，并通过 ContextMergeReceipt 推进 merge watermark。任何代码 PR 都不因没有业务需求 ID 而免除上下文维护要求。
+`no_context_change` 也必须绑定准确 PR、normalized code diff digest、verified target head、result tree、分析器和签名，并通过 ContextMergeReceipt 推进 merge watermark。任何代码 PR 都不因没有业务需求 ID 而免除上下文维护要求。
 
 ### 12.5 完成证明
 
-开发者点击“完成”只创建完成候选。真实 PR 合并后，客户 CI 与 Webhook 共同产生不可改写的 WorkItemCompletion，绑定实际 merge SHA、tree、diff、Patch、测试、构建证明和责任人绑定。
+开发者点击“完成”只创建完成候选。真实 PR 合并后，客户 CI 与 Provider 事实共同产生不可改写的 WorkItemCompletion，绑定 Provider、不可变仓库 ID、实际 merge SHA、tree、normalized diff digest、Patch、测试、构建证明和责任人绑定。
 
 WorkItemCompletion 保存在平台追加式记录和客户 CI attestation 中，不靠新的状态写回 commit。需求级 `dev_complete` 由全部未取消必需 WorkItem 的有效 Completion，以及取消项所需 cleanup/no-code proof 派生，不能由客户端直接设置。
 
@@ -1003,7 +1051,7 @@ CorrectionRun 不是新的业务需求，也不重新解释原目标。它绑定
 | Business Acceptance Owner | 以业务侧身份对准确 Candidate 执行最终需求验收，可与 Business Principal 兼任 |
 | Auditor | 只读查看契约、回执、证明、事件和导出报告 |
 
-Requirement Publisher、Merge Controller、客户 CI signer、通知服务和附件扫描服务是独立机器身份，不承担人的确认职责。
+Connector Runtime、Credential Broker、Merge Controller、客户 CI signer、通知服务和附件扫描服务是独立机器身份，不承担人的确认职责。
 
 成员权限由 `side × role × scope` 的交集决定。Tenant Admin 或 Project Admin 身份只提供租户/项目运维能力，不会自动赋予业务侧或开发侧确认、评分、例外或验收权限；管理员要执行这些动作，必须同时具有对应侧的有效角色绑定。
 
@@ -1011,11 +1059,11 @@ Requirement Publisher、Merge Controller、客户 CI signer、通知服务和附
 
 普通模式和严格模式都必须为业务侧、开发侧各指定一个最高负责人。普通成员不能因为项目内没有更高级角色而自动获得最终确认权。
 
-同一侧角色兼任由项目策略配置。严格模式允许管理员等级或本侧最高负责人一人兼任本侧的项目管理、评估、批准和验收等角色，以适配小团队；一次相同事实只需确认一次，不制造重复点击。
+同一侧角色兼任由项目策略配置。严格模式允许管理员等级或本侧最高负责人一人兼任本侧的项目管理、评估、批准和验收等角色，以适配小团队；一次相同事实只需确认一次，不制造重复点击。需要同一自然人同时担任两侧最高负责人时，必须使用预先配置、限定项目范围并可随时撤销的 `DualRole Principal Admin`，普通 Tenant Admin/Project Admin 不能临时自我提权。
 
 最终 AcceptanceRun 必须由 business side 的 Business Acceptance Owner 签署。开发侧负责提交测试和实现证据、参与 FailureDisposition；技术验收可以作为开发侧检查，但不能替代业务验收。外部供应商不得验收自己的交付。
 
-严格模式仍要求业务侧最终确认与开发侧最终确认来自不同自然人账号。供应商成员可以在明确授权下代表开发侧执行评估或开发，但只有绑定为 Development Principal 或有效代理时才能作本侧最终确认。
+严格模式默认仍要求业务侧最终确认与开发侧最终确认来自不同自然人账号；只有上述 `DualRole Principal Admin` 例外可以跨侧兼任，并始终显示降低职责分离强度的保证标签。供应商成员可以在明确授权下代表开发侧执行评估或开发，但只有绑定为 Development Principal 或有效代理时才能作本侧最终确认。
 
 标准模式默认也保持跨侧账号分离；租户策略允许降低时，界面必须显著显示保证等级，且不能对外宣称严格职责分离。
 
@@ -1209,20 +1257,24 @@ CorrectionRun 可以使 `in_acceptance → in_development`。默认分支尚未�
 
 - `operational_state = active / suspended`；
 - `consistency_state = converged / reconciliation_required / reconciling / diverged`；
-- `assurance_state = standard / strict / degraded`。
+- `assurance_state = standard / strict / degraded`；
+- `repository_release_coverage = none / partial / complete`；
+- `repository_delivery_coverage = none / partial / complete`。
 
-`suspended` 可恢复且不覆盖主阶段；`aborted` 是终态，重新交付必须创建新 Batch。
+`partial` 只描述跨仓库覆盖度，不能被映射为整体 `ready` 或 `completed`。`suspended` 可恢复且不覆盖主阶段；`aborted` 是终态，重新交付必须创建新 Batch。
 
 ### 16.4 开发与上下文对象
 
 | 对象 | 生命周期 |
 | --- | --- |
+| RepositoryWorkSet | `planned → branch_releasing → ready → in_development → candidate_ready → delivered`，或 `partially_failed / cancelled` |
 | WorkItem | `planned → ready → in_progress → in_review → completed`，或 `cancelled` |
 | Assignment | `proposed → active → ended`，拒绝、撤销和失效以事件记录 |
 | DevelopmentRun | `planned → in_progress → completion_pending → completed`，或 `abandoned` |
 | ProjectContextVersion | `candidate → active → superseded`，或 `rejected` |
 | ProjectContext health | `current / stale / rebuild_required` |
 | ContextPatch | `pending → validated → merged_unapplied → applied`，或 `rejected / orphaned / conflict / superseded` |
+| CompletionSet | `collecting → partial_delivery → complete`，或 `reconciliation_required`；每个仓库条目不可改写并绑定精确 Provider 事实 |
 
 WorkItem 的 blocked 是 blocker overlay，不覆盖真实阶段。ProjectContextVersion 的“当前生效版本”和整体健康度分开，因此 active 版本可以同时处于 `health: stale`，表达“当前只能使用这一版，但它已落后”。
 
@@ -1263,7 +1315,7 @@ AbortDecision、CancellationDecision、ContextMergeReceipt 和 AcceptanceContinu
 
 ### 16.8 聚合与并发规则
 
-页面进度通过事件和当前对象确定性派生，不能由客户端直接设置。所有聚合使用 sequence number 和 compare-and-swap；缓存投影可以重建，不能成为批准、合并或验收的唯一依据。
+页面进度通过事件和当前对象确定性派生，不能由客户端直接设置。所有聚合使用 sequence number 和 compare-and-swap；缓存投影可以重建，不能成为批准、合并或验收的唯一依据。跨仓库命令以 RepositoryWorkSet 为并发与恢复边界，DeliveryBatch 只聚合已经持久化的仓库级事实，不持有跨 Provider 数据库锁。
 
 同一命令重试返回原结果；不同命令竞争同一 expected version 时只有一个成功。事件至少保存 aggregate type、aggregate ID、tenant、sequence、causation ID、correlation ID、actor、payload schema 和时间，保证能还原 Requirement、Batch、WorkItem、Candidate 和验收的完整因果链。
 
@@ -1292,7 +1344,8 @@ AbortDecision、CancellationDecision、ContextMergeReceipt 和 AcceptanceContinu
 
 以下用途使用不同 purpose、凭证和最小权限：
 
-- Requirement publication；
+- Requirement Baseline 与开发任务包签名；
+- Provider 分支/ChangeRequest 控制与对账；
 - strict merge authorization；
 - 客户 CI context/test attestation；
 - artifact build provenance；
@@ -1301,23 +1354,23 @@ AbortDecision、CancellationDecision、ContextMergeReceipt 和 AcceptanceContinu
 
 证明统一使用 DSSE envelope，payload 使用 RFC 8785 JCS JSON。签名载荷明确包含 `payload_type`、schema version、algorithm、key ID、tenant、immutable repository ID、对象 ID、内容 digest 和 domain separation string。
 
-长期 publication、confirmation 和 acceptance attestation 不使用短时过期来破坏历史验证。Key Trust Record 保存 purpose、valid-from、compromised-at、revoked-at、revocation mode、签署时间和独立审计锚定时间；只有在可信有效区间内生成并已锚定的长期证明可继续信任。无法确定密钥泄露起点时，相关运行时对象 suspended，并从最后可信锚点重新确认。短期 merge、break-glass 和一次性授权 token 必须绑定准确 repo/ref/head/candidate/diff、nonce 和 expiry，并原子单次消费。
+长期 baseline/package publication、confirmation 和 acceptance attestation 不使用短时过期来破坏历史验证。Key Trust Record 保存 purpose、valid-from、compromised-at、revoked-at、revocation mode、签署时间和独立审计锚定时间；只有在可信有效区间内生成并已锚定的长期证明可继续信任。无法确定密钥泄露起点时，相关运行时对象 suspended，并从最后可信锚点重新确认。短期 Provider 操作、merge、break-glass 和一次性授权 token 必须绑定准确 installation/repo/ref/head/candidate、nonce 和 expiry，并原子单次消费。
 
 客户 CI 优先使用客户控制的 OIDC workload identity 或登记公钥。运行不受信任项目代码的 runner 不能持有平台发布、严格合并或其他租户的长期签名私钥。
 
 ### 17.4 租户和资源隔离
 
-所有资源都绑定 `tenant_id`；repository-scoped 资源额外绑定 immutable repository ID。数据库唯一约束、对象存储 key、缓存 key、搜索索引、队列消息和日志上下文统一使用 `{tenant_id, scope_type, scope_id}`，不得为租户级、身份源或仓库绑定前对象伪造 repository ID。所有查询在服务端注入租户与资源范围，不能依赖前端隐藏。
+所有资源都绑定 `tenant_id`；repository-scoped 资源以平台内部 `repository_binding_id` 作为权限和作用域主键，并保留或引用完整 `{Provider family, normalized endpoint identity, installation identity, immutable repository ID}` 作为外部事实证据。数据库唯一约束、对象存储 key、缓存 key、搜索索引、队列消息和日志上下文统一使用 `{tenant_id, scope_type, scope_id}`，不得为租户级、身份源或仓库绑定前对象伪造 repository identity。所有查询在服务端注入租户与资源范围，不能依赖前端隐藏。
 
-V1 禁止同一 Git Provider repository 同时绑定多个 tenant。仓库改名不改变 immutable repository identity；仓库转移、解绑和重新绑定需要管理员重新认证、对账和新的 trust establishment。
+V1 禁止同一准确 `{Provider family, normalized endpoint identity, immutable repository ID}` 同时绑定多个 tenant。每个 RepositoryBinding 唯一绑定 tenant、project、Provider installation 和 Provider 返回的 immutable repository identity；同一项目可绑定多个仓库和安装实例，不同自建端点上相同的数字 ID 不发生碰撞。仓库改名不改变该身份，仓库转移、安装实例变化、解绑和重新绑定需要管理员重新认证、对账和新的 trust establishment。
 
 附件使用租户/项目级前缀、服务端加密、传输加密和短时授权。模型供应商接收的内容遵循租户的数据处理配置；默认不发送源码正文，不允许供应商把客户数据用于训练。日志和遥测执行敏感字段过滤，禁止记录附件正文、令牌、密钥和源码片段。
 
 ### 17.5 Agent Pack 供应链
 
-Agent Pack、Schema、validator 和安装脚本都必须有版本、内容清单、签名、来源和兼容矩阵。安装器先验证签名和 digest，再修改客户仓库；`agent-pack.lock` 固定准确版本。
+Agent Pack、Schema、validator 和安装脚本都必须有版本、内容清单、签名、来源和兼容矩阵。安装器先验证签名和 digest，再写入开发者明确选择的本地 Codex 资源目录；只有客户主动选择仓库托管模式时才由开发者自己的 Git 操作修改客户仓库。平台中的 `agent_pack_lock_digest` 固定准确版本。
 
-升级或回退通过客户 PR 完成，不在线热替换。Pack 撤销分为：
+升级或回退由开发侧通过平台动作确认并重新安装；选择仓库托管模式的客户再通过自己的 PR 完成，不在线热替换。Pack 撤销分为：
 
 - `new_use_blocked`：禁止新分析和新 Batch 使用，历史结果保留，现有批次按风险评估继续；
 - `trust_revoked`：存在可能影响结果可信度的严重缺陷，冻结依赖该 Pack 的评分、确认、Ready Pool 资格、Commitment 和 Candidate，并按依赖范围重新分析、重新确认或重建 Context；
@@ -1343,7 +1396,7 @@ Agent Pack、Schema、validator 和安装脚本都必须有版本、内容清单
 
 业务事务与 outbox 在同一数据库事务提交。消费者使用 inbox/幂等键处理重复消息；外部调用记录 intent、request digest、provider request ID 和最终结果。worker 在调用前后崩溃时，通过 Provider 查询和对账决定重试或收敛，不能盲目重复不可幂等动作。
 
-Webhook 只作为低延迟信号，不作为唯一事实来源。平台保存 Provider 游标并周期性主动查询 ref、commit、PR、check、merge actor、保护配置和制品状态。事件到达乱序时按 Git 祖先关系和 Provider 事实重建。
+Webhook 只作为低延迟信号，不作为唯一事实来源。平台按安装实例与仓库保存 Provider 游标，并周期性主动查询 ref、commit/tree hash、PR、check、merge actor、保护配置和制品状态。事件到达乱序时按 Provider 对象版本、观察时间和允许的 Git 元数据关系重建，不调用源码或 diff 接口。
 
 ### 18.2 暂停与对账触发
 
@@ -1356,9 +1409,11 @@ Webhook 只作为低延迟信号，不作为唯一事实来源。平台保存 Pr
 - 签名密钥撤销、身份映射异常或 CI proof 与实际 diff 不符；
 - 实际默认分支 tree、Candidate、验收记录或 artifact digest 不一致；
 - Git Provider、制品库或 merge API 返回不确定结果；
+- Provider 凭据、适配器版本、权限或 CapabilitySnapshot 失效；
+- 跨仓库分支发布、ChangeRequest 或合并只有部分成功；
 - 契约附件撤权或恶意文件检测结果发生变化。
 
-对账从外部权威 API 的当前状态开始，重建 refs、PR、checks、实际 merge 顺序、结构化 Accord 文件、Patch watermark、候选和制品状态。平台仍不读取源码正文。无法收敛时标记 `diverged`，保持失败关闭并升级人工处置。
+对账从外部权威 API 的当前状态开始，按 RepositoryWorkSet 重建 refs、PR、checks、实际 merge 顺序、Patch watermark、候选、能力快照和制品状态，再由 CompletionSet 聚合。平台仍不读取源码、diff 或仓库文件正文。无法收敛时标记 `diverged`，保持失败关闭并升级人工处置。
 
 恢复必须消除触发原因、补齐或重建 Project Context、生成新的有效 Candidate，并对受影响验收重新确认。不能简单把 `suspended` 手工切回 active。
 
@@ -1404,7 +1459,7 @@ Break-glass 不得绕过租户隔离、伪造业务确认、伪造人工验收�
 | --- | --- | --- |
 | Agent 暂时不可用 | 手工填写结构化表单、查看历史 | 自动提取、AI 评分和新影响建议暂停；人工确认仍须满足策略 |
 | 平台暂时不可用 | 已拉取分支可本地开发并记录离线问题 | 正式发布、严格合并、确认和验收暂停 |
-| Git Provider 不可用 | 平台继续录入、澄清和评分 | 分支发布、PR 对账、合并和候选生成暂停 |
+| 单个 Git Provider 或安装实例不可用 | 平台继续录入、澄清和评分；其他不相关安装实例继续运行 | 受影响 RepositoryWorkSet 的分支发布、PR 对账、合并和候选生成暂停，跨仓库整体显示部分状态 |
 | OSS 不可用 | 查看已缓存的非敏感摘要 | 新附件、需附件的确认和验收暂停 |
 | 通知渠道不可用 | 使用站内待办 | 外部消息重试，不自动通过动作 |
 | 客户 CI 不可用 | 需求准备继续 | Context 激活、代码合并、Candidate 和制品证明暂停 |
@@ -1415,9 +1470,14 @@ Break-glass 不得绕过租户隔离、伪造业务确认、伪造人工验收�
 ```text
 batch_completed =
   batch.phase == reconciling
-  && accepted_candidate.validity == active
-  && actual_default_tree_sha == accepted_candidate.repository_tree_sha
-  && artifact_policy_is_satisfied
+  && completion_set.state == complete
+  && every_repository_work_set_satisfies(
+       accepted_candidate.validity == active
+       && actual_default_tree_sha == accepted_candidate.repository_tree_sha
+       && exact_provider_repository_commit_tree_and_artifact_are_bound
+       && context_watermark_covers_all_actual_protected_merges
+       && repository_consistency_state == converged
+       && artifact_policy_is_satisfied)
   && every_active_commitment_satisfies(
        all_required_workitems_have_valid_completions
        && (completed_passed_acceptance_on_current_candidate
@@ -1426,7 +1486,6 @@ batch_completed =
        signed_cancellation
        && (required_cleanup_completions_and_final_tree_absence_proof
            || valid_no_code_proof))
-  && context_watermark_covers_all_actual_protected_merges
   && no_blocking_hold_or_required_action
   && consistency_state == converged
   && assurance_claim_matches_actual_mode
@@ -1435,7 +1494,7 @@ batch_completed =
        && branch_policy_was_attested_at_merge_time)
 ```
 
-`completed_passed_acceptance` 要求 AcceptanceRun `phase=completed && result=passed && validity=active`。`artifact_policy_is_satisfied` 表示制品项目的 Candidate 已经 `promoted` 且晋级同一已验收 digest；`source_tree_only` 项目已经明确声明无独立制品保证且 Candidate 至少为 `reconciled`。满足全部条件后才能原子进入 `completed`，任何缓存状态或管理员点击都不能替代公式。
+`completed_passed_acceptance` 要求 AcceptanceRun `phase=completed && result=passed && validity=active`。`artifact_policy_is_satisfied` 表示制品项目的仓库级 Candidate 已经 `promoted` 且晋级同一已验收 digest；`source_tree_only` 项目已经明确声明无独立制品保证且 Candidate 至少为 `reconciled`。CompletionSet 必须覆盖全部未取消 RepositoryWorkSet，不能用一个仓库的成功填补另一个仓库的未知结果。满足全部条件后才能原子进入 `completed`，任何缓存状态或管理员点击都不能替代公式。
 
 ## 19. 产品指标、模型评测与生产验证
 
@@ -1486,7 +1545,7 @@ value_gate_pass =
 | 效率 | time-to-ready、Batch lead time、ActionRequest 等待时间 | 门禁导致整体交付失速 |
 | 质量 | 首次验收通过率、需求型缺陷逃逸率、CorrectionRun 次数 | 分数好看但交付仍错误 |
 | 可信度 | 无证据关键 claim、关键风险漏报、错误影响判断、无效阻塞 | Agent 产生错误确定性 |
-| 采用 | 符合条件需求进入正式契约的比例、重复使用率、未完成确认率 | 团队绕开平台 |
+| 采用 | 符合条件需求进入正式 Requirement Baseline 的比例、重复使用率、未完成确认率 | 团队绕开平台 |
 | 治理 | AI Override、break-glass、标准模式旁路和人工豁免比例 | 通过例外掩盖系统问题 |
 | 数据 | 未决返工归因比例、工时缺失率 | 主指标被选择性记录 |
 
@@ -1530,7 +1589,15 @@ value_gate_pass =
 - 模式保证：标准模式旁路在 SLO 内被发现且不产生错误 completed；严格模式正常合并 100% 来自 Merge Controller；
 - 故障注入：worker 在外部调用前后崩溃、Provider 限流、模型超时、OSS 隔离、CI 结果迟到、密钥撤销和制品晋级不确定；
 - 恢复演练：Context 重建、Webhook 对账、数据库时间点恢复、break-glass 后恢复 strict 和 Batch abort 清理；
-- 数据边界：平台数据库、日志、消息和对象存储中不得出现客户源码正文。
+- 数据边界：平台数据库、Temporal、日志、Trace、消息和对象存储中不得出现客户源码、diff 正文或 Provider 凭据。
+
+#### Provider 认证门禁
+
+每个适配器必须通过统一 Provider TCK，验证规范化语义、幂等、错误分类、能力诚实性、端点允许清单和契约兼容。Mock 只用于单元测试；认证状态必须来自真实 SaaS 沙箱或明确版本的自托管环境，并固定 Provider 类型、部署形态、服务器/API 版本、认证方式、适配器版本和能力快照策略。
+
+生产级 V1 的五类内置 Provider 都必须至少有一行真实环境通过的普通模式认证。严格模式只对矩阵中真实通过完整严格旅程的具体组合开放；缺少许可证、测试环境或控制入口时标为 `unsupported` 或 `limited_availability`，不能用模拟器冒充生产支持。外部适配器默认普通模式，只有在兼容、安全、故障恢复和源码边界认证全部通过后才可获得签名严格能力证明。
+
+Provider 黑盒认证必须使用打包后的服务和公开 API 完成接入、能力探测、分支发布、跨仓库 WorkItem、PR/check、双方确认、合并、部分交付和恢复，不得直接写业务数据库。故障矩阵至少注入写成功但响应超时、Webhook 重复/乱序/丢失、429、凭据撤销、Connector 崩溃、Temporal 重放、数据库故障切换和跨 Provider 部分成功。每次发布生成带内容摘要的认证报告；错误 `completed`、重复外部副作用、跨租户泄漏和非 Controller 严格合并的允许数量均为零。
 
 ### 19.6 初始生产 SLO
 
@@ -1560,7 +1627,7 @@ Agent、CI、构建和 Provider 等外部链路分别报告排队与执行 p50/p
 | M0 契约与信任底座 | Schema、JCS/DSSE、租户隔离、身份映射、审计和状态机可运行 | 平台、架构、安全 |
 | M1 业务需求闭环 | 业务画布、结构化录入、附件、Requirement Graph、双视图和版本差异可用 | 产品、设计、前后端、Agent |
 | M2 项目画像与评分 | 签名 Agent Pack、Context 基线/Patch、影响初稿、AssessmentPolicy 和双侧评分闭环 | Agent、开发工具、平台、客户 CI |
-| M3 对齐与正式发布 | Proposal、多轮确认、Ready Pool、DeliveryBatch、Publisher 和标准模式 Git 路径闭环 | 平台、Git 集成、客户研发 |
+| M3 对齐与正式发布 | Proposal、多轮确认、Ready Pool、跨仓库 DeliveryBatch、签名任务包、Provider Gateway 和标准模式 Git 路径闭环 | 平台、Git 集成、客户研发 |
 | M4 开发与验收 | WorkItem、Completion、Candidate、AcceptanceRun、CorrectionRun 和制品晋级闭环 | Git/CI、制品、验收体验 |
 | M5 严格交付与恢复 | Merge Controller、保护证明、对账、hotfix、break-glass、suspend/abort 恢复通过 | 平台、安全、SRE、Git 集成 |
 | M6 GA 认证 | 支持矩阵、模型评测、安全测试、故障演练、SLO 和价值试点全部过线 | 产品、质量、安全、SRE、客户成功 |
@@ -1569,7 +1636,9 @@ Agent、CI、构建和 Provider 等外部链路分别报告排队与执行 p50/p
 
 生产级 V1 包含：
 
-- 单仓库项目、一个部署绑定一个 Git Provider；
+- 一个业务项目关联多个仓库，仓库可跨 Provider；一个 Requirement 可拆分为多个仓库级 WorkItem；
+- 同一部署并行接入 GitHub、GitLab、Gitee、Azure DevOps 和 Bitbucket 的 Cloud/Enterprise 或 Self-Managed 形态；
+- 能力门控 Provider SPI、隔离 Connector、Credential Broker、版本化 CapabilitySnapshot 和外部适配器 SDK；
 - 企业内部协作和受限外部供应商协作；
 - 标准协作与严格交付两种独立保证；
 - 业务域/标准类型 Requirement Graph、画布、目录、搜索和双视图；
@@ -1578,7 +1647,7 @@ Agent、CI、构建和 Provider 等外部链路分别报告排队与执行 p50/p
 - 签名 Agent Pack、首次 Project Context、Context Patch 和重建；
 - 业务 `B`、开发人工 `H`、开发 AI `A`、`D=60%H+40%A`、项目阈值和异常 Override；
 - DevelopmentProposal、双边确认、Ready Pool 和持续需求准备；
-- 每仓库一个正常执行 DeliveryBatch、共享开发分支、WorkItem 和正式 Contract 发布；
+- 每仓库最多参与一个正常执行 DeliveryBatch、仓库级共享开发分支、签名任务包、WorkItem 和跨仓库 CompletionSet；
 - 标准模式检查/旁路恢复与严格模式唯一最终合并；
 - 不可变 Candidate、AcceptanceRun、CorrectionRun、定向复验和准确制品晋级；
 - ActionRequest、通知、代理、RBAC、追加式审计和恢复流程；
@@ -1588,11 +1657,12 @@ Agent、CI、构建和 Provider 等外部链路分别报告排队与执行 p50/p
 
 - 平台服务端拉取、保存、执行或修改客户源码；
 - 任意语言、框架、反射、代码生成和运行时行为的无边界理解承诺；
-- 大型 monorepo、跨仓库 Requirement 或多仓库共同 DeliveryBatch；
+- 大型 monorepo 的无边界分析、未认证的仓库规模或无限并发承诺；
+- 跨 Provider 原子事务、自动回滚已合并仓库或把部分交付伪装成整体成功；
 - 同一仓库多个正常执行 DeliveryBatch；
 - 平台自动生成业务代码、自动解决 Git 冲突或自动合并不确定范围；
 - Agent 代替业务、开发、验收或安全责任人作最终确认；
-- 公网公开附件、把临时 OSS URL 写进正式契约或把敏感原始材料提交 Git；
+- 公网公开附件、把临时 OSS URL 写进正式任务包或把敏感原始材料提交 Git；
 - 在支持矩阵之外沿用正式保证标签；
 - 把标准模式描述成管理员绝对不可绕过；
 - 重新构建制品并假定 digest 必然相同。
@@ -1603,7 +1673,8 @@ GA 不是一个笼统开关。每个认证单元由以下维度共同确定：
 
 ```text
 交付模式
-× Git Provider 及 API/保护能力版本
+× Git Provider、部署形态、API/保护能力版本、认证方式和适配器版本
+× 单仓库或跨仓库拓扑及参与 Provider 组合
 × 语言、框架主版本和 certified_release_bundle_digest
 × CI / artifact guarantee profile
 × 仓库规模与并发 WorkItem 上限
@@ -1618,7 +1689,7 @@ GA 不是一个笼统开关。每个认证单元由以下维度共同确定：
 
 一个认证单元进入 GA 必须同时满足：
 
-1. 目标用户能在无研发协助的情况下提出、理解、调整并确认需求，开发者能从发布分支直接让本地 Codex执行 WorkItem。
+1. 目标用户能在无研发协助的情况下提出、理解、调整并确认需求，开发者能用 `accordctl` 获取并验证任务包，再让本地 Codex 在对应原生 Git 分支执行 WorkItem。
 2. 主产品指标达到预注册目标，效率、质量、采用和数据完整性护栏通过。
 3. Requirement、Context、评分、发布、PR、候选、验收、CorrectionRun、hotfix、abort 和恢复端到端测试通过。
 4. 对应 Agent/框架单元达到 19.4 的数据量和准确性门槛。
@@ -1640,7 +1711,7 @@ GA 不是一个笼统开关。每个认证单元由以下维度共同确定：
 - Agent 质量跌破门槛：关闭受影响认证单元的自动建议，回到人工结构化流程或上一签名版本；
 - 价值指标在预注册观察窗未达标：停止新增 GA 客户和扩展支持矩阵，退回 Limited Availability 重新评审工作流，不降低安全门槛制造“通过”；
 - Provider 不再满足 strict 控制能力：该认证单元降级并暂停新严格批次，不静默变成 standard；
-- Agent Pack 需要回退：通过签名 PR 修改 `agent-pack.lock`，不在线改写客户固定版本；历史确认和审计载荷保持不变，当前是否仍可执行由 17.5 的撤销级别和 validity overlay 决定。
+- Agent Pack 需要回退：平台发布新的签名 lock，开发侧重新安装并确认；选择仓库托管模式的客户再自行通过 PR 修改本地文件。历史确认和审计载荷保持不变，当前是否仍可执行由 17.5 的撤销级别和 validity overlay 决定。
 
 ## 21. 设计结论
 
@@ -1651,16 +1722,17 @@ GA 不是一个笼统开关。每个认证单元由以下维度共同确定：
 1. Requirement Graph 是业务意图的唯一事实模型，业务与开发只是两种投影。
 2. Project Context 由客户侧读取源码生成、由 CI 证明分析来源并由开发侧确认 claim，平台只保存结构化结果并基于它转译。
 3. 开发先确认、业务再确认同一 Revision；评分、建议和例外都不能静默改写语义。
-4. 平台只发布正式需求契约，不操作源码；所有代码和测试仍由开发者、本地 Codex 和客户 CI 完成。
+4. 平台只发布签名 Requirement Baseline 和开发任务包，并控制 Git 元数据与受控合并，不向仓库写文档或操作源码；所有 clone、fetch、commit、push、代码和测试仍由开发者、本地 Codex 和客户 CI 完成。
 5. 标准模式如实承诺检查、检测和恢复，严格模式只有在控制全部正常合并入口时才承诺不可绕过。
-6. 验收绑定准确 Candidate 和制品；实现错误走原 Revision 的 CorrectionRun，需求变化才创建新 Revision。
-7. 成功最终由需求型返工是否下降衡量，而不是由文档数量、Agent 调用量或流程复杂度衡量。
+6. 一个项目可以跨 Provider 关联多个仓库；仓库级 WorkItem 独立执行，CompletionSet 只在全部准确 commit/tree/artifact/Context 证据齐全后完成，部分交付不自动回滚。
+7. 验收绑定准确 Candidate 和制品；实现错误走原 Revision 的 CorrectionRun，需求变化才创建新 Revision。
+8. 成功最终由需求型返工是否下降衡量，而不是由文档数量、Agent 调用量或流程复杂度衡量。
 
 这套设计允许需求在当前代码开发期间继续形成和确认，同时保证真正进入交付的每个 Revision 都有明确内容、证据、责任人、分支、实现结果和验收结论。
 
-## 附录 A：Requirement Contract 示例
+## 附录 A：Requirement Baseline 示例
 
-以下 digest 为示例值。唯一哈希输入为 `JCS({schema_version, requirement_id, revision_no, parent_revision_hash, semantic_payload})`；`revision_hash` 字段本身、人员、确认回执、DeliveryBatch 和 Commitment 位于哈希输入之外，其中发布信息只存在于独立 DSSE publication envelope。
+以下 digest 为示例值。唯一哈希输入为 `JCS({schema_version, requirement_id, revision_no, parent_revision_hash, semantic_payload})`；`revision_hash` 字段本身、人员、确认回执、DeliveryBatch 和 Commitment 位于哈希输入之外，任务包发布信息只存在于平台保存的独立 DSSE publication envelope。
 
 ```json
 {
@@ -1701,22 +1773,27 @@ GA 不是一个笼统开关。每个认证单元由以下维度共同确定：
         "content_hash": "sha256:8d44c02fa4ac6e7f0cfe46e4100fd123f98143680ad1c9d024f84e78f8abc456"
       }
     ],
-    "context_basis": {
-      "lineage_id": "LINEAGE-BATCH-2026-008",
-      "context_version": "CTX-00037",
-      "basis_ref": "delivery/BATCH-2026-008/develop",
-      "basis_commit_sha": "9a4e1ea3c6f575af738f99f52d535f50f9341abc",
-      "basis_tree_sha": "6df67dc32c7c9f6dd4c2f73a3f64ac294f82abcd",
-      "claim_digests": [
-        "sha256:aa24b3b3858934a00483068736912763174311d1b0d2c61d99b6643e4cdef789"
-      ]
-    },
+    "repository_contexts": [
+      {
+        "provider_installation_id": "PIN-GITHUB-001",
+        "repository_id": "REPO-ORDER-001",
+        "lineage_id": "LINEAGE-BATCH-2026-008-ORDER",
+        "context_version": "CTX-00037",
+        "basis_ref": "delivery/BATCH-2026-008/develop",
+        "basis_commit_sha": "9a4e1ea3c6f575af738f99f52d535f50f9341abc",
+        "basis_tree_sha": "6df67dc32c7c9f6dd4c2f73a3f64ac294f82abcd",
+        "claim_digests": [
+          "sha256:aa24b3b3858934a00483068736912763174311d1b0d2c61d99b6643e4cdef789"
+        ]
+      }
+    ],
     "development_view": {
       "affected_modules": ["order-service", "inventory-service"],
       "risks": ["物流状态与库存释放的并发一致性"],
       "work_items": [
         {
           "id": "WI-0042-01",
+          "repository_id": "REPO-ORDER-001",
           "scope": "取消事件与库存释放幂等处理",
           "covers_blocks": ["RB-001", "RB-002"]
         }
@@ -1854,7 +1931,7 @@ GA 不是一个笼统开关。每个认证单元由以下维度共同确定：
 }
 ```
 
-Context Patch payload 不包含自己的 digest、CI attestation digest、包含自身的 Git head/tree 或全 PR diff。客户 CI 的外部 DSSE attestation 单向引用 `patch_payload_digest`、repository/PR、source head、verified target head、verified result tree、normalized code diff、测试结果和签名身份；实际 merge SHA 只在合并后的 WorkItemCompletion 与 ContextMergeReceipt 中出现。
+Context Patch payload 不包含自己的 digest、CI attestation digest、包含自身的 Git head/tree 或全 PR diff。客户 CI 的外部 DSSE attestation 单向引用 `patch_payload_digest`、repository/PR、source head、verified target head、verified result tree、normalized code diff digest、测试结果和签名身份；实际 merge SHA 只在合并后的 WorkItemCompletion 与 ContextMergeReceipt 中出现。
 
 外部 DSSE 的 payload 至少包含以下字段；`verified_target_head_sha` 就是客户 CI 实际验证的预计合并基线：
 

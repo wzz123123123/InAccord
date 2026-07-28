@@ -1,0 +1,169 @@
+openapi: 3.1.0
+info:
+  title: Accord Control API
+  version: 0.1.0
+servers:
+  - url: https://api.accord.example
+security:
+  - browserSession: []
+  - oidc: []
+paths:
+  /actuator/health/liveness:
+    get:
+      summary: Report whether the control API process is live
+      operationId: getLiveness
+      security: []
+      responses:
+        '200':
+          description: Process is live
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                required: [status]
+                properties:
+                  status: { const: UP }
+  /actuator/health/readiness:
+    get:
+      summary: Report whether the control API is ready to serve traffic
+      operationId: getReadiness
+      security: []
+      responses:
+        '200':
+          description: Process and required dependencies are ready
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                required: [status]
+                properties:
+                  status: { const: UP }
+  /v1/contract-validations/{validationId}:
+    post:
+      summary: Validate a structured contract document
+      operationId: validateContract
+      security:
+        - browserSession: []
+        - oidc: []
+      x-browser-csrf-required: conditional
+      x-accept-policy: application/json-or-wildcard
+      x-problem-codes-by-status:
+        '400': [REQUEST_INVALID, JSON_INVALID]
+        '401': [AUTHENTICATION_REQUIRED]
+        '403': [AUTHORIZATION_DENIED, CSRF_VALIDATION_FAILED]
+        '404': [SCHEMA_NOT_FOUND, CONTRACT_VALIDATION_NOT_FOUND]
+        '406': [NOT_ACCEPTABLE]
+        '409': [IDEMPOTENCY_KEY_REUSED, COMMAND_IN_PROGRESS]
+        '412': [VERSION_CONFLICT]
+        '415': [UNSUPPORTED_MEDIA_TYPE]
+        '422': [DOCUMENT_SCHEMA_INVALID, VERSION_LIMIT_REACHED]
+      parameters:
+        - name: validationId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/ExpectedVersion'
+        - $ref: '#/components/parameters/BrowserCsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContractValidationRequest'
+      responses:
+        '201':
+          description: Validation result persisted
+          headers:
+            ETag:
+              required: true
+              schema: { type: string, pattern: '^"(0|[1-9][0-9]*)"$' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContractValidationResponse'
+        '400':
+          $ref: '#/components/responses/ProblemResponse'
+        '401':
+          $ref: '#/components/responses/ProblemResponse'
+        '403':
+          $ref: '#/components/responses/ProblemResponse'
+        '404':
+          $ref: '#/components/responses/ProblemResponse'
+        '406':
+          $ref: '#/components/responses/ProblemResponse'
+        '409':
+          $ref: '#/components/responses/ProblemResponse'
+        '412':
+          $ref: '#/components/responses/ProblemResponse'
+        '415':
+          $ref: '#/components/responses/ProblemResponse'
+        '422':
+          $ref: '#/components/responses/ProblemResponse'
+        default:
+          $ref: '#/components/responses/ProblemResponse'
+components:
+  securitySchemes:
+    browserSession:
+      type: apiKey
+      in: cookie
+      name: __Host-accord-session
+    oidc:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >-
+        Reuse is valid only for the same canonical request fingerprint. The fingerprint binds the
+        uppercase HTTP method, normalized path and sorted query pairs, route resource identifier,
+        RFC 8785 body digest, normalized If-Match value, request and response media types, API
+        contract version, authenticated tenant, and actor. Reuse with any changed bound field is 409.
+      schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$' }
+    ExpectedVersion:
+      name: If-Match
+      in: header
+      required: true
+      description: One canonical quoted non-negative aggregate sequence.
+      schema: { type: string, pattern: '^"(0|[1-9][0-9]*)"$' }
+    BrowserCsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: false
+      description: Required only for unsafe requests authenticated by browserSession.
+      schema:
+        type: string
+        minLength: 32
+        maxLength: 256
+        pattern: '^[A-Za-z0-9._~-]+$'
+  schemas:
+    ContractValidationRequest:
+      type: object
+      additionalProperties: false
+      required: [schema_id, document]
+      properties:
+        schema_id: { type: string, format: uri }
+        document: { type: object }
+    ContractValidationResponse:
+      type: object
+      additionalProperties: false
+      required: [validation_id, valid, document_digest, version]
+      properties:
+        validation_id: { type: string, format: uuid }
+        valid: { type: boolean }
+        document_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        version: { type: integer, minimum: 1 }
+    Problem:
+      $ref: '../json-schema/problem-details.schema.json'
+  responses:
+    ProblemResponse:
+      description: RFC 7807 error
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'

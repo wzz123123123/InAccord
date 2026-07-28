@@ -1,0 +1,16 @@
+{
+  "case": "INVALID_SHARED_IDENTITY",
+  "from": "control-api",
+  "to": "control-worker",
+  "fields": [
+    "service_account",
+    "identity.provider_name",
+    "identity.subject",
+    "identity.audience",
+    "external_secret.store.name",
+    "external_secret.remote_ref",
+    "external_secret.target_name",
+    "database.secret_name",
+    "image.repository"
+  ]
+}
