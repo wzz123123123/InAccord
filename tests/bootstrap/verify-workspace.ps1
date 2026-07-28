@@ -93,7 +93,11 @@ $approvedExtensions = @(
   '.properties', '.xml', '.html', '.css', '.svg', '.lock', '.lockfile', '.bat',
   '.jar', '.sha256'
 )
-$approvedExtensionlessNames = @('Dockerfile', 'gradlew')
+$approvedExtensionlessNames = @(
+  'Dockerfile',
+  'gradlew',
+  'org.springframework.boot.autoconfigure.AutoConfiguration.imports'
+)
 $generatedFileNames = @('.jqwik-database')
 $unexpectedRuntimeFiles = Get-ChildItem $sourceRoots -Recurse -File -ErrorAction SilentlyContinue |
   Where-Object {
